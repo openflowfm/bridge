@@ -433,41 +433,149 @@ var applyTask = new Task(applyStep);
 applyTask.interval = 2;
 
 // --- palette ----------------------------------------------------------
-// Live exposes no way to read its color palette, so derive it: append a scratch
-// scene, walk color_index upward reading back the RGB Live assigns, then delete
-// the scene. Nothing the user owns is touched, and the sweep stops as soon as
-// Live clamps the index — that's how we learn the palette size rather than
-// assuming it.
+// Live exposes no way to read its color palette, so derive it: make a scratch
+// object, walk its color_index upward reading back the RGB Live assigns each
+// one, then throw the object away. The sweep stops as soon as Live clamps the
+// index — that's how the size is discovered rather than assumed.
+//
+// IT HAS TO BE A CLIP. Live's own docstrings differ per class, and only one of
+// the three is a plain int:
+//
+//   Clip.color_index    "Get/set access to the color index of the Clip."
+//   Scene.color_index   "... Can be None for no color."
+//   Track.color_index   "... Can be None for no color."
+//
+// The first version swept a scratch *scene* and Live answered every write with
+// "v8liveapi: set: unsupported property type": Max's LiveAPI can read an
+// Optional[int] but cannot construct one to write. A scratch track would have
+// failed the same way. This is also why execOp's set('color_index') has always
+// worked — it writes clips.
+//
+// The failure was invisible for the usual reason. The writes silently did
+// nothing, and `gnum` reported the still-unset property as 0 — a real palette
+// slot — so i=0 "succeeded", i=1 "clamped", and a one-entry black palette got
+// cached as though it were data. Three guards below: the object must resolve,
+// reads go through gnumOr so absent stays distinct from slot 0, and the result
+// is checked for being a possible palette at all.
+
+/** Distinct values in `xs`. A real palette is dozens; one or two means a broken read. */
+function countDistinct(xs: number[]): number {
+  const seen: { [k: string]: boolean } = {};
+  let n = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const k = String(xs[i]);
+    if (!seen[k]) {
+      seen[k] = true;
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Raw atoms for a property, for the Max window. Never throws. */
+function atomsOf(a: LiveAPI, prop: string): string {
+  try {
+    return JSON.stringify(a.get(prop));
+  } catch (e) {
+    return 'threw: ' + String((e as Error)?.message ?? e);
+  }
+}
 
 function palette(reqId: number): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  let scratchIndex = -1;
+  // Appending a whole track to hold one clip is deliberate. create_clip only
+  // works on an empty slot in a MIDI track, and picking one of the user's would
+  // mean writing into material they own; a scratch track touches nothing, and
+  // deleting it takes the clip with it, so cleanup is a single call.
+  let scratchTrack = -1;
   const set = new LiveAPI(function () {}, 'live_set');
   try {
-    const before = set.getcount('scenes');
-    set.call('create_scene', -1);
-    if (set.getcount('scenes') !== before + 1) throw new Error('could not create scratch scene');
-    scratchIndex = before;
+    if (set.getcount('scenes') < 1) throw new Error('set has no scene to hold a scratch clip');
 
-    const sc = new LiveAPI(function () {}, 'live_set scenes ' + scratchIndex);
-    const colors: number[] = [];
-    for (let i = 0; i < PALETTE_MAX; i++) {
-      sc.set('color_index', i);
-      if (gnum(sc, 'color_index') !== i) break; // clamped — past the end
-      colors.push(gnum(sc, 'color') & 0xffffff);
+    const before = set.getcount('tracks');
+    // -1 appends, per create_midi_track's own docstring — not assumed.
+    set.call('create_midi_track', -1);
+    if (set.getcount('tracks') !== before + 1) throw new Error('could not create scratch track');
+    scratchTrack = before;
+
+    const base = 'live_set tracks ' + scratchTrack + ' clip_slots 0';
+    const slot = new LiveAPI(function () {}, base);
+    if (!exists(slot)) {
+      throw new Error('scratch clip slot did not resolve (id ' + slot.id + ')');
+    }
+    slot.call('create_clip', 1); // one beat; length is irrelevant, we only read color
+
+    const cl = new LiveAPI(function () {}, base + ' clip');
+    // Guard one. The whole sweep reads through this object, and an unresolved
+    // cursor answers every get with nothing — which is indistinguishable from
+    // "slot 0, black" unless we check here.
+    if (!exists(cl)) {
+      throw new Error('scratch clip did not resolve (id ' + cl.id + ')');
     }
 
+    const colors: number[] = [];
+    let stoppedAt = -1;
+    let stopReason = 'reached PALETTE_MAX';
+    for (let i = 0; i < PALETTE_MAX; i++) {
+      cl.set('color_index', i);
+      // Guard two: gnumOr, not gnum. -1 keeps "Live gave us nothing" apart from
+      // "Live gave us slot 0", which is the distinction the old code collapsed.
+      const back = gnumOr(cl, 'color_index', -1);
+      if (back !== i) {
+        stoppedAt = i;
+        stopReason = 'color_index read back as ' + back;
+        break;
+      }
+      const rgb = gnumOr(cl, 'color', -1);
+      if (rgb < 0) {
+        stoppedAt = i;
+        stopReason = 'color unreadable';
+        break;
+      }
+      colors.push(rgb & 0xffffff);
+    }
+
+    // Guard three, outcome-based exactly like the slot-scan fallback: don't ask
+    // whether the reads *looked* right, ask whether the answer can be a palette
+    // at all. Live's is dozens of distinct colors, so anything degenerate means
+    // an assumption broke — and then say which, in the one place that can say.
+    const distinct = countDistinct(colors);
+    if (colors.length < 2 || distinct < 2) {
+      cl.set('color_index', 0);
+      post(
+        'bsv palette: sweep produced ' + colors.length + ' entr(ies), ' + distinct +
+          ' distinct — refusing to cache it.\n' +
+          '  stopped at index ' + stoppedAt + ': ' + stopReason + '\n' +
+          '  scratch clip id ' + cl.id + ' on track ' + scratchTrack + '\n' +
+          '  after set(color_index, 0) Live answers:\n' +
+          '    color_index atoms: ' + atomsOf(cl, 'color_index') + '\n' +
+          '    color atoms:       ' + atomsOf(cl, 'color') + '\n' +
+          '    name atoms:        ' + atomsOf(cl, 'name') + '\n',
+      );
+      throw new Error(
+        'palette sweep produced ' + colors.length + ' color(s), ' + distinct +
+          ' distinct — see the Max window for what Live actually answered',
+      );
+    }
+
+    post(
+      'bsv palette: ' + colors.length + ' colors, ' + distinct + ' distinct (' +
+        stopReason + ')\n',
+    );
     const p: BSV.Palette = { count: colors.length, colors: colors };
     publish(PALETTE_DICT, p);
     outlet(0, 'palette_done', reqId, PALETTE_DICT);
   } catch (e) {
     fail(reqId, e);
   } finally {
-    if (scratchIndex >= 0) {
+    if (scratchTrack >= 0) {
       try {
-        set.call('delete_scene', scratchIndex);
+        set.call('delete_track', scratchTrack);
       } catch (e) {
-        post('bsv: FAILED to remove scratch scene at index ' + scratchIndex + '\n');
+        post(
+          'bsv: FAILED to remove scratch track at index ' + scratchTrack +
+            ' — delete it by hand (it is the last track, named after Live default)\n',
+        );
       }
     }
   }

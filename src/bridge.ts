@@ -43,19 +43,38 @@ const MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 };
 
+/** The cache file's contents if they could plausibly be Live's palette, else null. */
+function usablePalette(buf: Buffer): string | null {
+  try {
+    const p = JSON.parse(buf.toString()) as BSV.Palette;
+    if (!Array.isArray(p.colors) || p.colors.length < 2) return null;
+    if (new Set(p.colors).size < 2) return null;
+    return buf.toString();
+  } catch {
+    return null; // truncated or hand-edited
+  }
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`);
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
 
   // The cached palette lives beside the source, not in public/.
+  //
+  // A degenerate cache is treated as no cache at all. A broken sweep once wrote
+  // a one-entry black palette here, and because the file existed and parsed, the
+  // UI showed a single swatch forever rather than "not extracted yet" — the bad
+  // data looked exactly like data. Live's palette is dozens of colors, so
+  // anything under two is a failure to serve, not a palette.
   if (rel === '/palette.json') {
     fs.readFile(PALETTE_FILE, (err, buf) => {
-      res.writeHead(err ? 404 : 200, {
+      const body = err ? null : usablePalette(buf);
+      res.writeHead(body ? 200 : 404, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
       });
-      res.end(err ? '{"count":0,"colors":[]}' : buf);
+      res.end(body ?? '{"count":0,"colors":[]}');
     });
     return;
   }

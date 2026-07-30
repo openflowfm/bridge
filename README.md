@@ -192,9 +192,19 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
   `gstr` / `gnum` / `gbool` / `gids` / `gid`.
 - **Setting a name needs quoting.** Unquoted, `a.set('name', 'Arp Jam 1')` arrives as
   a list of atoms and only `Arp` survives. `setName()` handles it.
-- **Address by id, not path string, in hot loops.** Resolving
-  `live_set tracks 3 clip_slots 412` parses and walks that path every time. One
-  `get('clip_slots')` per track returns every id, and `'id N'` resolves directly.
+- **`goto('id N')` does not resolve.** Measured against a real set: every one of 24 tracks
+  fell back, Max posted `v8liveapi: get: no valid object set` per attempt, and
+  `get('clip')` on the unresolved cursor answered `1` rather than an `['id', n]` pair. This
+  settles the open question the slot-scan fallback was written to answer — it was the
+  addressing, not the atom shape. `[js]`'s `jsliveapi` maps `goto` to **`path_goto`**,
+  which is a hint about why: it takes a path, and `id N` isn't one. The id-addressed fast
+  path is therefore dead weight today; the fallback is what runs, and the slot scan costs
+  ~758ms of a ~946ms walk. Setting `.id` may be the real route, but `max.d.ts` declares it
+  readonly and that is **unverified**.
+- **A property Live documents as nullable can be read but not written.** `Scene.color_index`
+  and `Track.color_index` are both "Can be None for no color", and writing either answers
+  `v8liveapi: set: unsupported property type`. `Clip.color_index` has no such note and
+  writes fine. Write `color` (RGB) for scenes and tracks. See *Palette derivation*.
 - **`get('clip')` beats `get('has_clip')`.** It answers occupancy *and* yields the
   clip's id, replacing the probe plus a second path resolution. `0` means empty.
 - **Reuse one `LiveAPI` cursor with `goto()`** rather than constructing new ones. But
@@ -254,14 +264,83 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
 
 Live exposes no way to read its color palette. `palette()` derives it:
 
-1. Append a scratch scene (`create_scene -1`).
-2. Walk `color_index` upward, reading back the RGB Live assigns each one.
+1. Append a scratch MIDI track (`create_midi_track -1`) and `create_clip` in its slot 0.
+2. Walk the **clip's** `color_index` upward, reading back the RGB Live assigns each one.
 3. Stop when Live clamps the index — that's how the size is *discovered* rather than
    assumed. `PALETTE_MAX = 200` is only a runaway guard.
-4. Delete the scratch scene in a `finally`, so it goes even if the sweep throws.
+4. `delete_track` in a `finally`, which takes the clip with it, so cleanup is one call
+   and happens even if the sweep throws.
 
 Nothing the user owns is touched. `bridge.js` caches the result to `palette.json` and
 serves it at `/palette.json`, so it runs once per Live version.
+
+**The UI triggers it, once, before the first walk** — see `ui/README.md` *Palette*. Not on
+every snapshot: the sweep mutates the set, so that would dirty the document on every
+refresh, churn Live's undo history, and fire the structural observer whose whole purpose is
+to prompt a re-snapshot.
+
+### What Live 12.4.3 actually answers
+
+70 colors, all distinct, and they line up exactly with the 14 × 5 grid in Live's own colour
+picker — **so `color_index` is row-major across that grid**, verified against a screenshot
+of it rather than assumed. Index 13 is the white swatch ending the first row; the right-hand
+column runs white → greys down to `#3c3c3c`.
+
+```
+ 0: ff94a6 ffa529 cc9927 f7f47c bffb00 1aff2f 25ffa8 5cffe8 8bc5ff 5480e4 92a7ff d86ce4 e553a0 ffffff
+14: ff3636 f66c03 99724b fff034 87ff67 3dc300 00bfaf 19e9ff 10a4ee 007dc0 886ce4 b677c6 ff39d4 d0d0d0
+28: e2675a ffa374 d3ad71 edffae d2e498 bad074 9bc48d d4fde1 cdf1f8 b9c1e3 cdbbe4 ae98e5 e5dce1 a9a9a9
+42: c6928b b78256 99836a bfba69 a6be00 7db04d 88c2ba 9bb3c4 85a5c2 8393cc a595b5 bf9fbe bc7196 7b7b7b
+56: af3333 a95131 724f41 dbc300 85961f 539f31 0a9c8e 236384 1a2f96 2f52a2 624bad a34bad cc2e6e 3c3c3c
+```
+
+Recorded for reference and as a regression check, **not** as a hardcoded table — the sweep
+stays the source of truth so a future Live with a different palette isn't silently wrong.
+The theme `.ask` files contain no clip colours (only `AutomationColor`, `WaveformColor` and
+friends), which is good evidence the palette is theme-independent.
+
+### It has to be a clip, and that took two failures to learn
+
+**Only `Clip.color_index` is a plain int.** Live's docstrings differ per class and the
+difference is load-bearing:
+
+| | |
+|---|---|
+| `Clip.color_index` | "Get/set access to the color index of the Clip." |
+| `Scene.color_index` | "… **Can be None for no color**." |
+| `Track.color_index` | "… **Can be None for no color**." |
+
+The first version swept a scratch *scene*, and Live answered every write with
+`v8liveapi: set: unsupported property type` — Max's LiveAPI can *read* an `Optional[int]`
+but can't construct one to *write*. A scratch track would have failed identically. This is
+also why `execOp`'s `set('color_index', …)` has always worked: it writes clips.
+
+**The consequence for anything that colors scenes or tracks: use `color` (RGB), not
+`color_index`.** Both are documented "Get/set access to the color of the … (RGB)" with no
+None, so both are writable. That's the one place the project's "never write raw RGB" rule
+has to bend, and it's why a trustworthy index→RGB table matters beyond the swatch picker.
+
+### Why the failure was invisible, and the three guards
+
+The sweep produced `{"count": 1, "colors": [0]}` and cached it. The writes silently did
+nothing, and then **the same trap as the slot scan, for the third time in this file**:
+`gnum` answers an unreadable or `None` property with `0`, and `0` is a real palette slot.
+So `i = 0` appeared to succeed, `i = 1` appeared clamped, and the loop exited having learnt
+nothing while writing a plausible-looking cache file.
+
+1. **`exists()` before the sweep.** The whole thing reads through one object; an
+   unresolved cursor is now an error, not thirty identical black entries.
+2. **`gnumOr(…, -1)`, never `gnum`.** Keeps "Live gave us nothing" apart from "Live gave
+   us slot 0" — the same fix as `gref`, for the same reason.
+3. **An outcome check, not a read check.** Don't ask whether the reads looked right, ask
+   whether the answer can be a palette at all. Under two distinct colors `palette()`
+   throws instead of publishing, and posts what Live answered for `color_index`, `color`
+   and `name`, plus the clip id and where the loop stopped. That dump is what turned one
+   run into the diagnosis above.
+
+`bridge.ts` also treats a degenerate cache file as **no cache at all**. That's what made
+the original failure so quiet: the file existed and parsed, so the UI showed one swatch
+forever rather than "not extracted yet" — the bad data was indistinguishable from data.
 
 ## Snapshot phases
 
