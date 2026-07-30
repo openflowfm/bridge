@@ -127,7 +127,43 @@ Anything bigger than a few numbers crosses via a named Max dictionary:
 | `bsv_result` | lom → node | applied / skipped / total |
 | `bsv_palette` | lom → node | derived colors |
 
-Names are global, so **one device instance per Live set**.
+Names are global, so **one device instance per Live set** — and see *Multiple clients*
+below, because global names have consequences there too.
+
+## Multiple clients
+
+The bridge is meant to serve more than one client; the session manager UI is just the
+first. Several UI dev servers already share one device today (each proxies `/ws` to the
+same bridge), so this is exercised rather than hypothetical.
+
+**Already correct.** `pending` keys by request id and stores the originating socket, so
+replies route to the client that asked. Terminal replies (`snapshot`, `applied`,
+`palette`) go to the requester; only `changed`, `paletteUpdated` and `reload` broadcast.
+Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-client.
+
+**Not yet guaranteed.** Four things to fix before a second *kind* of client exists:
+
+1. **Dict names are fixed, so a request can read another's payload.** The window is
+   narrow, not wide: `lom.ts` reads and publishes synchronously inside one Max message,
+   and `apply` refuses to start while a job is running. But between one side writing a
+   dict and the other side's `getDict` landing, a second request can overwrite it —
+   and `finishJob` clears `job` *before* publishing the result, reopening the guard
+   early. Per-request names (`bsv_ops_<reqId>`) retire the whole class.
+2. **`apply` rejects instead of queueing.** `if (job) return fail(reqId, 'apply already
+   in progress')`. Fine for one client; for two, the second just gets an error and has
+   to retry. The chunked `Task` already provides the yield points a FIFO queue needs.
+3. **`snapshot` doesn't coalesce.** There's no guard at all, so N clients asking at
+   once means N full LOM walks serialized on Live's main thread — and the walk is the
+   expensive part. Single-flight plus a cache keyed by `rev` (already in the payload)
+   is the fix.
+4. **`observe` has no refcount.** The bridge forwards `observe on|off` straight to a
+   global toggle that clears and rebuilds all observers, so one client turning it off
+   silently blinds the others, and a client that vanishes never decrements. Latent
+   today — nothing in `ui/` sends `observe` yet — which makes now the cheap time.
+
+Related: `changed` carries only a `kind`, so a client's only response to someone else's
+write is a full re-walk. Carrying the affected slots and the new `rev` is what makes
+multi-client cheap rather than merely correct. See [`protocol/README.md`](../protocol/README.md).
 
 ## LOM gotchas worth knowing before you touch `lom.ts`
 
