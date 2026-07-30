@@ -106,6 +106,23 @@ function gid(a: LiveAPI, prop: string): number {
 }
 
 /**
+ * Single-object property, keeping "empty" and "unreadable" apart.
+ *
+ * `gid` answers 0 both for a clip slot that is genuinely empty and for a cursor
+ * that never resolved, and that collapse is exactly how a set full of clips
+ * once reported zero of them. Returns the id, `0` for a slot that resolved and
+ * holds nothing, or `-1` when the reply wasn't an `['id', n]` pair at all.
+ *
+ * Mirrored as `parseObjectRef` in core/src/lomAtoms.ts, where it has tests.
+ */
+function gref(a: LiveAPI, prop: string): number {
+  const v = a.get(prop);
+  if (!Array.isArray(v) || v.length < 2 || v[0] !== 'id') return -1;
+  const n = Number(v[1]);
+  return isFinite(n) ? n : -1;
+}
+
+/**
  * Names routinely contain spaces. Unquoted they arrive at Live as a list of
  * atoms and only the first word survives.
  */
@@ -203,37 +220,75 @@ function snapshot(reqId: number): void {
     // second (longer) path resolution for the clip itself.
     const occupied: Array<[number, number, number]> = []; // track, scene, clipId
     let slotsScanned = 0;
+    let tracksViaPath = 0;
+    let probe = '';
     for (let t = 0; t < trackCount; t++) {
       if (tracks[t].isGroup) continue; // group tracks have no real clip slots
 
-      let slotIds = gids(at('live_set tracks ' + t), 'clip_slots');
-      if (slotIds.length === 0 && sceneCount > 0) {
-        // Belt and braces: if the id list ever comes back in a shape we don't
-        // recognise, fall back to path addressing rather than silently
-        // reporting an empty track.
-        for (let s = 0; s < sceneCount; s++) {
-          slotsScanned++;
-          const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
-          if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
-          const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
-          if (exists(c)) occupied.push([t, s, Number(c.id)]);
-        }
-        continue;
-      }
+      const slotIds = gids(at('live_set tracks ' + t), 'clip_slots');
 
-      for (let s = 0; s < slotIds.length; s++) {
+      // The fast path. Its correctness rests on two things we cannot check
+      // without Live open — that 'id N' resolves through goto(), and that a
+      // clip slot answers get('clip') as an ['id', n] pair — and when either
+      // is wrong EVERY slot reads as empty rather than erroring. So the
+      // fallback can't key off the id list being empty (it isn't); it has to
+      // key off the scan failing to read, which is what gref reports.
+      let usedIds = false;
+      if (slotIds.length > 0) {
+        const found: Array<[number, number, number]> = [];
+        usedIds = true;
+        for (let s = 0; s < slotIds.length; s++) {
+          const clipId = gref(at('id ' + slotIds[s]), 'clip');
+          if (clipId < 0) {
+            // Nothing this pass produced for this track is trustworthy.
+            if (!probe) {
+              probe =
+                'track ' + t + ' slot id ' + slotIds[s] + ' clip atoms: ' +
+                JSON.stringify(at('id ' + slotIds[s]).get('clip'));
+            }
+            usedIds = false;
+            break;
+          }
+          if (clipId > 0) found.push([t, s, clipId]);
+        }
+        if (usedIds) {
+          slotsScanned += slotIds.length;
+          for (let i = 0; i < found.length; i++) occupied.push(found[i]);
+        }
+      }
+      if (usedIds) continue;
+
+      // Path addressing plus has_clip. Slower, and the whole reason the id
+      // scan exists — but it's the one this project has actually watched work
+      // against a real set, so it's what we fall back to.
+      tracksViaPath++;
+      for (let s = 0; s < sceneCount; s++) {
         slotsScanned++;
-        const clipId = gid(at('id ' + slotIds[s]), 'clip');
-        if (clipId) occupied.push([t, s, clipId]);
+        const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
+        if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
+        const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
+        if (exists(c)) occupied.push([t, s, Number(c.id)]);
       }
     }
     const tSlots = Date.now();
+
+    if (tracksViaPath > 0) {
+      // Visible, not silent: the snapshot is correct but the fast path is off.
+      // The atom dump is what tells us which assumption is wrong.
+      post(
+        'bsv: id-addressed slot scan did not resolve — ' + tracksViaPath +
+          ' track(s) rescanned by path. ' + probe + '\n',
+      );
+    }
 
     const clips: BSV.Clip[] = [];
     for (let i = 0; i < occupied.length; i++) {
       const t = occupied[i][0];
       const s = occupied[i][1];
-      const c = at('id ' + occupied[i][2]);
+      // Same 'id N' dependency as the scan above, so the same self-healing:
+      // if the id doesn't resolve, reach the clip by the path we know works.
+      let c = at('id ' + occupied[i][2]);
+      if (!exists(c)) c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
       if (!exists(c)) continue;
       clips.push({
         t: t,

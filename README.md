@@ -151,6 +151,14 @@ Names are global, so **one device instance per Live set**.
   Our app has to own it.
 - **There is no scene-move API.** Reordering means duplicate-then-delete across every
   track. This is why setlist reordering is out of MVP scope.
+- **There is no Session View layout in the LOM** — no column widths, no row heights,
+  nothing about how the grid is drawn. `Track.View` is `selected_device`,
+  `device_insert_mode`, `is_collapsed` (documented as the *arranger*, not the session)
+  and `select_instrument`. Those widths live only in the `.als`, which we don't parse,
+  so anything layout-shaped is ours to invent — see `ui/README.md` *Column widths*.
+  Live 12.4 ships the whole LOM docstring table inside its binary, which is the fastest
+  way to settle "does the LOM expose X" without guessing:
+  `strings -n 6 "/Applications/Ableton Live 12 Suite.app/Contents/MacOS/Live" | grep -n …`
 - **Clips have no stable id across sessions.** `LiveAPI.id` is a runtime handle.
   Within a session, address by `(track, scene)`.
 - **`notifydeleted()`** must clear observers and cancel tasks, or a reloaded device
@@ -181,10 +189,22 @@ scale differently:
 | slot scan | `trackCount × sceneCount` — mostly empty slots |
 | clip reads | `clipCount` |
 
-The scan dominates on a large set, which is what the id-addressing above targets. It
-falls back to path addressing per track if the id list returns in an unrecognised
-shape, so a format surprise degrades to the older behaviour instead of silently
-reporting an empty track.
+The scan dominates on a large set, which is what the id-addressing above targets.
+
+**The fallback is outcome-based, and it has to be.** It first keyed off the id list
+coming back in an unrecognised shape — which missed the failure that actually
+happened: the ids arrived fine, but nothing they addressed could be read, so all 4416
+slots of a real set reported empty and the snapshot claimed zero clips. `gid()` answers
+`0` both for an empty clip slot and for a cursor that never resolved, and that collapse
+is what made a broken fast path indistinguishable from an empty set.
+
+So `gref()` keeps the two apart (`-1` = unreadable, `0` = empty, `n` = clip id), and any
+track whose id scan fails to read is rescanned with path addressing plus `has_clip` —
+the path this project has actually watched work. When that happens `lom.js` posts the
+count and a dump of the offending atoms to the Max window, which is what identifies
+*which* assumption broke: whether `goto('id N')` resolves at all, or whether a clip slot
+answers `get('clip')` as an `['id', n]` pair. Both are unverified, and both fail the
+same silent way.
 
 ## Testing
 
