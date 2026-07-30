@@ -100,6 +100,8 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `snapshot <reqId>` | walk the set |
 | `apply <reqId> <dictName>` | execute an op batch |
 | `palette <reqId>` | derive Live's color palette |
+| `playback <verb> <i> <j>` | fire or stop something — see below |
+| `watch_play <0\|1>` | install / remove the play-state observers |
 | `ping` | |
 
 | → node | |
@@ -110,10 +112,28 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `apply_done <reqId> <dict> <ms>` | |
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
+| `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
 | `err <reqId> <msg>` | |
+
+Two wire messages (`launch` and `stop`) collapse onto the single `playback` message with
+a verb — `clip`, `scene`, `song`, `stopTrack`, `stopClips`, `stopSong`. One handler
+rather than one per verb, and specifically **not** a global called `stop`: `stop` means
+something to Max in other contexts, and a top-level global with that name is a trap
+waiting to be stepped on.
 
 `serving` also travels node → lom's direction but is routed off by `[route serving]`
 before reaching `v8`; it only drives the device's status line.
+
+### Play state is the one push that uses atoms, not a Dict
+
+`play_state` breaks the rule below on purpose, and the reason is worth knowing before
+"fixing" it: **dict names are global.** A request/response payload like the snapshot is
+safe in `bsv_snapshot` because only one is ever in flight. Play state pushes on every
+observer callback — many times a second while the set is rolling — so a dict would race
+itself, `v8` overwriting it before Node had finished reading the previous one.
+
+The payload is `1 + 2 × trackCount` plain integers with no punctuation anywhere in it,
+which is precisely the case atoms handle safely. Clip names never are.
 
 ### Large payloads go through Dicts, never message atoms
 
@@ -205,8 +225,30 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
   `strings -n 6 "/Applications/Ableton Live 12 Suite.app/Contents/MacOS/Live" | grep -n …`
 - **Clips have no stable id across sessions.** `LiveAPI.id` is a runtime handle.
   Within a session, address by `(track, scene)`.
+- **Play state is a track property, not a clip one.** `Track.playing_slot_index` (-1 for
+  none) and `Track.fired_slot_index` (-1 for none, **-2 when the track's stop button is
+  fired**) describe the entire grid in two properties per track. Watching them costs
+  `2 × trackCount` observers; the per-clip equivalent is two per *slot*, which is tens of
+  thousands on a real set. There is no "scene is playing" property at all — the UI
+  derives it from the tracks.
+- **A burst of observer callbacks is one event, not N.** Firing a scene changes
+  `playing_slot_index` on every track at once. `onPlayChange` sets a dirty flag and
+  schedules a `Task`, so 40 callbacks produce one `play_state`.
+- **`Scene.fire()` selects the scene**, per its own docstring: "will fire all clipslots
+  that this scene owns *and select the scene itself*". Launching a scene therefore moves
+  Live's view. There's no variant that doesn't.
+- **`ClipSlot.fire()` on an empty slot triggers that slot's stop button** instead of
+  erroring, which is Live's documented behaviour and is why ⌘-clicking an empty cell
+  usefully stops the track.
+- **`ClipSlot.fire` takes optional args** — `(record_length, launch_quantization,
+  force_legato)` — and `launch_quantization` overrides the song's global value for that
+  one call. That's the non-destructive way to make audition instant, since writing
+  `Song.clip_trigger_quantization` changes the user's set and LOM writes have no undo.
+  **Unverified**: the arg semantics are read off the docstring table in Live's binary,
+  and passing "no record length" through Max's `call()` is awkward. `playback` currently
+  calls plain `fire()`.
 - **`notifydeleted()`** must clear observers and cancel tasks, or a reloaded device
-  leaks them.
+  leaks them. That now includes the play-state observers, which are a separate list.
 
 ## Palette derivation
 

@@ -12,10 +12,11 @@
 // from the global BSV namespace (see protocol/global.d.ts).
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
-//      palette <reqId> | ping
+//      palette <reqId> | playback <verb> <i> <j> | watch_play <0|1> | ping
 // out: ready | snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
-//      err <reqId> <msg> | pong
+//      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
+//      pong
 
 autowatch = 1;
 inlets = 1;
@@ -45,6 +46,9 @@ var helloPending = false;
 /** One reusable cursor; goto() is far cheaper than constructing a LiveAPI. */
 var cursorApi: LiveAPI | null = null;
 var observers: LiveAPI[] = [];
+var playObservers: LiveAPI[] = [];
+/** A burst of play-state callbacks is pending a single coalesced report. */
+var playDirty = false;
 var job: ApplyJob | null = null;
 
 // --- helpers ----------------------------------------------------------
@@ -469,6 +473,154 @@ function palette(reqId: number): void {
   }
 }
 
+// --- playback ---------------------------------------------------------
+// One message for everything that makes Live make a sound. Each verb is a
+// single LOM call, so none of this needs chunking, a Dict, or a reply — the
+// answer the caller wants is the play state changing, and that arrives on its
+// own through play_state.
+//
+// `verb` rather than one Max message per action because `stop` is a name Max
+// itself uses in other contexts and a top-level global called `stop` is a trap
+// waiting to be stepped on.
+
+function playback(verb: string, i: number, j: number): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    switch (String(verb)) {
+      case 'clip': {
+        // fire() on an empty slot triggers that slot's stop button instead,
+        // which is Live's own behaviour and is what we want: ⌘-clicking an
+        // empty cell stops the track, exactly as in the Session grid.
+        const slot = at('live_set tracks ' + i + ' clip_slots ' + j);
+        if (!exists(slot)) return;
+        slot.call('fire');
+        break;
+      }
+      case 'scene': {
+        // Note: Live also *selects* the scene as a side effect of firing it.
+        const sc = at('live_set scenes ' + i);
+        if (!exists(sc)) return;
+        sc.call('fire');
+        break;
+      }
+      case 'song':
+        at('live_set').call('start_playing');
+        break;
+      case 'stopTrack': {
+        const tr = at('live_set tracks ' + i);
+        if (!exists(tr)) return;
+        tr.call('stop_all_clips');
+        break;
+      }
+      case 'stopClips':
+        at('live_set').call('stop_all_clips');
+        break;
+      case 'stopSong':
+        at('live_set').call('stop_playing');
+        break;
+      default:
+        fail(-1, 'unknown playback verb: ' + verb);
+    }
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+// --- play state -------------------------------------------------------
+// Which slot is playing and which is blinking, per track.
+//
+// Per-track, not per-clip. Track.playing_slot_index and fired_slot_index cover
+// the entire grid in two properties each, so watching the whole set costs
+// 2 × trackCount observers. Per-clip observers would be 2 per slot — tens of
+// thousands on a real set, which is exactly the chatty design the protocol
+// rules exist to prevent.
+//
+// The report goes out as message atoms rather than a Dict, which is the
+// opposite of the rule for the snapshot, and deliberately: dict names are
+// global, so a push that can fire many times a second would race itself —
+// v8 overwriting bsv_playstate before Node had finished reading the previous
+// one. The payload is 1 + 2 × trackCount plain numbers with no punctuation in
+// it, so atoms are safe here in a way clip names never are.
+
+function playStateAtoms(): unknown[] {
+  const set = at('live_set');
+  const trackCount = set.getcount('tracks');
+  const atoms: unknown[] = [gbool(set, 'is_playing') ? 1 : 0];
+  for (let t = 0; t < trackCount; t++) {
+    const a = at('live_set tracks ' + t);
+    // gnumOr, not gnum: an unreadable property would come back 0 from gnum,
+    // and "scene 0 is playing" is a plausible-looking lie. -1 is "nothing".
+    atoms.push(gnumOr(a, 'playing_slot_index', -1));
+    atoms.push(gnumOr(a, 'fired_slot_index', -1));
+  }
+  return atoms;
+}
+
+function sendPlayState(): void {
+  try {
+    const atoms = playStateAtoms();
+    outlet(0, 'play_state', ...atoms);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function onPlayChange(): void {
+  // Firing a scene changes every track at once. Coalesce to one report per
+  // scheduler tick, or a 40-track set emits 40 identical-looking messages for
+  // one launch.
+  if (playDirty) return;
+  playDirty = true;
+  playTask.schedule(0);
+}
+
+var playTask = new Task(function () {
+  playDirty = false;
+  sendPlayState();
+});
+
+function watch_play(on: number): void {
+  clearPlayObservers();
+  if (Number(on) !== 1) return;
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    // getcount goes through the shared cursor; every observer needs its own
+    // LiveAPI, because at() hands back the same object each call.
+    const trackCount = at('live_set').getcount('tracks');
+
+    const songObs = new LiveAPI(onPlayChange, 'live_set');
+    songObs.property = 'is_playing';
+    playObservers.push(songObs);
+
+    for (let t = 0; t < trackCount; t++) {
+      const p = new LiveAPI(onPlayChange, 'live_set tracks ' + t);
+      p.property = 'playing_slot_index';
+      const f = new LiveAPI(onPlayChange, 'live_set tracks ' + t);
+      f.property = 'fired_slot_index';
+      playObservers.push(p, f);
+    }
+
+    // Seed it, so the UI shows the truth immediately rather than staying blank
+    // until the first launch.
+    sendPlayState();
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function clearPlayObservers(): void {
+  playTask.cancel();
+  playDirty = false;
+  for (let i = 0; i < playObservers.length; i++) {
+    try {
+      playObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  playObservers = [];
+}
+
 // --- observers --------------------------------------------------------
 // MVP watches structure only (track/scene lists). Per-clip observers would be
 // ~1 per slot; measure the snapshot cost before deciding that's worth it.
@@ -508,5 +660,6 @@ function anything(): void {
 
 function notifydeleted(): void {
   clearObservers();
+  clearPlayObservers();
   applyTask.cancel();
 }

@@ -139,6 +139,30 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'observe':
       Max.outlet('observe', m.on ? 1 : 0);
       break;
+    // Playback is fire-and-forget: no reqId, no pending entry, no reply. The
+    // caller's feedback is the play_state push, and awaiting an ack would only
+    // add latency to the one thing that has to feel instant. Both wire types
+    // collapse onto one Max message — see `playback` in lom.ts.
+    case 'launch': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const g = m.target;
+      if (g.kind === 'clip') Max.outlet('playback', 'clip', g.t, g.s);
+      else if (g.kind === 'scene') Max.outlet('playback', 'scene', g.s, 0);
+      else Max.outlet('playback', 'song', 0, 0);
+      break;
+    }
+    case 'stop': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const g = m.target;
+      if (g.kind === 'track') Max.outlet('playback', 'stopTrack', g.t, 0);
+      else if (g.kind === 'clips') Max.outlet('playback', 'stopClips', 0, 0);
+      else Max.outlet('playback', 'stopSong', 0, 0);
+      break;
+    }
+    case 'watchPlay':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      Max.outlet('watch_play', m.on ? 1 : 0);
+      break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -207,11 +231,27 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
 
 Max.addHandler('changed', (kind: string) => broadcast({ type: 'changed', kind }));
 
+// Flat atoms, not a Dict: this pushes on every play-state change, and a global
+// dict name would race itself. See the note above `playStateAtoms` in lom.ts.
+// Shape: isPlaying, then (playing, fired) per track in track order.
+Max.addHandler('play_state', (...args: number[]) => {
+  const tracks: BSV.TrackPlayState[] = [];
+  for (let i = 1; i + 1 < args.length; i += 2) {
+    tracks.push({ playing: Number(args[i]), fired: Number(args[i + 1]) });
+  }
+  broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
+});
+
 Max.addHandler('err', (reqId: number, message: string) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
   Max.post(`LOM error: ${message}`);
-  send(req?.ws, { type: 'error', id: req?.clientId, message });
+  const event: BSV.Event = { type: 'error', id: req?.clientId, message };
+  // Untracked failures — a launch, a stop, an observer callback — have no
+  // pending request to answer, and dropping them is how a silent bug hides.
+  // With no id, no waiter is rejected; the client just logs it.
+  if (req?.ws) send(req.ws, event);
+  else broadcast(event);
 });
 
 Max.addHandler('pong', () => {});
