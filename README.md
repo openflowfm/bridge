@@ -150,6 +150,37 @@ Anything bigger than a few numbers crosses via a named Max dictionary:
 Names are global, so **one device instance per Live set** — and see *Multiple clients*
 below, because global names have consequences there too.
 
+#### A dict must exist before Node can write it
+
+`Max.setDict` only works on a dict that **already exists in Max**, and max-api says so in
+its own error text: *"Please make sure the requested dict exists."* Worse, Max rejects a
+missing one with an **empty message**, which arrives in the UI as `apply: Error` and nothing
+else.
+
+Three of the four dicts create themselves, because `publish()` calls `new Dict(name)` before
+anything reads them — which is why snapshot and palette have always worked. **`bsv_ops` is
+the only one travelling node → lom**, so nothing ever created it, and staging an op batch
+could never succeed. `Max.setDict` is the one direction this project had never exercised.
+
+`ensureDicts()` in `lom.ts` now creates all four on `init` and **holds the references** — a
+Max dict is reference-counted, so letting the wrapper be collected can take the dict with
+it.
+
+#### A one-element array arrives as a scalar
+
+Max collapses a single-element array into the element itself, so a one-clip write reaches
+`apply()` as an object rather than a list. Left alone `ops.length` is `undefined`, the batch
+looks empty, and the write reports "0 applied" while doing nothing — silent, and
+indistinguishable from a selection that had nothing to change. `apply()` re-wraps it.
+
+#### Never let an error reach the UI without a message
+
+`fail()` used `String((e as Error)?.message ?? e)`, and `??` doesn't catch `''`. Combined
+with the two bugs above, a real failure surfaced as `color: ` — a log line with nothing after
+the colon. `describe()` here, in `bridge.ts` and in `useBridge.ts` all use `||` with a real
+fallback, errors name the request that failed, and the `err` handler joins every trailing
+atom so an unquoted multi-word message isn't truncated to its first word.
+
 ## Multiple clients
 
 The bridge is meant to serve more than one client; the session manager UI is just the
@@ -281,7 +312,7 @@ to prompt a re-snapshot.
 
 ### What Live 12.4.3 actually answers
 
-70 colors, all distinct, and they line up exactly with the 14 × 5 grid in Live's own colour
+70 colors, all distinct, and they line up exactly with the 14 × 5 grid in Live's own color
 picker — **so `color_index` is row-major across that grid**, verified against a screenshot
 of it rather than assumed. Index 13 is the white swatch ending the first row; the right-hand
 column runs white → greys down to `#3c3c3c`.
@@ -296,7 +327,7 @@ column runs white → greys down to `#3c3c3c`.
 
 Recorded for reference and as a regression check, **not** as a hardcoded table — the sweep
 stays the source of truth so a future Live with a different palette isn't silently wrong.
-The theme `.ask` files contain no clip colours (only `AutomationColor`, `WaveformColor` and
+The theme `.ask` files contain no clip colors (only `AutomationColor`, `WaveformColor` and
 friends), which is good evidence the palette is theme-independent.
 
 ### It has to be a clip, and that took two failures to learn

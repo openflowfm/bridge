@@ -25,6 +25,8 @@ outlets = 1;
 const SNAPSHOT_DICT = 'bsv_snapshot';
 const RESULT_DICT = 'bsv_result';
 const PALETTE_DICT = 'bsv_palette';
+/** node → lom. The only dict we don't create by publishing to it — see ensureDicts. */
+const OPS_DICT = 'bsv_ops';
 
 /** LOM ops per scheduler tick — keeps Live's UI responsive. */
 const CHUNK = 50;
@@ -150,8 +152,21 @@ function setName(a: LiveAPI, value: unknown): void {
   a.set('name', '"' + s.replace(/"/g, "'") + '"');
 }
 
+/**
+ * `||`, not `??`: an Error carrying an empty message is exactly as untraceable
+ * as one carrying none, and `??` lets `''` straight through. An error that
+ * reaches the UI as "color: " tells the user nothing and tells us less.
+ */
+function describe(e: unknown): string {
+  const m = (e as Error)?.message;
+  if (typeof m === 'string' && m !== '') return m;
+  const s = String(e);
+  if (s && s !== 'undefined' && s !== 'null' && s !== '[object Object]') return s;
+  return 'unknown error in lom.js — see the Max window';
+}
+
 function fail(reqId: number | undefined, e: unknown): void {
-  const m = String((e as Error)?.message ?? e).replace(/[",;]/g, ' ');
+  const m = describe(e).replace(/[",;]/g, ' ');
   post('bsv lom error: ' + m + '\n');
   outlet(0, 'err', reqId === undefined ? -1 : reqId, '"' + m + '"');
 }
@@ -164,8 +179,39 @@ function publish(dictName: string, payload: unknown): void {
 
 // --- lifecycle --------------------------------------------------------
 
+/**
+ * Named dicts we hold open for the life of the device.
+ *
+ * `Max.setDict` on the Node side can only write a dict that ALREADY EXISTS in
+ * Max — max-api says so in its own error text ("Please make sure the requested
+ * dict exists") — and Max rejects a missing one with an empty message, which
+ * arrives in the UI as the uninformative "apply: Error".
+ *
+ * The three lom → node dicts create themselves: `publish()` calls
+ * `new Dict(name)` before anything reads them. `bsv_ops` travels the other way,
+ * so nothing ever created it, and staging an op batch could never work. Creating
+ * it here is the fix.
+ *
+ * The references are kept because a Max dict is reference-counted; letting the
+ * wrapper be collected can take the dict with it.
+ */
+var heldDicts: Dict[] = [];
+
+function ensureDicts(): void {
+  const names = [SNAPSHOT_DICT, RESULT_DICT, PALETTE_DICT, OPS_DICT];
+  heldDicts = [];
+  for (let i = 0; i < names.length; i++) {
+    try {
+      heldDicts.push(new Dict(names[i]));
+    } catch (e) {
+      post('bsv: could not create dict ' + names[i] + ' — ' + describe(e) + '\n');
+    }
+  }
+}
+
 function init(): void {
   deviceReady = true;
+  ensureDicts();
   if (helloPending) {
     helloPending = false;
     hello();
@@ -377,7 +423,36 @@ function apply(reqId: number, dictName: string): void {
   if (job) return fail(reqId, 'apply already in progress');
   try {
     const d = new Dict(dictName);
-    const ops: BSV.ApplyOp[] = JSON.parse(d.stringify()).ops || [];
+    const raw = d.stringify();
+    let parsed: { ops?: unknown };
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      // Say what it actually was. A parse failure with no payload in the message
+      // is the kind of error that costs an hour.
+      throw new Error(
+        'could not parse ' + dictName + ' as JSON: ' + String(raw).substring(0, 200),
+      );
+    }
+
+    // A Max dict collapses a ONE-ELEMENT array into the element itself, so a
+    // single-clip write arrives as an object rather than a list. Left alone,
+    // ops.length is undefined, the batch looks empty, and the write reports
+    // "0 applied" while doing nothing — silent, and indistinguishable from a
+    // selection that had nothing to change.
+    const list = parsed.ops;
+    const ops: BSV.ApplyOp[] = Array.isArray(list)
+      ? (list as BSV.ApplyOp[])
+      : list && typeof list === 'object'
+        ? [list as BSV.ApplyOp]
+        : [];
+
+    if (!ops.length) {
+      post(
+        'bsv apply: no ops found in ' + dictName + ' — dict contained: ' +
+          String(raw).substring(0, 300) + '\n',
+      );
+    }
     job = { reqId: reqId, ops: ops, i: 0, ok: 0, skipped: 0, t0: Date.now() };
     if (!ops.length) return finishJob();
     applyTask.repeat();

@@ -43,6 +43,22 @@ const MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 };
 
+/**
+ * A non-empty description of a thrown value.
+ *
+ * `||` rather than `??`, because an Error carrying an empty message is exactly
+ * as untraceable as one carrying none and `??` lets `''` through. An error that
+ * reaches the UI as "color: " with nothing after it costs more time than the
+ * original bug.
+ */
+function describe(e: unknown): string {
+  const m = (e as Error)?.message;
+  if (typeof m === 'string' && m !== '') return m;
+  const s = String(e);
+  if (s && s !== 'undefined' && s !== 'null' && s !== '[object Object]') return s;
+  return 'unknown bridge error — see the Max window';
+}
+
 /** The cache file's contents if they could plausibly be Live's palette, else null. */
 function usablePalette(buf: Buffer): string | null {
   try {
@@ -122,7 +138,9 @@ wss.on('connection', (ws: WebSocket) => {
     try {
       await handle(ws, m);
     } catch (e) {
-      send(ws, { type: 'error', id: m.id, message: String((e as Error).message ?? e) });
+      const message = `${m.type}: ${describe(e)}`;
+      Max.post(`request failed — ${message}`);
+      send(ws, { type: 'error', id: m.id, message });
     }
   });
 
@@ -146,7 +164,20 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       const ops = Array.isArray(m.ops) ? m.ops : [];
       const reqId = track(ws, m);
-      await Max.setDict('bsv_ops', { ops });
+      try {
+        await Max.setDict('bsv_ops', { ops });
+      } catch (e) {
+        // Max rejects setDict for a dict that doesn't exist yet, and does it with
+        // an empty message — which is how this arrived as "apply: Error" and
+        // nothing else. lom.ts creates bsv_ops in ensureDicts() on init for
+        // exactly this reason, so if you're reading this, suspect that ran late
+        // or not at all.
+        pending.delete(reqId);
+        throw new Error(
+          `could not stage ${ops.length} ops into bsv_ops — ${describe(e)}. ` +
+            `The dict must exist before Node can write it; lom.ts creates it on init.`,
+        );
+      }
       Max.outlet('apply', reqId, 'bsv_ops');
       break;
     }
@@ -261,9 +292,13 @@ Max.addHandler('play_state', (...args: number[]) => {
   broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
 });
 
-Max.addHandler('err', (reqId: number, message: string) => {
+Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
+  // Max drops an empty symbol, so the message atom may not arrive at all; and a
+  // message lom failed to quote arrives split across several atoms.
+  const joined = rest.map(String).join(' ').trim();
+  const message = joined !== '' ? joined : 'LOM failed without a message';
   Max.post(`LOM error: ${message}`);
   const event: BSV.Event = { type: 'error', id: req?.clientId, message };
   // Untracked failures — a launch, a stop, an observer callback — have no
