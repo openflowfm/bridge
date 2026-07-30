@@ -83,6 +83,29 @@ function gbool(a: LiveAPI, prop: string): boolean {
 }
 
 /**
+ * Object-list properties come back as alternating `'id', n` atoms, e.g.
+ * `['id', 4, 'id', 5, ...]`. Returns just the numeric ids.
+ */
+function gids(a: LiveAPI, prop: string): number[] {
+  const v = a.get(prop);
+  const out: number[] = [];
+  if (!Array.isArray(v)) return out;
+  for (let i = 0; i < v.length; i++) {
+    if (v[i] === 'id' && i + 1 < v.length) {
+      out.push(Number(v[i + 1]));
+      i++;
+    }
+  }
+  return out;
+}
+
+/** Single-object property; 0 means "nothing there". */
+function gid(a: LiveAPI, prop: string): number {
+  const ids = gids(a, prop);
+  return ids.length ? ids[0] : 0;
+}
+
+/**
  * Names routinely contain spaces. Unquoted they arrive at Live as a list of
  * atoms and only the first word survives.
  */
@@ -151,6 +174,8 @@ function snapshot(reqId: number): void {
       });
     }
 
+    const tTracks = Date.now();
+
     const scenes: BSV.Scene[] = [];
     for (let s = 0; s < sceneCount; s++) {
       const a = at('live_set scenes ' + s);
@@ -164,30 +189,75 @@ function snapshot(reqId: number): void {
       });
     }
 
-    const clips: BSV.Clip[] = [];
+    const tScenes = Date.now();
+
+    // Two passes on purpose. The occupancy scan is trackCount × sceneCount and
+    // is mostly empty slots, while the property reads only touch clips that
+    // exist — timing them separately is what tells us which one to attack.
+    //
+    // The scan addresses slots by id rather than by path string: resolving
+    // 'live_set tracks 3 clip_slots 412' means parsing and walking that path
+    // every time, whereas one get('clip_slots') per track hands back every id
+    // up front and 'id N' resolves directly. Reading `clip` then answers
+    // occupancy AND yields the clip's id, replacing a has_clip probe plus a
+    // second (longer) path resolution for the clip itself.
+    const occupied: Array<[number, number, number]> = []; // track, scene, clipId
+    let slotsScanned = 0;
     for (let t = 0; t < trackCount; t++) {
       if (tracks[t].isGroup) continue; // group tracks have no real clip slots
-      for (let s = 0; s < sceneCount; s++) {
-        const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
-        if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
-        const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
-        if (!exists(c)) continue;
-        clips.push({
-          t: t,
-          s: s,
-          name: gstr(c, 'name'),
-          colorIndex: gnum(c, 'color_index'),
-          color: gnum(c, 'color'),
-          length: gnum(c, 'length'),
-          isMidi: gbool(c, 'is_midi_clip'),
-        });
+
+      let slotIds = gids(at('live_set tracks ' + t), 'clip_slots');
+      if (slotIds.length === 0 && sceneCount > 0) {
+        // Belt and braces: if the id list ever comes back in a shape we don't
+        // recognise, fall back to path addressing rather than silently
+        // reporting an empty track.
+        for (let s = 0; s < sceneCount; s++) {
+          slotsScanned++;
+          const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
+          if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
+          const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
+          if (exists(c)) occupied.push([t, s, Number(c.id)]);
+        }
+        continue;
+      }
+
+      for (let s = 0; s < slotIds.length; s++) {
+        slotsScanned++;
+        const clipId = gid(at('id ' + slotIds[s]), 'clip');
+        if (clipId) occupied.push([t, s, clipId]);
       }
     }
+    const tSlots = Date.now();
 
-    const ms = Date.now() - t0;
+    const clips: BSV.Clip[] = [];
+    for (let i = 0; i < occupied.length; i++) {
+      const t = occupied[i][0];
+      const s = occupied[i][1];
+      const c = at('id ' + occupied[i][2]);
+      if (!exists(c)) continue;
+      clips.push({
+        t: t,
+        s: s,
+        name: gstr(c, 'name'),
+        colorIndex: gnum(c, 'color_index'),
+        color: gnum(c, 'color'),
+        length: gnum(c, 'length'),
+        isMidi: gbool(c, 'is_midi_clip'),
+      });
+    }
+    const tClips = Date.now();
+
+    const ms = tClips - t0;
     const payload: BSV.Snapshot = {
       rev: Date.now(),
       ms: ms,
+      timings: {
+        tracks: tTracks - t0,
+        scenes: tScenes - tTracks,
+        slots: tSlots - tScenes,
+        clips: tClips - tSlots,
+        slotsScanned: slotsScanned,
+      },
       tempo: gnum(at('live_set'), 'tempo'),
       trackCount: trackCount,
       sceneCount: sceneCount,
@@ -197,8 +267,9 @@ function snapshot(reqId: number): void {
       clips: clips,
     };
 
+    const tDict = Date.now();
     publish(SNAPSHOT_DICT, payload);
-    outlet(0, 'snapshot_done', reqId, SNAPSHOT_DICT, ms);
+    outlet(0, 'snapshot_done', reqId, SNAPSHOT_DICT, Date.now() - tDict);
   } catch (e) {
     fail(reqId, e);
   }

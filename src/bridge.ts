@@ -159,12 +159,19 @@ Max.addHandler('ready', () => {
   broadcast({ type: 'status', lomReady: true });
 });
 
-Max.addHandler('snapshot_done', async (reqId: number, dictName: string, ms: number) => {
+Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
+  const t0 = Date.now();
   const data: BSV.Snapshot = await Max.getDict(dictName);
-  Max.post(`snapshot: ${data.clipCount} clips in ${ms}ms`);
-  const event: BSV.Event = { type: 'snapshot', id: req?.clientId, lomMs: ms, data };
+  const hostMs = Date.now() - t0;
+  const t = data.timings;
+  Max.post(
+    `snapshot: ${data.clipCount} clips in ${data.ms}ms lom ` +
+      `(tracks ${t.tracks} · scenes ${t.scenes} · ${t.slotsScanned} slots ${t.slots} · clips ${t.clips}) ` +
+      `+ ${dictMs}ms dict + ${hostMs}ms host`,
+  );
+  const event: BSV.Event = { type: 'snapshot', id: req?.clientId, dictMs, hostMs, data };
   if (req?.ws) send(req.ws, event);
   else broadcast(event);
 });
