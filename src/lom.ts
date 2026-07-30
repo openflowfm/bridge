@@ -1,16 +1,21 @@
-// lom.js — runs in Max's [v8] object. Owns every LiveAPI call.
+// lom.ts — compiled to bridge/lom.js and run by Max's [v8] object.
+// Owns every LiveAPI call.
 //
 // This is the ONLY place that touches the Live Object Model. It speaks a
-// coarse-grained message protocol to bridge.js (Node for Max), which owns the
+// coarse-grained message protocol to bridge.ts (Node for Max), which owns the
 // WebSocket. Large payloads travel via named Max Dicts, never as message atoms
 // — clip names contain spaces, commas and semicolons, all of which are special
 // in Max messages.
 //
+// NO IMPORTS ARE POSSIBLE HERE. Compiled with `module: "none"` so that message
+// handlers stay top-level globals where Max can find them. Protocol types come
+// from the global BSV namespace (see protocol/global.d.ts).
+//
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
-//      palette <reqId>
+//      palette <reqId> | ping
 // out: ready | snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
-//      err <reqId> <msg>
+//      err <reqId> <msg> | pong
 
 autowatch = 1;
 inlets = 1;
@@ -18,61 +23,89 @@ outlets = 1;
 
 const SNAPSHOT_DICT = 'bsv_snapshot';
 const RESULT_DICT = 'bsv_result';
-const CHUNK = 50; // LOM ops per scheduler tick — keeps Live's UI responsive
+const PALETTE_DICT = 'bsv_palette';
+
+/** LOM ops per scheduler tick — keeps Live's UI responsive. */
+const CHUNK = 50;
+
+/** Safety stop for the palette sweep; real palettes are far smaller. */
+const PALETTE_MAX = 200;
+
+interface ApplyJob {
+  reqId: number;
+  ops: BSV.ApplyOp[];
+  i: number;
+  ok: number;
+  skipped: number;
+  t0: number;
+}
 
 var deviceReady = false;
 var helloPending = false;
-var api = null; // one reusable LiveAPI cursor; goto() is far cheaper than new
-var observers = [];
-var job = null;
+/** One reusable cursor; goto() is far cheaper than constructing a LiveAPI. */
+var cursorApi: LiveAPI | null = null;
+var observers: LiveAPI[] = [];
+var job: ApplyJob | null = null;
 
 // --- helpers ----------------------------------------------------------
 
-function cursor() {
-  if (!api) api = new LiveAPI(function () {}, 'live_set');
-  return api;
+function cursor(): LiveAPI {
+  if (!cursorApi) cursorApi = new LiveAPI(function () {}, 'live_set');
+  return cursorApi;
 }
 
-function at(path) {
+function at(path: string): LiveAPI {
   const a = cursor();
   a.goto(path);
   return a;
 }
 
-function exists(a) {
-  return a && a.id && String(a.id) !== '0';
+function exists(a: LiveAPI | null): boolean {
+  return !!a && !!a.id && String(a.id) !== '0';
 }
 
-function gstr(a, prop) {
+function gstr(a: LiveAPI, prop: string): string {
   const v = a.get(prop);
   if (v === undefined || v === null) return '';
   if (Array.isArray(v)) return v.length === 1 ? String(v[0]) : v.map(String).join(' ');
   return String(v);
 }
 
-function gnum(a, prop) {
+function gnum(a: LiveAPI, prop: string): number {
   const v = a.get(prop);
   const x = Array.isArray(v) ? v[0] : v;
-  const nn = Number(x);
-  return isFinite(nn) ? nn : 0;
+  const n = Number(x);
+  return isFinite(n) ? n : 0;
 }
 
-// Names routinely contain spaces. Unquoted they arrive at Live as a list of
-// atoms and only the first word survives.
-function setName(a, value) {
+function gbool(a: LiveAPI, prop: string): boolean {
+  return gnum(a, prop) === 1;
+}
+
+/**
+ * Names routinely contain spaces. Unquoted they arrive at Live as a list of
+ * atoms and only the first word survives.
+ */
+function setName(a: LiveAPI, value: unknown): void {
   const s = String(value === null || value === undefined ? '' : value);
   a.set('name', '"' + s.replace(/"/g, "'") + '"');
 }
 
-function fail(reqId, e) {
-  const m = String((e && e.message) || e).replace(/[",;]/g, ' ');
+function fail(reqId: number | undefined, e: unknown): void {
+  const m = String((e as Error)?.message ?? e).replace(/[",;]/g, ' ');
   post('bsv lom error: ' + m + '\n');
   outlet(0, 'err', reqId === undefined ? -1 : reqId, '"' + m + '"');
 }
 
+function publish(dictName: string, payload: unknown): void {
+  const d = new Dict(dictName);
+  d.clear();
+  d.parse(JSON.stringify(payload));
+}
+
 // --- lifecycle --------------------------------------------------------
 
-function init() {
+function init(): void {
   deviceReady = true;
   if (helloPending) {
     helloPending = false;
@@ -80,7 +113,7 @@ function init() {
   }
 }
 
-function hello() {
+function hello(): void {
   // node.script boots slower than the device loads, but not reliably so —
   // whichever side is late drives the handshake.
   if (!deviceReady) {
@@ -90,13 +123,13 @@ function hello() {
   outlet(0, 'ready');
 }
 
-function ping() {
+function ping(): void {
   outlet(0, 'pong');
 }
 
 // --- snapshot ---------------------------------------------------------
 
-function snapshot(reqId) {
+function snapshot(reqId: number): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
   const t0 = Date.now();
   try {
@@ -104,55 +137,55 @@ function snapshot(reqId) {
     const trackCount = set.getcount('tracks');
     const sceneCount = set.getcount('scenes');
 
-    const tracks = [];
+    const tracks: BSV.Track[] = [];
     for (let t = 0; t < trackCount; t++) {
       const a = at('live_set tracks ' + t);
       tracks.push({
         i: t,
         name: gstr(a, 'name'),
         color: gnum(a, 'color'),
-        isMidi: gnum(a, 'has_midi_input') === 1,
-        isGroup: gnum(a, 'is_foldable') === 1,
-        isGrouped: gnum(a, 'is_grouped') === 1,
+        colorIndex: gnum(a, 'color_index'),
+        isMidi: gbool(a, 'has_midi_input'),
+        isGroup: gbool(a, 'is_foldable'),
+        isGrouped: gbool(a, 'is_grouped'),
       });
     }
 
-    const scenes = [];
+    const scenes: BSV.Scene[] = [];
     for (let s = 0; s < sceneCount; s++) {
       const a = at('live_set scenes ' + s);
       scenes.push({
         i: s,
         name: gstr(a, 'name'),
         color: gnum(a, 'color'),
-        isEmpty: gnum(a, 'is_empty') === 1,
+        colorIndex: gnum(a, 'color_index'),
+        isEmpty: gbool(a, 'is_empty'),
         tempo: gnum(a, 'tempo'),
       });
     }
 
-    const clips = [];
+    const clips: BSV.Clip[] = [];
     for (let t = 0; t < trackCount; t++) {
       if (tracks[t].isGroup) continue; // group tracks have no real clip slots
       for (let s = 0; s < sceneCount; s++) {
         const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
-        if (!exists(slot) || gnum(slot, 'has_clip') !== 1) continue;
+        if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
         const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
         if (!exists(c)) continue;
         clips.push({
           t: t,
           s: s,
           name: gstr(c, 'name'),
-          // colorIndex is what we write; color is Live's exact RGB for that
-          // index, so the UI never has to look anything up to render.
           colorIndex: gnum(c, 'color_index'),
           color: gnum(c, 'color'),
           length: gnum(c, 'length'),
-          isMidi: gnum(c, 'is_midi_clip') === 1,
+          isMidi: gbool(c, 'is_midi_clip'),
         });
       }
     }
 
     const ms = Date.now() - t0;
-    const payload = {
+    const payload: BSV.Snapshot = {
       rev: Date.now(),
       ms: ms,
       tempo: gnum(at('live_set'), 'tempo'),
@@ -164,9 +197,7 @@ function snapshot(reqId) {
       clips: clips,
     };
 
-    const d = new Dict(SNAPSHOT_DICT);
-    d.clear();
-    d.parse(JSON.stringify(payload));
+    publish(SNAPSHOT_DICT, payload);
     outlet(0, 'snapshot_done', reqId, SNAPSHOT_DICT, ms);
   } catch (e) {
     fail(reqId, e);
@@ -177,12 +208,12 @@ function snapshot(reqId) {
 // ops: [{ t, s, name?, colorIndex? }] — clip-slot addressed, one property write
 // each. Executed in chunks off the main message so Live's UI keeps breathing.
 
-function apply(reqId, dictName) {
+function apply(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
   if (job) return fail(reqId, 'apply already in progress');
   try {
     const d = new Dict(dictName);
-    const ops = JSON.parse(d.stringify()).ops || [];
+    const ops: BSV.ApplyOp[] = JSON.parse(d.stringify()).ops || [];
     job = { reqId: reqId, ops: ops, i: 0, ok: 0, skipped: 0, t0: Date.now() };
     if (!ops.length) return finishJob();
     applyTask.repeat();
@@ -192,46 +223,46 @@ function apply(reqId, dictName) {
   }
 }
 
-function execOp(op) {
+function execOp(op: BSV.ApplyOp): void {
+  const j = job!;
   const c = at('live_set tracks ' + op.t + ' clip_slots ' + op.s + ' clip');
   if (!exists(c)) {
-    job.skipped++;
+    j.skipped++;
     return;
   }
   if (op.name !== undefined) setName(c, op.name);
   if (op.colorIndex !== undefined) c.set('color_index', op.colorIndex);
-  else if (op.color !== undefined) c.set('color', op.color);
-  job.ok++;
+  j.ok++;
 }
 
-function applyStep() {
-  if (!job) {
+function applyStep(): void {
+  const j = job;
+  if (!j) {
     applyTask.cancel();
     return;
   }
-  const end = Math.min(job.i + CHUNK, job.ops.length);
-  for (; job.i < end; job.i++) {
+  const end = Math.min(j.i + CHUNK, j.ops.length);
+  for (; j.i < end; j.i++) {
     try {
-      execOp(job.ops[job.i]);
+      execOp(j.ops[j.i]);
     } catch (e) {
-      job.skipped++;
+      j.skipped++;
     }
   }
-  outlet(0, 'apply_progress', job.reqId, job.i, job.ops.length);
-  if (job.i >= job.ops.length) {
+  outlet(0, 'apply_progress', j.reqId, j.i, j.ops.length);
+  if (j.i >= j.ops.length) {
     applyTask.cancel();
     finishJob();
   }
 }
 
-function finishJob() {
-  const ms = Date.now() - job.t0;
-  const d = new Dict(RESULT_DICT);
-  d.clear();
-  d.parse(JSON.stringify({ applied: job.ok, skipped: job.skipped, total: job.ops.length }));
-  const reqId = job.reqId;
+function finishJob(): void {
+  const j = job!;
+  const ms = Date.now() - j.t0;
+  const result: BSV.ApplyResult = { applied: j.ok, skipped: j.skipped, total: j.ops.length };
   job = null;
-  outlet(0, 'apply_done', reqId, RESULT_DICT, ms);
+  publish(RESULT_DICT, result);
+  outlet(0, 'apply_done', j.reqId, RESULT_DICT, ms);
 }
 
 var applyTask = new Task(applyStep);
@@ -244,9 +275,7 @@ applyTask.interval = 2;
 // Live clamps the index — that's how we learn the palette size rather than
 // assuming it.
 
-const PALETTE_MAX = 200; // safety stop; real palettes are far smaller
-
-function palette(reqId) {
+function palette(reqId: number): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
   let scratchIndex = -1;
   const set = new LiveAPI(function () {}, 'live_set');
@@ -257,17 +286,16 @@ function palette(reqId) {
     scratchIndex = before;
 
     const sc = new LiveAPI(function () {}, 'live_set scenes ' + scratchIndex);
-    const colors = [];
+    const colors: number[] = [];
     for (let i = 0; i < PALETTE_MAX; i++) {
       sc.set('color_index', i);
       if (gnum(sc, 'color_index') !== i) break; // clamped — past the end
       colors.push(gnum(sc, 'color') & 0xffffff);
     }
 
-    const d = new Dict('bsv_palette');
-    d.clear();
-    d.parse(JSON.stringify({ count: colors.length, colors: colors }));
-    outlet(0, 'palette_done', reqId, 'bsv_palette');
+    const p: BSV.Palette = { count: colors.length, colors: colors };
+    publish(PALETTE_DICT, p);
+    outlet(0, 'palette_done', reqId, PALETTE_DICT);
   } catch (e) {
     fail(reqId, e);
   } finally {
@@ -285,11 +313,11 @@ function palette(reqId) {
 // MVP watches structure only (track/scene lists). Per-clip observers would be
 // ~1 per slot; measure the snapshot cost before deciding that's worth it.
 
-function onStructureChange() {
+function onStructureChange(): void {
   outlet(0, 'changed', 'structure');
 }
 
-function observe(on) {
+function observe(on: number): void {
   clearObservers();
   if (Number(on) !== 1) return;
   try {
@@ -303,20 +331,22 @@ function observe(on) {
   }
 }
 
-function clearObservers() {
+function clearObservers(): void {
   for (let i = 0; i < observers.length; i++) {
     try {
       observers[i].property = '';
-    } catch (e) {}
+    } catch (e) {
+      /* object may already be gone */
+    }
   }
   observers = [];
 }
 
-function anything() {
+function anything(): void {
   post('bsv lom: unhandled message "' + messagename + '"\n');
 }
 
-function notifydeleted() {
+function notifydeleted(): void {
   clearObservers();
   applyTask.cancel();
 }

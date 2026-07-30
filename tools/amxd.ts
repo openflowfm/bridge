@@ -12,20 +12,22 @@
 
 import fs from 'node:fs';
 
-export const DEVICE_TYPE = {
+export type DeviceType = 'audio' | 'midi' | 'instrument';
+
+export const DEVICE_TYPE: Record<DeviceType, string> = {
   audio: 'aaaa',
   midi: 'mmmm',
   instrument: 'iiii',
 };
 
-function chunk(id, payload) {
+function chunk(id: string, payload: Buffer): Buffer {
   const head = Buffer.alloc(8);
   head.write(id, 0, 4, 'ascii');
   head.writeUInt32LE(payload.length, 4);
   return Buffer.concat([head, payload]);
 }
 
-export function pack(patcher, type = 'audio') {
+export function pack(patcher: unknown, type: DeviceType = 'audio'): Buffer {
   const tag = DEVICE_TYPE[type];
   if (!tag) throw new Error(`unknown device type: ${type}`);
   const json =
@@ -38,8 +40,8 @@ export function pack(patcher, type = 'audio') {
   ]);
 }
 
-export function unpack(buf) {
-  const chunks = {};
+export function unpack(buf: Buffer): { type: string; patcher: any } {
+  const chunks: Record<string, Buffer> = {};
   let o = 0;
   while (o + 8 <= buf.length) {
     const id = buf.toString('ascii', o, o + 4);
@@ -58,7 +60,7 @@ export function unpack(buf) {
 
 // CLI ------------------------------------------------------------------
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [cmd, input, output, type] = process.argv.slice(2);
+  const [cmd, input, output, type] = process.argv.slice(2) as [string, string, string, DeviceType];
   if (cmd === 'pack') {
     const patcher = JSON.parse(fs.readFileSync(input, 'utf8'));
     fs.writeFileSync(output, pack(patcher, type || 'audio'));

@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "None",
+    "lib": ["ES2022"],
+    "types": [],
+    "moduleDetection": "legacy",
+    "resolveJsonModule": false,
+    "esModuleInterop": false,
+    // Max's v8 pre-defines autowatch/outlets/inlets as globals we assign to.
+    // The hand-written predecessor ran without "use strict"; keep it that way
+    // rather than risk a strict-mode ReferenceError on those assignments.
+    "alwaysStrict": false,
+    "rootDir": "src",
+    "outDir": ".",
+    "sourceMap": false
+  },
+  "files": ["src/lom.ts", "types/max.d.ts", "../protocol/global.d.ts"]
+}

@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "moduleDetection": "auto",
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": ".",
+    "sourceMap": false
+  },
+  "files": ["src/bridge.ts", "types/max-api.d.ts", "../protocol/global.d.ts"]
+}

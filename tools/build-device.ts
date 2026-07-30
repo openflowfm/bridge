@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pack } from './amxd.mjs';
+import { pack } from './amxd.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = path.join(root, 'bridge');
@@ -27,10 +27,17 @@ const URL_ = 'http://127.0.0.1:17800';
 const DEVICE_W = 244;
 
 let n = 0;
-const boxes = [];
-const lines = [];
+type Box = { box: Record<string, unknown> };
+type Line = { patchline: { destination: [string, number]; source: [string, number] } };
+const boxes: Box[] = [];
+const lines: Line[] = [];
 
-function box(maxclass, text, rect, extra = {}) {
+function box(
+  maxclass: string,
+  text: string | null,
+  rect: number[],
+  extra: Record<string, unknown> = {},
+): string {
   const id = `obj-${++n}`;
   boxes.push({
     box: { id, maxclass, patching_rect: rect, ...(text !== null ? { text } : {}), ...extra },
@@ -38,7 +45,13 @@ function box(maxclass, text, rect, extra = {}) {
   return id;
 }
 
-const obj = (text, rect, ins, outs, extra) =>
+const obj = (
+  text: string,
+  rect: number[],
+  ins: number,
+  outs: number,
+  extra: Record<string, unknown> = {},
+) =>
   box('newobj', text, rect, {
     numinlets: ins,
     numoutlets: outs,
@@ -46,20 +59,20 @@ const obj = (text, rect, ins, outs, extra) =>
     ...extra,
   });
 
-const msg = (text, rect, extra) =>
+const msg = (text: string, rect: number[], extra: Record<string, unknown> = {}) =>
   box('message', text, rect, { numinlets: 2, numoutlets: 1, outlettype: [''], ...extra });
 
-const comment = (text, rect, extra = {}) =>
+const comment = (text: string, rect: number[], extra: Record<string, unknown> = {}) =>
   box('comment', text, rect, { numinlets: 1, numoutlets: 0, ...extra });
 
-const connect = (src, outlet, dst, inlet) =>
+const connect = (src: string, outlet: number, dst: string, inlet: number) =>
   lines.push({ patchline: { destination: [dst, inlet], source: [src, outlet] } });
 
 // ---------------------------------------------------------------------
 // Presentation view — the only thing visible in Live
 // ---------------------------------------------------------------------
 
-const pres = (r) => ({ presentation: 1, presentation_rect: r });
+const pres = (r: number[]) => ({ presentation: 1, presentation_rect: r });
 
 box('live.comment', 'SESSION BRIDGE', [520, 40, 160, 20], {
   numinlets: 1,

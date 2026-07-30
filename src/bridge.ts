@@ -1,37 +1,50 @@
-// bridge.js — runs in Node for Max inside the device.
+// bridge.ts — compiled to bridge/bridge.js and run by Node for Max.
 //
 // Owns the HTTP + WebSocket server. Knows nothing about the Live Object Model;
-// it just relays coarse-grained requests to lom.js and streams results back.
-// Serving the UI from here is deliberate: the whole app ships as one .amxd
-// plus this folder, with no packaging, signing or updater to build.
+// it just relays coarse-grained requests to lom.ts and streams results back.
+// Serving the UI from here is deliberate: the whole app ships as one .amxd plus
+// this folder, with no packaging, signing or updater.
+//
+// Protocol types come from the global BSV namespace rather than an import, so
+// this can emit to a flat file outside its own rootDir.
 
-const Max = require('max-api');
-const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
-const { WebSocketServer } = require('ws');
+import Max = require('max-api');
+import http = require('node:http');
+import fs = require('node:fs');
+import path = require('node:path');
+import { WebSocketServer, WebSocket } from 'ws';
 
 const PORT = Number(process.env.BSV_PORT) || 17800;
 const HOST = '127.0.0.1';
+const WS_PATH = '/ws';
 const PUBLIC = path.join(__dirname, 'public');
 const PALETTE_FILE = path.join(__dirname, 'palette.json');
 
+interface Pending {
+  ws: WebSocket;
+  type: BSV.RequestType;
+  clientId?: number;
+  started: number;
+}
+
 let lomReady = false;
 let nextReqId = 1;
-const pending = new Map(); // reqId -> { ws, type, started }
+const pending = new Map<number, Pending>();
 
 // --- http -------------------------------------------------------------
 
-const MIME = {
+const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json; charset=utf-8',
 };
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`);
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
 
@@ -65,23 +78,23 @@ const server = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, path: WS_PATH });
 
-function send(ws, obj) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+function send(ws: WebSocket | undefined, event: BSV.Event): void {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(event));
 }
 
-function broadcast(obj) {
-  const s = JSON.stringify(obj);
+function broadcast(event: BSV.Event): void {
+  const s = JSON.stringify(event);
   for (const ws of wss.clients) if (ws.readyState === 1) ws.send(s);
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws: WebSocket) => {
   Max.post(`client connected (${wss.clients.size} total)`);
   send(ws, { type: 'status', lomReady });
 
   ws.on('message', async (raw) => {
-    let m;
+    let m: BSV.Request;
     try {
       m = JSON.parse(raw.toString());
     } catch {
@@ -90,36 +103,37 @@ wss.on('connection', (ws) => {
     try {
       await handle(ws, m);
     } catch (e) {
-      send(ws, { type: 'error', id: m.id, message: String(e.message || e) });
+      send(ws, { type: 'error', id: m.id, message: String((e as Error).message ?? e) });
     }
   });
 
   ws.on('close', () => Max.post(`client disconnected (${wss.clients.size} left)`));
 });
 
-async function handle(ws, m) {
+function track(ws: WebSocket, m: BSV.Request): number {
+  const reqId = nextReqId++;
+  pending.set(reqId, { ws, type: m.type, clientId: m.id, started: Date.now() });
+  return reqId;
+}
+
+async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
   switch (m.type) {
     case 'snapshot': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      const reqId = nextReqId++;
-      pending.set(reqId, { ws, type: 'snapshot', clientId: m.id, started: Date.now() });
-      Max.outlet('snapshot', reqId);
+      Max.outlet('snapshot', track(ws, m));
       break;
     }
     case 'apply': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       const ops = Array.isArray(m.ops) ? m.ops : [];
-      const reqId = nextReqId++;
-      pending.set(reqId, { ws, type: 'apply', clientId: m.id, started: Date.now() });
+      const reqId = track(ws, m);
       await Max.setDict('bsv_ops', { ops });
       Max.outlet('apply', reqId, 'bsv_ops');
       break;
     }
     case 'palette': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      const reqId = nextReqId++;
-      pending.set(reqId, { ws, type: 'palette', clientId: m.id, started: Date.now() });
-      Max.outlet('palette', reqId);
+      Max.outlet('palette', track(ws, m));
       break;
     }
     case 'observe':
@@ -129,11 +143,15 @@ async function handle(ws, m) {
       send(ws, { type: 'pong', id: m.id });
       break;
     default:
-      send(ws, { type: 'error', id: m.id, message: `unknown type: ${m.type}` });
+      send(ws, {
+        type: 'error',
+        id: (m as { id?: number }).id,
+        message: `unknown type: ${(m as { type: string }).type}`,
+      });
   }
 }
 
-// --- messages from lom.js --------------------------------------------
+// --- messages from lom.ts --------------------------------------------
 
 Max.addHandler('ready', () => {
   lomReady = true;
@@ -141,49 +159,48 @@ Max.addHandler('ready', () => {
   broadcast({ type: 'status', lomReady: true });
 });
 
-Max.addHandler('snapshot_done', async (reqId, dictName, ms) => {
+Max.addHandler('snapshot_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const data = await Max.getDict(dictName);
+  const data: BSV.Snapshot = await Max.getDict(dictName);
   Max.post(`snapshot: ${data.clipCount} clips in ${ms}ms`);
-  const payload = { type: 'snapshot', id: req?.clientId, lomMs: ms, data };
-  if (req?.ws) send(req.ws, payload);
-  else broadcast(payload);
+  const event: BSV.Event = { type: 'snapshot', id: req?.clientId, lomMs: ms, data };
+  if (req?.ws) send(req.ws, event);
+  else broadcast(event);
 });
 
-Max.addHandler('apply_progress', (reqId, done, total) => {
+Max.addHandler('apply_progress', (reqId: number, done: number, total: number) => {
   const req = pending.get(reqId);
   send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
 });
 
-Max.addHandler('apply_done', async (reqId, dictName, ms) => {
+Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const result = await Max.getDict(dictName);
+  const result: BSV.ApplyResult = await Max.getDict(dictName);
   Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
   send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
   broadcast({ type: 'changed', kind: 'applied' });
 });
 
-Max.addHandler('palette_done', async (reqId, dictName) => {
+Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const p = await Max.getDict(dictName);
-  // Cache it: deriving the palette costs a scratch scene, so we only ever
-  // want to do it once per Live version.
+  const p: BSV.Palette = await Max.getDict(dictName);
+  // Deriving the palette costs a scratch scene, so only ever do it once.
   try {
     fs.writeFileSync(PALETTE_FILE, JSON.stringify(p, null, 2));
     Max.post(`palette: ${p.count} colors extracted and cached`);
   } catch (e) {
-    Max.post(`palette: extracted but could not cache — ${e.message}`);
+    Max.post(`palette: extracted but could not cache — ${(e as Error).message}`);
   }
   send(req?.ws, { type: 'palette', id: req?.clientId, ...p });
   broadcast({ type: 'paletteUpdated' });
 });
 
-Max.addHandler('changed', (kind) => broadcast({ type: 'changed', kind }));
+Max.addHandler('changed', (kind: string) => broadcast({ type: 'changed', kind }));
 
-Max.addHandler('err', (reqId, message) => {
+Max.addHandler('err', (reqId: number, message: string) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
   Max.post(`LOM error: ${message}`);
@@ -193,11 +210,10 @@ Max.addHandler('err', (reqId, message) => {
 Max.addHandler('pong', () => {});
 
 // --- dev: live reload -------------------------------------------------
-// node.script @watch 1 already restarts this file on change, and v8 autowatch
-// reloads lom.js. This closes the last gap: edit anything in public/ and every
-// open browser reloads itself.
+// Vite's own HMR covers the dev server. This covers the built output being
+// served straight out of public/.
 
-let reloadTimer = null;
+let reloadTimer: NodeJS.Timeout | undefined;
 try {
   fs.watch(PUBLIC, { recursive: true }, () => {
     clearTimeout(reloadTimer);
@@ -207,15 +223,15 @@ try {
     }, 120); // editors emit several events per save
   });
 } catch (e) {
-  Max.post(`could not watch public/ — live reload off (${e.message})`);
+  Max.post(`could not watch public/ — live reload off (${(e as Error).message})`);
 }
 
 // --- lifecycle --------------------------------------------------------
 
-// Both listeners are required: WebSocketServer re-emits the http server's
-// error on itself, and an unhandled 'error' event takes down the whole script.
+// Both listeners are required: WebSocketServer re-emits the http server's error
+// on itself, and an unhandled 'error' event takes down the whole script.
 let reportedError = false;
-function onServerError(e) {
+function onServerError(e: NodeJS.ErrnoException): void {
   if (reportedError) return; // both listeners fire for the same failure
   reportedError = true;
   if (e.code === 'EADDRINUSE') {
@@ -232,15 +248,17 @@ wss.on('error', onServerError);
 
 server.listen(PORT, HOST, () => {
   Max.post(`Session Bridge listening on http://${HOST}:${PORT}`);
-  Max.outlet('serving'); // drives the device's status line; routed off before lom.js
+  Max.outlet('serving'); // drives the device's status line; routed off before lom
   Max.outlet('hello'); // whichever side is late drives the handshake
 });
 
-function shutdown() {
+function shutdown(): void {
   try {
     for (const ws of wss.clients) ws.terminate();
     server.close();
-  } catch {}
+  } catch {
+    /* already down */
+  }
   process.exit(0);
 }
 process.on('SIGTERM', shutdown);
