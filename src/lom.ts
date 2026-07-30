@@ -83,6 +83,21 @@ function gbool(a: LiveAPI, prop: string): boolean {
 }
 
 /**
+ * Numeric property Live is allowed to answer with nothing. A scene's
+ * `color_index` is documented as "Can be None for no color", and gnum would
+ * report that as palette slot 0 — a real color.
+ *
+ * Mirrored as `parseNumOr` in core/src/lomAtoms.ts, where it has tests.
+ */
+function gnumOr(a: LiveAPI, prop: string, fallback: number): number {
+  const v = a.get(prop);
+  const x = Array.isArray(v) ? (v.length ? v[0] : undefined) : v;
+  if (x === undefined || x === null || x === '') return fallback;
+  const n = Number(x);
+  return isFinite(n) ? n : fallback;
+}
+
+/**
  * Object-list properties come back as alternating `'id', n` atoms, e.g.
  * `['id', 4, 'id', 5, ...]`. Returns just the numeric ids.
  */
@@ -177,18 +192,36 @@ function snapshot(reqId: number): void {
     const trackCount = set.getcount('tracks');
     const sceneCount = set.getcount('scenes');
 
+    // group_track hands back the parent's LOM id, but everything downstream
+    // addresses tracks by index, so keep an id -> index map to resolve them.
+    // A second pass is needed regardless: a nested group's parent is itself a
+    // track, and only after the walk are all ids known.
     const tracks: BSV.Track[] = [];
+    const indexOfId: { [id: string]: number } = {};
+    const parentIds: number[] = [];
     for (let t = 0; t < trackCount; t++) {
       const a = at('live_set tracks ' + t);
+      const isGroup = gbool(a, 'is_foldable');
+      indexOfId[String(a.id)] = t;
+      parentIds.push(gbool(a, 'is_grouped') ? gid(a, 'group_track') : 0);
       tracks.push({
         i: t,
         name: gstr(a, 'name'),
         color: gnum(a, 'color'),
         colorIndex: gnum(a, 'color_index'),
         isMidi: gbool(a, 'has_midi_input'),
-        isGroup: gbool(a, 'is_foldable'),
+        isGroup: isGroup,
         isGrouped: gbool(a, 'is_grouped'),
+        groupIndex: -1, // resolved below
+        // fold_state is documented as only available when is_foldable, so
+        // don't ask for it on a track that isn't a group.
+        isFolded: isGroup ? gbool(a, 'fold_state') : false,
       });
+    }
+    for (let t = 0; t < trackCount; t++) {
+      if (!parentIds[t]) continue;
+      const parent = indexOfId[String(parentIds[t])];
+      if (parent !== undefined) tracks[t].groupIndex = parent;
     }
 
     const tTracks = Date.now();
@@ -200,7 +233,8 @@ function snapshot(reqId: number): void {
         i: s,
         name: gstr(a, 'name'),
         color: gnum(a, 'color'),
-        colorIndex: gnum(a, 'color_index'),
+        // -1 when the scene has no color; slot 0 is a real color.
+        colorIndex: gnumOr(a, 'color_index', -1),
         isEmpty: gbool(a, 'is_empty'),
         tempo: gnum(a, 'tempo'),
       });

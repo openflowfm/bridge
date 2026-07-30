@@ -151,6 +151,14 @@ Names are global, so **one device instance per Live set**.
   Our app has to own it.
 - **There is no scene-move API.** Reordering means duplicate-then-delete across every
   track. This is why setlist reordering is out of MVP scope.
+- **Group membership is a parent link, not a tree.** `Track.group_track` returns the
+  *immediate* parent group's id (groups nest), and `is_grouped` only says whether there
+  is one. The snapshot resolves those ids to track indexes; don't infer grouping from
+  track order. `fold_state` is Live's own collapsed state, and is documented as only
+  available when `is_foldable` — don't read it on a track that isn't a group.
+- **A property Live documents as optional needs its own "absent" value.** A scene's
+  `color_index` "Can be None for no color", and `gnum` would report that as palette
+  slot 0 — a real color. `gnumOr` exists for this; see also `gref` for object refs.
 - **There is no Session View layout in the LOM** — no column widths, no row heights,
   nothing about how the grid is drawn. `Track.View` is `selected_device`,
   `device_insert_mode`, `is_collapsed` (documented as the *arranger*, not the session)
