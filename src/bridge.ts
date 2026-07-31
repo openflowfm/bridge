@@ -203,6 +203,42 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('apply', reqId, 'bsv_ops');
       break;
     }
+    // Reordering scenes. Shares `bsv_ops` with apply — one write is in flight at
+    // a time and lom.ts refuses either while the other is running, so there's no
+    // second dict to keep alive. It does NOT share the `apply` message: this one
+    // deletes scenes, and the two paths should not be one typo apart.
+    case 'move': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const plan = m.plan;
+      const create = Array.isArray(plan?.create) ? plan.create : [];
+      const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+      const remove = Array.isArray(plan?.remove) ? plan.remove : [];
+      // The same check lom.ts makes, made earlier so a malformed plan never gets
+      // as far as Live. A plan that deletes more than it creates shrinks the set
+      // on every drag.
+      if (!create.length || create.length !== remove.length) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message:
+            `refusing a move that creates ${create.length} scenes and deletes ` +
+            `${remove.length} — the plan is malformed`,
+        });
+      }
+      const reqId = track(ws, m);
+      try {
+        await Max.setDict('bsv_ops', { plan: { create, steps, remove } });
+      } catch (e) {
+        pending.delete(reqId);
+        throw new Error(
+          `could not stage a move of ${create.length} scenes into bsv_ops — ` +
+            `${describe(e)}. The dict must exist before Node can write it; ` +
+            `lom.ts creates it on init.`,
+        );
+      }
+      Max.outlet('move', reqId, 'bsv_ops');
+      break;
+    }
     case 'palette': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('palette', track(ws, m));
@@ -303,6 +339,30 @@ Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number)
   Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
   send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
   broadcast({ type: 'changed', kind: 'applied' });
+});
+
+Max.addHandler('move_progress', (reqId: number, done: number, total: number) => {
+  const req = pending.get(reqId);
+  send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
+});
+
+Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const r: {
+    created: number; copied: number; removed: number;
+    failed: number; undoStep: boolean;
+  } = await Max.getDict(dictName);
+  Max.post(
+    `move: ${r.created} scenes created, ${r.copied} clips copied, ` +
+      `${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
+      (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
+  );
+  send(req?.ws, { type: 'moved', id: req?.clientId, lomMs: ms, ...r });
+  // Structural, so every other client's scene indexes just became wrong. This
+  // is the one change where a stale grid is actively dangerous rather than
+  // merely out of date — a click lands on a different scene than it looks like.
+  broadcast({ type: 'changed', kind: 'moved' });
 });
 
 Max.addHandler('palette_done', async (reqId: number, dictName: string) => {

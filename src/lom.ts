@@ -12,9 +12,11 @@
 // from the global BSV namespace (see protocol/global.d.ts).
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
-//      palette <reqId> | playback <verb> <i> <j> | watch_play <0|1> | ping
+//      move <reqId> <dictName> | palette <reqId> | playback <verb> <i> <j>
+//      watch_play <0|1> | ping
 // out: ready | snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
-//      apply_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
+//      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
+//      move_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      pong
 
@@ -649,6 +651,303 @@ function finishJob(): void {
 var applyTask = new Task(applyStep);
 applyTask.interval = 2;
 
+// --- move -------------------------------------------------------------
+// Reordering scenes, which Live gives us no call for. See bridge/LOM.md: both
+// Cycling '74's reference and Live 12.4.3's own docstring table have
+// create_scene / delete_scene / duplicate_scene and no move of any kind.
+//
+// So a move is build-then-delete, in four passes:
+//
+//   1. create_scene at the destination, once per moved scene   (blank scenes)
+//   2. duplicate_clip_to for every occupied slot                (the audio)
+//   3. copy the scene's own properties across                   (the labels)
+//   4. delete_scene at the source                               (irreversible)
+//
+// THIS IS THE ONLY WRITE IN THE PROJECT THAT CAN DESTROY WORK. Everything else
+// renames or recolors something that still exists, and `inverseOps` reverses it
+// out of the snapshot we already hold. Nothing in a snapshot can rebuild a
+// deleted scene's clips, so pass 4 is one-way.
+//
+// Three consequences shape the code below:
+//
+// - The index arithmetic is NOT here. It's in core/src/sceneMove.ts with an
+//   exhaustive test, and arrives as data. Pass 1 renumbers the whole set
+//   underneath us, so the scenes pass 4 deletes are not at the indexes the UI
+//   found them at — and that is exactly the sort of off-by-n that deletes a
+//   song instead of moving it.
+// - Pass 3 reads the properties off the source scene HERE rather than taking
+//   them from the plan. `create_scene` makes a genuinely blank scene, and the
+//   snapshot doesn't model everything a scene carries (no time signature), so
+//   copying from the live object is both more complete and immune to a stale
+//   snapshot. In this project the scene NAME IS THE MAPPING — a move that drops
+//   names doesn't lose labels, it deletes the song from derivation.
+// - Pass 4 doesn't run if pass 2 lost anything. Half a song moved is
+//   recoverable by hand; half a song moved with the original already deleted is
+//   not.
+
+interface MoveJob {
+  reqId: number;
+  plan: BSV.MovePlan;
+  /** Position across create → steps → remove, as one flat index. */
+  i: number;
+  created: number;
+  copied: number;
+  removed: number;
+  failed: number;
+  undoStep: boolean;
+  t0: number;
+}
+
+var moveJob: MoveJob | null = null;
+
+/**
+ * The scene properties a move has to carry, since `create_scene` carries none.
+ *
+ * `color` is RGB rather than `color_index` for the reason the whole project
+ * writes scene colors that way — `Scene.color_index` is documented "Can be None
+ * for no color" and Max's LiveAPI cannot construct that None to write it back.
+ *
+ * Tempo and time signature are each a value plus an `_enabled` gate, and the
+ * gate has to be written FIRST: with it off, the value reads back -1 whatever
+ * you wrote. Same trap `setSceneTempo` exists for.
+ */
+function copySceneProps(fromPath: string, toPath: string): void {
+  // Own cursors, NOT at(). at() hands back the same LiveAPI object every time,
+  // so a source and a target taken from it are one object pointed at whichever
+  // was requested last — and this function has to hold both at once. Reading
+  // everything before repositioning would also work and is exactly the kind of
+  // ordering dependency that breaks the first time someone adds a line.
+  const from = new LiveAPI(function () {}, fromPath);
+  if (!exists(from)) throw new Error('move: source scene ' + fromPath + ' did not resolve');
+  const to = new LiveAPI(function () {}, toPath);
+  if (!exists(to)) throw new Error('move: target scene ' + toPath + ' did not resolve');
+
+  const name = gstr(from, 'name');
+  const color = gnumOr(from, 'color', -1);
+  const tempoOn = gbool(from, 'tempo_enabled');
+  const tempo = gnum(from, 'tempo');
+  const sigOn = gbool(from, 'time_signature_enabled');
+  const sigNum = gnum(from, 'time_signature_numerator');
+  const sigDen = gnum(from, 'time_signature_denominator');
+
+  setName(to, name);
+  if (color >= 0) to.set('color', color);
+
+  if (tempoOn && tempo >= MIN_TEMPO) {
+    to.set('tempo_enabled', 1);
+    to.set('tempo', tempo);
+  }
+  if (sigOn && sigNum > 0 && sigDen > 0) {
+    to.set('time_signature_enabled', 1);
+    to.set('time_signature_numerator', sigNum);
+    to.set('time_signature_denominator', sigDen);
+  }
+}
+
+/**
+ * Copy one clip across.
+ *
+ * `duplicate_clip_to` takes a **ClipSlot object**, not a path or an index, so
+ * the target goes in as an id. It raises when the source slot is empty, when the
+ * two tracks differ in type, and when either slot belongs to a group track — the
+ * planner filters all three out, so a raise here means the plan disagrees with
+ * the set and the caller needs to know rather than have it swallowed.
+ */
+function copyClip(track: number, fromScene: number, toScene: number): void {
+  const target = new LiveAPI(
+    function () {},
+    'live_set tracks ' + track + ' clip_slots ' + toScene,
+  );
+  if (!exists(target)) {
+    throw new Error('move: target slot ' + track + '/' + toScene + ' did not resolve');
+  }
+  // A second cursor, because at() hands back the same object every time and both
+  // ends of this call have to be held at once.
+  const source = new LiveAPI(
+    function () {},
+    'live_set tracks ' + track + ' clip_slots ' + fromScene,
+  );
+  if (!exists(source)) {
+    throw new Error('move: source slot ' + track + '/' + fromScene + ' did not resolve');
+  }
+  source.call('duplicate_clip_to', 'id', target.id);
+}
+
+function move(reqId: number, dictName: string): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  if (job || moveJob) return fail(reqId, 'a write is already in progress');
+  try {
+    const d = new Dict(dictName);
+    const raw = d.stringify();
+    let parsed: { plan?: BSV.MovePlan };
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        'could not parse ' + dictName + ' as JSON: ' + String(raw).substring(0, 200),
+      );
+    }
+
+    const plan = parsed.plan;
+    const create = plan ? asList<number>(plan.create) : [];
+    const steps = plan ? asList<BSV.MoveStep>(plan.steps) : [];
+    const remove = plan ? asList<number>(plan.remove) : [];
+
+    // A plan that would delete more than it creates is malformed, and the
+    // failure mode is a set one scene shorter every time someone drags. Refuse
+    // rather than execute a plan we can already see is wrong.
+    if (create.length !== remove.length) {
+      throw new Error(
+        'move: plan creates ' + create.length + ' scenes but deletes ' +
+          remove.length + ' — refusing',
+      );
+    }
+    if (!create.length) return fail(reqId, 'move: empty plan');
+
+    // Group the whole move into one entry in Live's undo history if Live will
+    // let us. Undocumented (see bridge/LOM.md) and therefore wrapped: if it
+    // isn't there, the move still runs, it just isn't undoable from Live.
+    let undoStep = false;
+    try {
+      const song = at('live_set');
+      song.call('begin_undo_step');
+      undoStep = true;
+    } catch (e) {
+      post('bsv move: begin_undo_step unavailable — ' + describe(e) + '\n');
+    }
+
+    moveJob = {
+      reqId: reqId,
+      plan: { create: create, steps: steps, remove: remove },
+      i: 0,
+      created: 0,
+      copied: 0,
+      removed: 0,
+      failed: 0,
+      undoStep: undoStep,
+      t0: Date.now(),
+    };
+    moveTask.repeat();
+  } catch (e) {
+    moveJob = null;
+    fail(reqId, e);
+  }
+}
+
+/** Total units of work in a plan, for chunking and progress. */
+function moveTotal(j: MoveJob): number {
+  return j.plan.create.length + j.plan.steps.length + j.plan.remove.length;
+}
+
+/**
+ * One unit of the move. Creates run first, then a whole scene's clips plus its
+ * properties, then the deletions.
+ *
+ * A scene is one unit rather than a clip, so a scene's clips and its properties
+ * can't be split across a yield — leaving a half-populated scene visible in Live
+ * for a frame is confusing, and leaving one visible forever if the device
+ * reloads mid-move is worse.
+ */
+function moveStep(): void {
+  const j = moveJob;
+  if (!j) {
+    moveTask.cancel();
+    return;
+  }
+  const nCreate = j.plan.create.length;
+  const nSteps = j.plan.steps.length;
+  const total = moveTotal(j);
+  const end = Math.min(j.i + CHUNK, total);
+  // Its own cursor rather than at(). copySceneProps below repositions the shared
+  // one, so a `song` taken from at() would be pointing at a Scene by the time
+  // the next create_scene/delete_scene ran — and `call` on the wrong object is
+  // the silent kind of wrong this file specialises in.
+  const song = new LiveAPI(function () {}, 'live_set');
+  if (!exists(song)) {
+    j.failed++;
+    moveTask.cancel();
+    return finishMove();
+  }
+
+  for (; j.i < end; j.i++) {
+    try {
+      if (j.i < nCreate) {
+        song.call('create_scene', j.plan.create[j.i]);
+        j.created++;
+      } else if (j.i < nCreate + nSteps) {
+        const step = j.plan.steps[j.i - nCreate];
+        const tracks = asList<number>(step.tracks);
+        for (let k = 0; k < tracks.length; k++) {
+          try {
+            copyClip(tracks[k], step.from, step.to);
+            j.copied++;
+          } catch (e) {
+            j.failed++;
+            post(
+              'bsv move: clip ' + tracks[k] + '/' + step.from + ' → ' + step.to +
+                ' failed: ' + describe(e) + '\n',
+            );
+          }
+        }
+        copySceneProps('live_set scenes ' + step.from, 'live_set scenes ' + step.to);
+      } else {
+        // Nothing gets deleted if a single clip didn't make it. The scenes are
+        // already duplicated at this point, so stopping here leaves the set
+        // messy but complete — every clip still exists somewhere. Deleting
+        // anyway would turn a recoverable mess into lost work.
+        if (j.failed) break;
+        song.call('delete_scene', j.plan.remove[j.i - nCreate - nSteps]);
+        j.removed++;
+      }
+    } catch (e) {
+      j.failed++;
+      post('bsv move: step ' + j.i + ' failed: ' + describe(e) + '\n');
+    }
+  }
+
+  outlet(0, 'move_progress', j.reqId, j.i, total);
+  // `j.failed` short-circuits the delete pass above without advancing `i`, so
+  // check for that as well as for reaching the end.
+  if (j.i >= total || (j.failed && j.i >= nCreate + nSteps)) {
+    moveTask.cancel();
+    finishMove();
+  }
+}
+
+function finishMove(): void {
+  const j = moveJob!;
+  const ms = Date.now() - j.t0;
+
+  if (j.undoStep) {
+    try {
+      at('live_set').call('end_undo_step');
+    } catch (e) {
+      post('bsv move: end_undo_step failed — ' + describe(e) + '\n');
+    }
+  }
+
+  const result = {
+    created: j.created,
+    copied: j.copied,
+    removed: j.removed,
+    failed: j.failed,
+    undoStep: j.undoStep,
+  };
+  moveJob = null;
+  publish(RESULT_DICT, result);
+  outlet(0, 'move_done', j.reqId, RESULT_DICT, ms);
+
+  if (result.failed) {
+    post(
+      'bsv move: ' + result.failed + ' operation(s) failed — the originals were NOT ' +
+        'deleted. The set now holds both copies.\n',
+    );
+  }
+}
+
+var moveTask = new Task(moveStep);
+moveTask.interval = 2;
+
 // --- palette ----------------------------------------------------------
 // Live exposes no way to read its color palette, so derive it: make a scratch
 // object, walk its color_index upward reading back the RGB Live assigns each
@@ -987,4 +1286,16 @@ function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
   applyTask.cancel();
+  moveTask.cancel();
+  // An undo step left open would swallow everything the user does next into our
+  // half-finished move. Closing it is the one bit of cleanup here that touches
+  // Live rather than just releasing our own handles.
+  if (moveJob && moveJob.undoStep) {
+    try {
+      at('live_set').call('end_undo_step');
+    } catch (e) {
+      /* device is going away; nothing useful left to do */
+    }
+  }
+  moveJob = null;
 }

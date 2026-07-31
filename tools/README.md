@@ -4,12 +4,15 @@ Build tooling. Not compiled — Node 24 runs `.ts` directly via type stripping, 
 these execute straight from source.
 
 ```
-amxd.ts           pack / unpack .amxd containers  (library + CLI)
-build-device.ts   generates the patcher and packs the device
+amxd.ts                      pack / unpack .amxd containers  (library + CLI)
+build-device.ts              generates the patcher and packs the device
+lom-reference.ts             regenerates bridge/LOM.md
+lom-reference.preamble.md    the hand-written half of bridge/LOM.md
 ```
 
 ```sh
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
+npm run build:lom           # writes bridge/LOM.md
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 ```
@@ -17,6 +20,27 @@ node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
 no enums, no runtime `namespace`, no decorators.
+
+## The LOM reference
+
+`lom-reference.ts` scrapes Cycling '74's LOM page into [`bridge/LOM.md`](../bridge/LOM.md),
+splicing in `lom-reference.preamble.md` above the generated tables. Run it after a Live
+upgrade. The download is cached in `node_modules/.cache/lom.html`; delete that to refetch.
+
+Two things about it are deliberate:
+
+- **It parses the page's `liveapi_*` class names, not flattened text.** Once the tags
+  are gone a function name and one of its parameter names are the same shape, and a
+  text parser reads `create_scene`'s `index` argument as a sibling function. The first
+  version did exactly that and invented four `Song` methods.
+- **It asserts its own output.** The page declares how many children, properties and
+  functions it contains via those same class names, so the parser counts them and
+  throws if the emitted total disagrees. A reference that silently drops members is
+  worse than no reference, because you'd trust it.
+
+The page is pinned to **Live 12.1** and we run 12.4.3, so it is not the last word.
+`LOM.md` records what Live's own binary adds and contradicts; the recipe for checking a
+single name against the installed version is in there too.
 
 ## The .amxd container format
 

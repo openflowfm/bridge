@@ -99,6 +99,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `hello` | handshake; whichever side boots last drives it |
 | `snapshot <reqId>` | walk the set |
 | `apply <reqId> <dictName>` | execute an op batch — `{ ops, sceneOps }` |
+| `move <reqId> <dictName>` | reorder scenes — `{ plan }`. See *Reordering scenes* |
 | `palette <reqId>` | derive Live's color palette |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state observers |
@@ -110,6 +111,8 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `snapshot_done <reqId> <dict> <dictMs>` | |
 | `apply_progress <reqId> <done> <total>` | |
 | `apply_done <reqId> <dict> <ms>` | |
+| `move_progress <reqId> <done> <total>` | |
+| `move_done <reqId> <dict> <ms>` | |
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
@@ -143,12 +146,17 @@ Anything bigger than a few numbers crosses via a named Max dictionary:
 | dict | direction | contents |
 |---|---|---|
 | `bsv_snapshot` | lom → node | the whole set |
-| `bsv_ops` | node → lom | the op batch to apply |
-| `bsv_result` | lom → node | applied / skipped / total |
+| `bsv_ops` | node → lom | the op batch to apply, **or** a move plan |
+| `bsv_result` | lom → node | applied / skipped / total, **or** a move's counts |
 | `bsv_palette` | lom → node | derived colors |
 
 Names are global, so **one device instance per Live set** — and see *Multiple clients*
 below, because global names have consequences there too.
+
+`apply` and `move` share `bsv_ops` and `bsv_result` rather than taking two dicts each.
+That's safe for the same reason one dict per direction is: only one write is ever in
+flight, and `lom.ts` refuses either message while the other is running. Per-request names
+would retire the whole question — see *Multiple clients*.
 
 #### A dict must exist before Node can write it
 
@@ -218,6 +226,14 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
 
 ## LOM gotchas worth knowing before you touch `lom.ts`
 
+**Signatures live in [`LOM.md`](LOM.md)** — every class, property and function with its
+type and access mode, checked in so "does Live expose X, and can we *write* it?" is a
+lookup. What follows is the part a reference can't tell you: what to do about it.
+
+Three entries below started as guesses that turned out wrong, so the habit that pays is
+checking `LOM.md` **and** the version note at the top of it before assuming a property
+behaves the way its name suggests.
+
 - **`get()` returns Max atoms, not values.** Usually an array even for a single value;
   a multi-word name may arrive as one element or several. Always go through
   `gstr` / `gnum` / `gbool` / `gids` / `gid`.
@@ -258,9 +274,15 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
   UI and can glitch audio. Writes go through a `Task` in chunks of `CHUNK = 50`,
   yielding between chunks — which also gives progress reporting for free.
 - **There is no undo.** LOM writes don't participate reliably in Live's undo history.
-  Our app has to own it.
-- **There is no scene-move API.** Reordering means duplicate-then-delete across every
-  track. This is why setlist reordering is out of MVP scope.
+  Our app has to own it. One caveat now worth chasing: `Song.begin_undo_step` /
+  `end_undo_step` exist in Live's binary and are documented **nowhere** — see
+  [`LOM.md`](LOM.md). They're the only candidate route to making a structural change
+  reversible, and whether they capture LOM writes is unverified.
+- **There is no scene-move API**, in either source — see *What the LOM does not have* in
+  [`LOM.md`](LOM.md). Reordering is build-then-delete: `create_scene` at the destination,
+  `ClipSlot.duplicate_clip_to` per occupied slot, `delete_scene` at the source. What that
+  costs, and what `create_scene` does *not* carry with it, is under *Reordering scenes*
+  below.
 - **Group membership is a parent link, not a tree.** `Track.group_track` returns the
   *immediate* parent group's id (groups nest), and `is_grouped` only says whether there
   is one. The snapshot resolves those ids to track indexes; don't infer grouping from
@@ -288,9 +310,14 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
 - **A burst of observer callbacks is one event, not N.** Firing a scene changes
   `playing_slot_index` on every track at once. `onPlayChange` sets a dirty flag and
   schedules a `Task`, so 40 callbacks produce one `play_state`.
-- **`Scene.fire()` selects the scene**, per its own docstring: "will fire all clipslots
-  that this scene owns *and select the scene itself*". Launching a scene therefore moves
-  Live's view. There's no variant that doesn't.
+- **`Scene.fire()` selects the scene by default, but 12.4.3 lets you opt out.** The
+  docstring this project was written against said only "will fire all clipslots that this
+  scene owns *and select the scene itself*", and the note here used to add "there's no
+  variant that doesn't". That is now wrong: the signature is
+  `fire(force_legato, can_select_scene_on_launch)`, and passing `0` for the second fires
+  without moving Live's view. `playback` still calls plain `fire()` — changing that is a
+  real improvement for auditing a set you're labelling, and it's **unverified**, same
+  class of unknown as `ClipSlot.fire`'s optional args below.
 - **`ClipSlot.fire()` on an empty slot triggers that slot's stop button** instead of
   erroring, which is Live's documented behaviour and is why ⌘-clicking an empty cell
   usefully stops the track.
@@ -303,6 +330,64 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
   calls plain `fire()`.
 - **`notifydeleted()`** must clear observers and cancel tasks, or a reloaded device
   leaks them. That now includes the play-state observers, which are a separate list.
+
+## Reordering scenes
+
+The one write in this project that can destroy work. Everything else renames or recolors
+something that still exists, and `inverseOps` reverses it out of the snapshot we already
+hold — **nothing in a snapshot can rebuild a deleted scene's clips.**
+
+Live has no move call (see [`LOM.md`](LOM.md)), so `move` in `lom.ts` runs four passes:
+
+| pass | call | |
+|---|---|---|
+| 1 | `Song.create_scene` | blank scenes at the destination |
+| 2 | `ClipSlot.duplicate_clip_to` | the audio, slot by slot |
+| 3 | property writes | the labels — see below |
+| 4 | `Song.delete_scene` | irreversible |
+
+**The arithmetic isn't here.** It arrives as data from `core/src/sceneMove.ts`, which has
+an exhaustive test. Pass 1 renumbers the whole set underneath us — inserting n blanks
+pushes every index at or after the destination up by n — so the scenes pass 4 deletes are
+not at the indexes the UI found them at. That off-by-n deletes a song instead of moving
+it, which is exactly the class of bug that belongs somewhere testable.
+
+Five things guard it, and each closes a specific way this goes wrong:
+
+- **Pass 3 reads the source scene's properties here, not from the plan.** `create_scene`
+  makes a *genuinely* blank scene: no name, no color, no tempo, no time signature. The
+  snapshot doesn't even model time signature, so copying from the live object is both more
+  complete and immune to a stale snapshot. **In this project the scene name *is* the
+  mapping** — a move that dropped names wouldn't lose labels, it would delete the song
+  from derivation.
+- **Pass 4 doesn't run if pass 2 lost anything.** Half a song moved is a mess you can fix
+  by hand; half a song moved with the original already deleted is not. On any failure the
+  job stops before deleting and says so, in the log and in the Max window.
+- **A plan that creates and deletes different counts is refused**, in `bridge.ts` and
+  again in `lom.ts`. The failure it prevents is a set one scene shorter after every drag.
+- **The whole move is wrapped in `begin_undo_step` / `end_undo_step`.** Undocumented —
+  see [`LOM.md`](LOM.md) — so it's wrapped in a `try` and the move still runs without it.
+  Whether Live actually captures LOM writes this way is **unverified**, and it's the only
+  route back that exists, so the UI says which of the two happened rather than assuming.
+- **Undo is cleared, not replaced.** Scene indexes all mean something different
+  afterwards, so leaving the previous entry armed would offer a ⌘Z that writes clip names
+  against the wrong rows.
+
+`notifydeleted` closes an open undo step. Leaving one open would silently swallow
+everything the user does next into our half-finished move.
+
+**`move` constructs its own cursors rather than using `at()`**, and this is the gotcha
+above biting for real rather than a stylistic choice. `at()` hands back the same `LiveAPI`
+object every time, so a `live_set` cursor taken from it becomes a *Scene* the moment
+`copySceneProps` repositions it — and the next `create_scene` / `delete_scene` would then
+be a `call` on the wrong object. Anywhere two objects are live at once here, both are
+`new LiveAPI`.
+
+**Unverified, like everything else in `lom.ts`.** Specifically: whether
+`duplicate_clip_to` accepts a target as `'id', n` through Max's `call()`, whether
+`begin_undo_step` does anything, and whether the time-signature writes land. The failure
+mode to watch for is the one this file has produced repeatedly — the write silently does
+nothing and the next snapshot reports the old value. Try it on a copy of a set first.
 
 ## Palette derivation
 
