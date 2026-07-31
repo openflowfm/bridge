@@ -151,12 +151,68 @@ function gref(a: LiveAPI, prop: string): number {
 }
 
 /**
- * Names routinely contain spaces. Unquoted they arrive at Live as a list of
- * atoms and only the first word survives.
+ * Which form of name write this Max build actually wants.
+ *
+ * `null` until a multi-word name has settled it. Only a name with a space can
+ * settle it — a single word round-trips identically either way, so probing on
+ * one would decide nothing and cache the wrong answer.
+ */
+var quoteNames: boolean | null = null;
+
+function quoted(s: string): string {
+  return '"' + s.replace(/"/g, "'") + '"';
+}
+
+/**
+ * Set a `name` property, and get the spaces right.
+ *
+ * This wrapper exists because the two plausible ways to write a multi-word name
+ * fail in opposite directions and **the failure is invisible from here**: quote
+ * a name a build doesn't want quoted and Live stores the quotes as part of the
+ * name; don't quote one that needs it and Live takes the first word and drops
+ * the rest. Both `set` calls succeed. Nothing throws.
+ *
+ * So it isn't guessed at — it's measured, once. The first multi-word name is
+ * written plain, read back, and compared; if it didn't survive, the quoted form
+ * is written instead and the answer is cached for the session. One extra `get`
+ * per Live session, and after that every write takes the settled path.
+ *
+ * `[js]` lore says quote it, and this file did until a real set showed scene
+ * names coming back with literal quotes around them — so under `v8` a JS string
+ * is evidently passed as one symbol and needs no help. That's now the form
+ * tried first rather than the form assumed, because it's the one that keeps a
+ * name Live can't parse out of the set.
  */
 function setName(a: LiveAPI, value: unknown): void {
   const s = String(value === null || value === undefined ? '' : value);
-  a.set('name', '"' + s.replace(/"/g, "'") + '"');
+
+  if (quoteNames !== null) {
+    a.set('name', quoteNames ? quoted(s) : s);
+    return;
+  }
+
+  a.set('name', s);
+  if (s.indexOf(' ') < 0) return; // settles nothing — try again on the next one
+
+  const back = gstr(a, 'name');
+  if (back === s) {
+    quoteNames = false;
+    return;
+  }
+
+  a.set('name', quoted(s));
+  const backQuoted = gstr(a, 'name');
+  quoteNames = backQuoted === s;
+  if (!quoteNames) {
+    // Neither form round-tripped. Stay on the plain one and say so loudly: a
+    // truncated name is at least obviously wrong, where a name carrying stray
+    // punctuation reads as very nearly right and gets written 848 times.
+    a.set('name', s);
+    post(
+      'bsv setName: neither form round-trips. Sent "' + s + '", plain read back "' +
+        back + '", quoted read back "' + backQuoted + '". Staying plain.\n',
+    );
+  }
 }
 
 /**

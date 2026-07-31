@@ -222,7 +222,20 @@ multi-client cheap rather than merely correct. See [`protocol/README.md`](../pro
   a multi-word name may arrive as one element or several. Always go through
   `gstr` / `gnum` / `gbool` / `gids` / `gid`.
 - **Setting a name needs quoting.** Unquoted, `a.set('name', 'Arp Jam 1')` arrives as
-  a list of atoms and only `Arp` survives. `setName()` handles it.
+  a list of atoms and only `Arp` survives. `setName()` handles it — see the quoting note
+  below, which is what it actually does about it.
+- **Don't quote a name for `set`, and don't assume either way — measure it.** `[js]` lore
+  says a multi-word name has to be passed as a quoted symbol or Live keeps only the first
+  word. Under `v8` that is evidently wrong: this file quoted every name for months and a
+  real set showed scene names carrying literal `"` characters, so a JS string is passed
+  through as one symbol and needs no help. The trap is that **both failures are invisible
+  from inside `lom.js`** — quote a name that shouldn't be quoted and the quotes become
+  part of it, don't quote one that should be and the name is truncated, and *both `set`
+  calls succeed*. Nothing throws. `setName` therefore writes the first multi-word name
+  plain, reads it back, and only falls back to the quoted form if it didn't survive,
+  caching the answer for the session. One extra `get` per Live session. Single-word names
+  deliberately settle nothing — they round-trip identically either way, so probing on one
+  would cache a coin flip.
 - **`goto('id N')` does not resolve.** Measured against a real set: every one of 24 tracks
   fell back, Max posted `v8liveapi: get: no valid object set` per attempt, and
   `get('clip')` on the unresolved cursor answered `1` rather than an `['id', n]` pair. This
