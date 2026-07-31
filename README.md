@@ -98,7 +98,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `init` | from `live.thisdevice`; LiveAPI is unsafe before this |
 | `hello` | handshake; whichever side boots last drives it |
 | `snapshot <reqId>` | walk the set |
-| `apply <reqId> <dictName>` | execute an op batch |
+| `apply <reqId> <dictName>` | execute an op batch — `{ ops, sceneOps }` |
 | `palette <reqId>` | derive Live's color palette |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state observers |
@@ -305,6 +305,24 @@ Live exposes no way to read its color palette. `palette()` derives it:
 Nothing the user owns is touched. `bridge.js` caches the result to `palette.json` and
 serves it at `/palette.json`, so it runs once per Live version.
 
+## The role vocabulary
+
+`roles.json` sits beside `palette.json`, is served at `/roles.json`, and is written by
+the `saveRoles` message. It holds the list of roles and each one's palette slot —
+**not** which scene has which role, which lives in the scene names inside the set (see
+[`../core/README.md`](../core/README.md)).
+
+Server-side rather than `localStorage` for two concrete reasons: the UI is served from
+two origins (`:5173` in dev, `:17800` shipped), so browser storage would quietly diverge
+between them; and a cache clear before a gig shouldn't cost you your color scheme.
+
+Unlike the palette, **an empty vocabulary is a correct steady state** — it's what a fresh
+install has — so a missing file answers `200` with `{"roles":[]}` rather than `404`.
+There's nothing to derive and nothing to retry, which is the opposite of the palette's
+situation. The write is write-then-rename: a half-written file would parse as invalid
+JSON and the UI would come up with no vocabulary at all, the same shape of failure the
+degenerate palette cache caused.
+
 **The UI triggers it, once, before the first walk** — see `ui/README.md` *Palette*. Not on
 every snapshot: the sweep mutates the set, so that would dirty the document on every
 refresh, churn Live's undo history, and fire the structural observer whose whole purpose is
@@ -411,3 +429,13 @@ streaming, palette caching, error paths.
 
 `lom.js` needs Live and has no automated coverage. **It's the file to suspect first.**
 The parts that could be extracted are, in `core/src/lomAtoms.ts`.
+
+**`execSceneOp` is unverified.** Nothing has yet written a scene name or a scene color
+against a real set. The name half goes through the same `setName` the clip path has
+always used, so it's the low-risk half; the color half writes plain `color` (RGB) rather
+than `color_index`, which is the form the palette-derivation failure established as the
+writable one for scenes — but *reading* that conclusion off a failed `color_index` write
+is not the same as having watched a scene change color. If it's wrong, the failure mode
+is the one this file has produced three times before: the write silently does nothing and
+the following snapshot reports the old color, which looks like the UI not having sent
+anything. The name write landing while the color doesn't is the signature to look for.

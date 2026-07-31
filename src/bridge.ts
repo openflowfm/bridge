@@ -19,6 +19,7 @@ const HOST = '127.0.0.1';
 const WS_PATH = '/ws';
 const PUBLIC = path.join(__dirname, 'public');
 const PALETTE_FILE = path.join(__dirname, 'palette.json');
+const ROLES_FILE = path.join(__dirname, 'roles.json');
 
 interface Pending {
   ws: WebSocket;
@@ -95,6 +96,25 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // The role vocabulary. Lives beside the palette, and here rather than in
+  // localStorage for two reasons: the UI is served from two origins (:5173 in
+  // dev, :17800 shipped) so browser storage would quietly diverge between them,
+  // and a cache clear before a gig shouldn't cost you your color scheme.
+  //
+  // Unlike the palette, an empty vocabulary is a perfectly good steady state —
+  // it's what a fresh install has — so a missing file answers 200 with an empty
+  // list rather than 404. There is nothing to derive and nothing to retry.
+  if (rel === '/roles.json') {
+    fs.readFile(ROLES_FILE, (err, buf) => {
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(err ? '{"roles":[]}' : buf);
+    });
+    return;
+  }
+
   const file = path.join(PUBLIC, path.normalize(rel));
   if (file !== PUBLIC && !file.startsWith(PUBLIC + path.sep)) {
     res.writeHead(403).end('forbidden');
@@ -163,9 +183,10 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'apply': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       const ops = Array.isArray(m.ops) ? m.ops : [];
+      const sceneOps = Array.isArray(m.sceneOps) ? m.sceneOps : [];
       const reqId = track(ws, m);
       try {
-        await Max.setDict('bsv_ops', { ops });
+        await Max.setDict('bsv_ops', { ops, sceneOps });
       } catch (e) {
         // Max rejects setDict for a dict that doesn't exist yet, and does it with
         // an empty message — which is how this arrived as "apply: Error" and
@@ -174,8 +195,9 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
         // or not at all.
         pending.delete(reqId);
         throw new Error(
-          `could not stage ${ops.length} ops into bsv_ops — ${describe(e)}. ` +
-            `The dict must exist before Node can write it; lom.ts creates it on init.`,
+          `could not stage ${ops.length + sceneOps.length} ops into bsv_ops — ` +
+            `${describe(e)}. The dict must exist before Node can write it; ` +
+            `lom.ts creates it on init.`,
         );
       }
       Max.outlet('apply', reqId, 'bsv_ops');
@@ -184,6 +206,25 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'palette': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('palette', track(ws, m));
+      break;
+    }
+    // Pure file I/O — no LOM involved, so no lomReady gate. The roles
+    // themselves live in the scene names inside the set; this file is only the
+    // vocabulary and its colors.
+    case 'saveRoles': {
+      const roles = (Array.isArray(m.roles) ? m.roles : []).filter(
+        (r): r is BSV.Role =>
+          !!r && typeof r.name === 'string' && r.name.trim() !== '' &&
+          typeof r.colorIndex === 'number' && Number.isFinite(r.colorIndex),
+      );
+      // Write-then-rename. A half-written file here would parse as invalid JSON
+      // and the UI would come up with no vocabulary at all — the same shape of
+      // failure the degenerate palette cache caused, and just as confusing.
+      const tmp = `${ROLES_FILE}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ roles }, null, 2));
+      fs.renameSync(tmp, ROLES_FILE);
+      Max.post(`roles: ${roles.length} saved`);
+      send(ws, { type: 'rolesSaved', id: m.id, count: roles.length });
       break;
     }
     case 'observe':

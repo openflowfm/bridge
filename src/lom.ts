@@ -37,6 +37,13 @@ const PALETTE_MAX = 200;
 interface ApplyJob {
   reqId: number;
   ops: BSV.ApplyOp[];
+  /**
+   * Scene writes, run after the clip writes in the same chunked job. One job
+   * rather than two keeps `applied + skipped` a count of the whole batch, so a
+   * write that tags scenes and recolors their clips reports one honest total.
+   */
+  sceneOps: BSV.SceneOp[];
+  /** Position across `ops` then `sceneOps`, i.e. `0 .. ops.length + sceneOps.length`. */
   i: number;
   ok: number;
   skipped: number;
@@ -415,8 +422,24 @@ function snapshot(reqId: number): void {
 }
 
 // --- apply ------------------------------------------------------------
-// ops: [{ t, s, name?, colorIndex? }] — clip-slot addressed, one property write
-// each. Executed in chunks off the main message so Live's UI keeps breathing.
+// ops:      [{ t, s, name?, colorIndex? }]        — clip-slot addressed
+// sceneOps: [{ s, name?, colorIndex?, color? }]   — scene addressed
+//
+// One property write each, executed in chunks off the main message so Live's UI
+// keeps breathing. Clips first, then scenes, in one job.
+
+/**
+ * A Max dict collapses a ONE-ELEMENT array into the element itself, so a
+ * single-item write arrives as an object rather than a list. Left alone,
+ * `.length` is undefined, the batch looks empty, and the write reports
+ * "0 applied" while doing nothing — silent, and indistinguishable from a
+ * selection that had nothing to change.
+ */
+function asList<T>(v: unknown): T[] {
+  if (Array.isArray(v)) return v as T[];
+  if (v && typeof v === 'object') return [v as T];
+  return [];
+}
 
 function apply(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
@@ -424,7 +447,7 @@ function apply(reqId: number, dictName: string): void {
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
-    let parsed: { ops?: unknown };
+    let parsed: { ops?: unknown; sceneOps?: unknown };
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
@@ -435,26 +458,26 @@ function apply(reqId: number, dictName: string): void {
       );
     }
 
-    // A Max dict collapses a ONE-ELEMENT array into the element itself, so a
-    // single-clip write arrives as an object rather than a list. Left alone,
-    // ops.length is undefined, the batch looks empty, and the write reports
-    // "0 applied" while doing nothing — silent, and indistinguishable from a
-    // selection that had nothing to change.
-    const list = parsed.ops;
-    const ops: BSV.ApplyOp[] = Array.isArray(list)
-      ? (list as BSV.ApplyOp[])
-      : list && typeof list === 'object'
-        ? [list as BSV.ApplyOp]
-        : [];
+    const ops = asList<BSV.ApplyOp>(parsed.ops);
+    const sceneOps = asList<BSV.SceneOp>(parsed.sceneOps);
+    const total = ops.length + sceneOps.length;
 
-    if (!ops.length) {
+    if (!total) {
       post(
         'bsv apply: no ops found in ' + dictName + ' — dict contained: ' +
           String(raw).substring(0, 300) + '\n',
       );
     }
-    job = { reqId: reqId, ops: ops, i: 0, ok: 0, skipped: 0, t0: Date.now() };
-    if (!ops.length) return finishJob();
+    job = {
+      reqId: reqId,
+      ops: ops,
+      sceneOps: sceneOps,
+      i: 0,
+      ok: 0,
+      skipped: 0,
+      t0: Date.now(),
+    };
+    if (!total) return finishJob();
     applyTask.repeat();
   } catch (e) {
     job = null;
@@ -474,22 +497,54 @@ function execOp(op: BSV.ApplyOp): void {
   j.ok++;
 }
 
+/**
+ * A scene write.
+ *
+ * **Color goes in as RGB, never as `color_index`.** `Scene.color_index` is
+ * documented "Can be None for no color", and Max's LiveAPI can read an
+ * `Optional[int]` but cannot construct one to write — Live answers
+ * `v8liveapi: set: unsupported property type` and the write silently does
+ * nothing. Both classes document plain `color` as "Get/set access to the color
+ * of the … (RGB)" with no None, so that is the writable form. This is the
+ * documented exception to the project's "colors are indexes" rule and it exists
+ * only for scenes and tracks; `execOp` above still writes clips by index.
+ *
+ * `colorIndex` rides along on the op for the UI's and undo's benefit and is
+ * deliberately not written here.
+ */
+function execSceneOp(op: BSV.SceneOp): void {
+  const j = job!;
+  const a = at('live_set scenes ' + op.s);
+  if (!exists(a)) {
+    j.skipped++;
+    return;
+  }
+  if (op.name !== undefined) setName(a, op.name);
+  if (op.color !== undefined) a.set('color', op.color);
+  j.ok++;
+}
+
 function applyStep(): void {
   const j = job;
   if (!j) {
     applyTask.cancel();
     return;
   }
-  const end = Math.min(j.i + CHUNK, j.ops.length);
+  // One index across both lists: clips occupy [0, ops.length), scenes the rest.
+  // Chunking across the boundary rather than restarting at it keeps a batch of
+  // 49 clips and 3 scenes to a single tick.
+  const total = j.ops.length + j.sceneOps.length;
+  const end = Math.min(j.i + CHUNK, total);
   for (; j.i < end; j.i++) {
     try {
-      execOp(j.ops[j.i]);
+      if (j.i < j.ops.length) execOp(j.ops[j.i]);
+      else execSceneOp(j.sceneOps[j.i - j.ops.length]);
     } catch (e) {
       j.skipped++;
     }
   }
-  outlet(0, 'apply_progress', j.reqId, j.i, j.ops.length);
-  if (j.i >= j.ops.length) {
+  outlet(0, 'apply_progress', j.reqId, j.i, total);
+  if (j.i >= total) {
     applyTask.cancel();
     finishJob();
   }
@@ -498,7 +553,13 @@ function applyStep(): void {
 function finishJob(): void {
   const j = job!;
   const ms = Date.now() - j.t0;
-  const result: BSV.ApplyResult = { applied: j.ok, skipped: j.skipped, total: j.ops.length };
+  const result: BSV.ApplyResult = {
+    applied: j.ok,
+    skipped: j.skipped,
+    // The whole batch, both kinds. A total that counted only clips would make a
+    // scene-only write look like it did nothing at all.
+    total: j.ops.length + j.sceneOps.length,
+  };
   job = null;
   publish(RESULT_DICT, result);
   outlet(0, 'apply_done', j.reqId, RESULT_DICT, ms);
