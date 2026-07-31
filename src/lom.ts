@@ -577,7 +577,32 @@ function execSceneOp(op: BSV.SceneOp): void {
   }
   if (op.name !== undefined) setName(a, op.name);
   if (op.color !== undefined) a.set('color', op.color);
+  if (op.tempo !== undefined) setSceneTempo(a, op.tempo);
   j.ok++;
+}
+
+/** Live's own bound, from an assertion in the 12.4.3 binary. Mirrors core. */
+var MIN_TEMPO = 20;
+
+/**
+ * A scene's own tempo, which is a playback change rather than a naming one:
+ * "the song will use the scene's tempo as soon as the scene is fired".
+ *
+ * **Order matters and is the whole reason this isn't one `set`.**
+ * `tempo_enabled` gates the property — with it off, `Scene.tempo` reads back
+ * -1 whatever you wrote — so enabling has to come first or the write lands on
+ * a disabled scene and disappears. Disabling goes the other way round: there's
+ * no point writing a value we're about to switch off.
+ *
+ * Below `MIN_TEMPO` means disable, matching how Live reports it.
+ */
+function setSceneTempo(a: LiveAPI, tempo: number): void {
+  if (tempo < MIN_TEMPO) {
+    a.set('tempo_enabled', 0);
+    return;
+  }
+  a.set('tempo_enabled', 1);
+  a.set('tempo', tempo);
 }
 
 function applyStep(): void {

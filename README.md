@@ -443,6 +443,14 @@ streaming, palette caching, error paths.
 `lom.js` needs Live and has no automated coverage. **It's the file to suspect first.**
 The parts that could be extracted are, in `core/src/lomAtoms.ts`.
 
+- **`Scene.tempo` needs `tempo_enabled` set first, and the order is load-bearing.** Live
+  documents the pair as "the song will use the scene's tempo as soon as the scene is
+  fired" / "when disabled, the scene will use the song's tempo, and the tempo value
+  returned will be -1". So writing `tempo` to a disabled scene lands nowhere and reads
+  back -1 — visually identical to the write never happening. `setSceneTempo` enables then
+  writes, and disables *without* writing a value it's about to switch off. Live's own
+  bound, from an assertion in the binary, is `>= 20.0 && <= 1000.0`.
+
 **`execSceneOp` is unverified.** Nothing has yet written a scene name or a scene color
 against a real set. The name half goes through the same `setName` the clip path has
 always used, so it's the low-risk half; the color half writes plain `color` (RGB) rather
@@ -452,3 +460,8 @@ is not the same as having watched a scene change color. If it's wrong, the failu
 is the one this file has produced three times before: the write silently does nothing and
 the following snapshot reports the old color, which looks like the UI not having sent
 anything. The name write landing while the color doesn't is the signature to look for.
+
+**Scene tempo is unverified in the same way**, and fails identically: if the
+`tempo_enabled` ordering is wrong, `Scene.tempo` reads back -1 and the write looks like
+it never happened. The check that costs nothing is to fire a scene after setting it — the
+song tempo should follow.
