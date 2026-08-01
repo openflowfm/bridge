@@ -25,9 +25,40 @@ completely different JavaScript environments.
 | `types/max.d.ts` | — | ambient `LiveAPI` / `Dict` / `Task` / globals |
 | `types/max-api.d.ts` | — | ambient `max-api` module |
 
-`bridge/package.json` exists solely so `ws` installs into `bridge/node_modules`.
-Keeping it local (rather than hoisted to the root) is what lets the folder stay
-self-contained for the device.
+`bridge/package.json` exists solely so `ws` installs into `bridge/node_modules`
+for the dev loop. **Nothing ships from there** — see below.
+
+## What actually ships
+
+Three files, and the user should only ever have to hold one of them:
+
+```
+SessionBridge.amxd    the device
+bridge.js             bundled — ws inlined, and the built UI inlined as base64
+lom.js                the [v8] script
+```
+
+`npm run build:bridge` runs [`../tools/build-bridge.ts`](../tools/build-bridge.ts),
+which esbuilds `src/bridge.ts` into a single self-contained `bridge.js`. That's what
+removes `node_modules/` and `public/` from the shipped folder — a Live device is
+something people download and drag, not a directory tree they're expected to keep
+together.
+
+Two things are deliberately left external: **`max-api`**, which Max itself provides and
+which cannot be bundled, and **`bufferutil` / `utf-8-validate`**, `ws`'s optional native
+speedups that it `require`s inside a `try` and does without.
+
+**`npm run dev` does not use the bundler.** It keeps `tsc --watch`, which is faster, and
+leaves the inlined-asset global undefined — so the bridge serves `public/` off disk while
+vite owns the UI. Serving prefers a real `public/` folder when one exists and falls back
+to the inlined copy, which also means you can drop a rebuilt UI next to a shipped device
+without rebuilding the device.
+
+The end goal is **one file**: Live's Freeze button inlines a device's dependencies into
+the `.amxd` itself, which is how a 2 MB single-file device on maxforlive.com works. See
+[`../tools/README.md`](../tools/README.md) for the container format and how to read one
+back. Whether freeze reaches `node.script`'s file the way it reaches `[js]`/`[v8]`
+scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a frozen build.
 
 ## Loading it in Live
 
@@ -46,9 +77,16 @@ self-contained for the device.
 Stuck on either of the first two? **Options ▸ Max ▸ Open Max Window** — that's where
 every error and every timing line lands.
 
-**Keep the folder together.** The device resolves `bridge.js` and `lom.js` relative
-to its own location, so load the `.amxd` from this repo rather than copying it into
-the User Library alone.
+**Keep the three files together.** The device resolves `bridge.js` and `lom.js`
+relative to its own location, so load the `.amxd` from this repo rather than copying it
+into the User Library alone. This is the constraint freezing is meant to remove — see
+*What actually ships*.
+
+State is not among those files and never has to move with them: the palette cache lives
+under Application Support and the role vocabulary lives beside your `.als`, so replacing
+the folder wholesale costs you nothing. An older install that wrote `roles.json` or
+`palette.json` into this folder is adopted once, on the next boot, with a line in the
+Max window saying so.
 
 Only one copy of the device can run at a time — they'd fight over port 17800. A
 second instance posts a warning rather than crashing. `BSV_PORT` overrides.
@@ -405,21 +443,70 @@ serves it at `/palette.json`, so it runs once per Live version.
 
 ## The role vocabulary
 
-`roles.json` sits beside `palette.json`, is served at `/roles.json`, and is written by
-the `saveRoles` message. It holds the list of roles and each one's palette slot —
+**`bsv.json`, in the folder holding the open `.als`.** Served at `/roles.json`, written
+by the `saveRoles` message. It holds the list of roles and each one's palette slot —
 **not** which scene has which role, which lives in the scene names inside the set (see
 [`../core/README.md`](../core/README.md)).
 
-Server-side rather than `localStorage` for two concrete reasons: the UI is served from
-two origins (`:5173` in dev, `:17800` shipped), so browser storage would quietly diverge
-between them; and a cache clear before a gig shouldn't cost you your color scheme.
+Per set, because a vocabulary describes the songs in one show. It travels with the set:
+copy the project folder to another machine and the colors come with it, which no amount
+of per-machine state can do.
 
-Unlike the palette, **an empty vocabulary is a correct steady state** — it's what a fresh
-install has — so a missing file answers `200` with `{"roles":[]}` rather than `404`.
+Server-side rather than `localStorage` for three reasons: the UI is served from two
+origins (`:5173` in dev, `:17800` shipped), so browser storage would quietly diverge
+between them; a cache clear before a gig shouldn't cost you your color scheme; and a
+vocabulary in a browser can't follow the set anywhere.
+
+### Which file, exactly
+
+| the open set | vocabulary read from | written to |
+|---|---|---|
+| saved | `<project folder>/bsv.json`, else the machine-wide file as a seed | `<project folder>/bsv.json` |
+| never saved | the machine-wide file | the machine-wide file |
+| saved somewhere that doesn't exist | the machine-wide file, with a line in the Max window | the machine-wide file |
+
+The machine-wide file is `roles.json` under `~/Library/Application Support/Session Bridge/`
+(`%APPDATA%\Session Bridge` on Windows, `BSV_STATE_DIR` overrides both). It is the
+fallback for an unsaved set and the **seed** for a saved one that has no `bsv.json` yet,
+so a new set opens with the colors you last used rather than nothing. It is never
+written back to on its own — the first `saveRoles` in a saved set writes that set's file
+and leaves the seed alone.
+
+One consequence of keying on the folder rather than the `.als`: several sets in one Live
+Project share a vocabulary. For versions of the same show — which is what Save As
+mostly produces — that's the point, since the colors follow. Two unrelated songs in one
+project would share one too.
+
+### Finding out which set is open
+
+`Song.file_path` is **get-only. There is no observer for it** — the property table lists
+`get` where its neighbours say `get, observe`, and Live 12.4.3's own docstring ("Get the
+current Live Set's path on disk.") has no listener counterpart. So **nothing can tell us
+the user chose Save As.**
+
+The bridge therefore asks, rather than subscribing: `set_info` → `set_info_done <dict>`,
+sent once when the LOM signals ready and again after every `snapshot_done`. A snapshot is
+when the UI re-syncs anyway, and the extra cost is two property reads and no walk. When
+the answer changes, the bridge broadcasts `setInfo` and every open client refetches its
+vocabulary — the one it loaded a moment ago may belong to a different set entirely.
+
+It travels by Dict, not atoms, for the reason in *Large payloads go through Dicts*: a
+path has spaces in it. Note the residue of that — `gstr` rebuilds a symbol property by
+joining its atoms with a single space, so a path containing **two** consecutive spaces
+comes back subtly wrong. That's why the folder is checked for existence on every use
+instead of being trusted once: a wrong-but-plausible directory would otherwise get a
+`bsv.json` written into it silently.
+
+Unlike the palette, **an empty vocabulary is a correct steady state** — it's what a new
+set has — so nothing found answers `200` with `{"roles":[]}` rather than `404`.
 There's nothing to derive and nothing to retry, which is the opposite of the palette's
 situation. The write is write-then-rename: a half-written file would parse as invalid
 JSON and the UI would come up with no vocabulary at all, the same shape of failure the
 degenerate palette cache caused.
+
+**The palette does not move with it.** It's Live's color table, the same 70 entries
+whichever document is open, and deriving it costs a scratch scene — so it stays
+machine-wide even though the vocabulary that indexes into it is per-set.
 
 **The UI triggers it, once, before the first walk** — see `ui/README.md` *Palette*. Not on
 every snapshot: the sweep mutates the set, so that would dirty the document on every

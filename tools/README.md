@@ -4,18 +4,26 @@ Build tooling. Not compiled — Node 24 runs `.ts` directly via type stripping, 
 these execute straight from source.
 
 ```
-amxd.ts                      pack / unpack .amxd containers  (library + CLI)
+amxd.ts                      pack / unpack / inspect .amxd containers  (library + CLI)
+build-bridge.ts              bundles bridge.js — ws and the built UI inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             regenerates bridge/LOM.md
 lom-reference.preamble.md    the hand-written half of bridge/LOM.md
 ```
 
 ```sh
+npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run build:lom           # writes bridge/LOM.md
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
+node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined files
 ```
+
+**The CLI compares `import.meta.url` against `pathToFileURL(process.argv[1])`, not a
+`file://` template.** `import.meta.url` percent-encodes, so under a path containing a
+space the naive comparison is false and every command becomes a silent no-op that still
+exits 0. This repo lives at `.../The Source/...`; the CLI had never once run here.
 
 Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
@@ -68,6 +76,35 @@ Each chunk is a 4-byte ASCII id, a little-endian u32 length, then that many byte
 
 Protected factory devices use a **`ciph`** chunk (encrypted) and `meta` = 7 instead of
 0. `unpack` will throw on those — expected, not a bug.
+
+### Frozen devices
+
+Live's Freeze button inlines every file a device depends on into the `.amxd` itself.
+That's how a device you download as one file works, and it's the shape this project
+wants to ship in. A frozen device keeps the same outer chunks, but the `ptch` payload is
+no longer raw patcher JSON:
+
+```
+"mx@c"  u32be(16)      header size — where the data region starts
+        u64be(n)       length of the data region
+        <data>         the patcher JSON, then every inlined file end to end
+        <directory>    the root record, then one `dire` record per file
+```
+
+The directory and each `dire` are chunk lists of their own, carrying `type` (a 4-char
+kind — `JSON` for patchers, `TEXT` for `.js`, `svg`, …), `fnam` (NUL-padded name),
+`sz32` and `of32`. The root record describes the patcher; `of32` is relative to the
+start of the `ptch` payload, not to the data region.
+
+**Two traps, both of which produce plausible-looking garbage rather than an obvious
+failure.** The outer `.amxd` chunk lengths are u32 **little**-endian while everything
+inside `mx@c` is **big**-endian; and an inner chunk's length **includes** its own
+8-byte header where an outer one's does not. A parser that seems to half-work — right
+first entry, nonsense after it — has one of these backwards.
+
+Decoded by dissecting frozen devices in the User Library, and read-only: freezing is
+Live's job, and `pack` only writes the unfrozen form. Verified against `Sting 3.amxd`
+(25 inlined files, 11 of them `.js`) and `SQ Sequencer.amxd` (30).
 
 ## The device generator
 

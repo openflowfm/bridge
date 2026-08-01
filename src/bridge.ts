@@ -11,6 +11,7 @@
 import Max = require('max-api');
 import http = require('node:http');
 import fs = require('node:fs');
+import os = require('node:os');
 import path = require('node:path');
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -18,8 +19,127 @@ const PORT = Number(process.env.BSV_PORT) || 17800;
 const HOST = '127.0.0.1';
 const WS_PATH = '/ws';
 const PUBLIC = path.join(__dirname, 'public');
-const PALETTE_FILE = path.join(__dirname, 'palette.json');
-const ROLES_FILE = path.join(__dirname, 'roles.json');
+
+/**
+ * Where the palette cache and the role vocabulary live.
+ *
+ * Deliberately **not** `__dirname`. The device is meant to ship as a single
+ * frozen `.amxd`, and Live unpacks a frozen device to a temporary location — so
+ * anything written beside the script is written somewhere disposable. Even
+ * unfrozen, `__dirname` ties your color scheme to one copy of one folder, and an
+ * upgrade that replaces the folder silently takes the vocabulary with it.
+ *
+ * Application Support rather than the Ableton User Library: the User Library is
+ * relocatable in Live's preferences and nothing here can ask Live where it went,
+ * so that path would be a guess that's right on most machines and wrong without
+ * warning on the rest. The chosen directory is posted to the Max window on boot,
+ * because state you can't find is state you can't back up.
+ */
+function stateDir(): string {
+  const override = process.env.BSV_STATE_DIR;
+  if (override) return override;
+  const home = os.homedir();
+  return process.platform === 'win32'
+    ? path.join(
+        process.env.APPDATA || path.join(home, 'AppData', 'Roaming'),
+        'Session Bridge',
+      )
+    : path.join(home, 'Library', 'Application Support', 'Session Bridge');
+}
+
+const STATE = stateDir();
+const PALETTE_FILE = path.join(STATE, 'palette.json');
+
+/**
+ * The machine-wide vocabulary. Not where a saved set's roles live — see
+ * `vocabularyFile()` — but the fallback for a set that has never been saved, and
+ * the seed a set inherits before it has a `bsv.json` of its own.
+ */
+const DEFAULT_ROLES_FILE = path.join(STATE, 'roles.json');
+
+/** The file the role vocabulary is served from, per set. */
+const VOCABULARY = 'bsv.json';
+
+/**
+ * Where the open set lives. Empty until `lom.ts` answers, and empty forever for
+ * a set that has never been saved.
+ */
+let setDir = '';
+let setName = '';
+
+/**
+ * The vocabulary file for the open set, or the machine-wide one.
+ *
+ * The directory is checked on every call rather than cached with the path,
+ * because the answer is only as good as the string Live handed us: LiveAPI
+ * returns symbol properties as space-separated atoms, so `gstr` rebuilds a path
+ * containing spaces by joining on a single space, and a path with a double space
+ * in it comes back subtly wrong. A wrong-but-plausible directory is exactly the
+ * silent failure this project avoids — so an unresolvable one falls back to the
+ * machine-wide file and says so, rather than quietly writing a `bsv.json`
+ * somewhere nobody will look.
+ */
+let reportedMissingDir = '';
+
+function vocabularyFile(): string {
+  if (!setDir) return DEFAULT_ROLES_FILE;
+  if (!fs.existsSync(setDir)) {
+    // Once per folder, not once per request: this runs on every /roles.json.
+    if (reportedMissingDir !== setDir) {
+      reportedMissingDir = setDir;
+      Max.post(`set folder does not exist, using the machine-wide roles: ${setDir}`);
+    }
+    return DEFAULT_ROLES_FILE;
+  }
+  return path.join(setDir, VOCABULARY);
+}
+
+/**
+ * The vocabulary to serve: this set's, else the machine-wide one as a seed.
+ *
+ * A set with no `bsv.json` yet inherits whatever you last used, so a new set
+ * opens with your usual colors instead of nothing. The seed is never written
+ * back on its own — it becomes this set's file the first time roles are saved.
+ */
+function readVocabulary(): Buffer | null {
+  for (const file of [vocabularyFile(), DEFAULT_ROLES_FILE]) {
+    try {
+      return fs.readFileSync(file);
+    } catch {
+      // missing is the ordinary case for both, so try the next one
+    }
+  }
+  return null;
+}
+
+/** Create the state directory on demand. Every write goes through this. */
+function ensureStateDir(): void {
+  fs.mkdirSync(STATE, { recursive: true });
+}
+
+/**
+ * Adopt state left beside the script by an older install, once.
+ *
+ * Only ever copies into an empty slot, so it can't overwrite newer state, and a
+ * failure is reported and then ignored — an unmigrated vocabulary is an
+ * inconvenience, a bridge that won't boot is a dead gig.
+ */
+function migrateLegacyState(): void {
+  const moves: [from: string, to: string, what: string][] = [
+    [path.join(__dirname, 'roles.json'), DEFAULT_ROLES_FILE, 'role vocabulary'],
+    [path.join(__dirname, 'palette.json'), PALETTE_FILE, 'palette cache'],
+  ];
+  for (const [from, to, what] of moves) {
+    try {
+      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
+      ensureStateDir();
+      fs.copyFileSync(from, to);
+      Max.post(`migrated ${what} from the device folder to ${to}`);
+    } catch (e) {
+      Max.post(`could not migrate ${what} — ${describe(e)}`);
+    }
+  }
+}
 
 interface Pending {
   ws: WebSocket;
@@ -72,12 +192,41 @@ function usablePalette(buf: Buffer): string | null {
   }
 }
 
+/**
+ * The built UI, inlined at bundle time as `path -> base64`.
+ *
+ * Substituted by esbuild (`define`), which is why it's a bare global rather than
+ * an import: `npm run dev` compiles this file with plain tsc and no substitution
+ * happens, so the `typeof` guard below leaves it empty and serving falls through
+ * to `public/` on disk. That's the arrangement the dev loop wants anyway — vite
+ * owns the UI there. See tools/build-bridge.ts.
+ */
+declare const BSV_ASSETS: Record<string, string> | undefined;
+const ASSETS: Record<string, string> =
+  typeof BSV_ASSETS === 'undefined' ? {} : BSV_ASSETS;
+
+/** Serve an inlined asset, or 404 if this build has none. */
+function serveEmbedded(rel: string, res: http.ServerResponse): void {
+  const b64 = ASSETS[rel];
+  if (b64 === undefined) {
+    res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': MIME[path.extname(rel)] || 'application/octet-stream',
+    'cache-control': 'no-store',
+  });
+  res.end(Buffer.from(b64, 'base64'));
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`);
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
 
-  // The cached palette lives beside the source, not in public/.
+  // The palette is Live's, not the set's: the same 70 colors whichever document
+  // is open, and deriving them costs a scratch scene. So it stays machine-wide
+  // even though the vocabulary that uses it is per-set.
   //
   // A degenerate cache is treated as no cache at all. A broken sweep once wrote
   // a one-entry black palette here, and because the file existed and parsed, the
@@ -96,22 +245,26 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // The role vocabulary. Lives beside the palette, and here rather than in
-  // localStorage for two reasons: the UI is served from two origins (:5173 in
-  // dev, :17800 shipped) so browser storage would quietly diverge between them,
-  // and a cache clear before a gig shouldn't cost you your color scheme.
+  // The role vocabulary — this set's bsv.json, or the machine-wide fallback.
   //
-  // Unlike the palette, an empty vocabulary is a perfectly good steady state —
-  // it's what a fresh install has — so a missing file answers 200 with an empty
-  // list rather than 404. There is nothing to derive and nothing to retry.
+  // Server-side rather than localStorage for two reasons: the UI is served from
+  // two origins (:5173 in dev, :17800 shipped) so browser storage would quietly
+  // diverge between them, and a cache clear before a gig shouldn't cost you your
+  // color scheme. Now there's a third — a vocabulary in a browser can't follow
+  // the set to another machine, and a bsv.json beside the .als can.
+  //
+  // Read per request, not cached: the answer depends on which set is open, and
+  // that changes underneath us. Unlike the palette, an empty vocabulary is a
+  // perfectly good steady state — it's what a new set has — so nothing found
+  // answers 200 with an empty list rather than 404. There is nothing to derive
+  // and nothing to retry.
   if (rel === '/roles.json') {
-    fs.readFile(ROLES_FILE, (err, buf) => {
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-      });
-      res.end(err ? '{"roles":[]}' : buf);
+    const buf = readVocabulary();
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
     });
+    res.end(buf ?? '{"roles":[]}');
     return;
   }
 
@@ -120,9 +273,12 @@ const server = http.createServer((req, res) => {
     res.writeHead(403).end('forbidden');
     return;
   }
+  // Disk first, embedded second. A `public/` folder beside the script wins so a
+  // rebuilt UI can be dropped next to a shipped device without rebuilding it —
+  // and so this stays the path it has always been when the folder is there.
   fs.readFile(file, (err, buf) => {
     if (err) {
-      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+      serveEmbedded(rel, res);
       return;
     }
     res.writeHead(200, {
@@ -256,10 +412,14 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       // Write-then-rename. A half-written file here would parse as invalid JSON
       // and the UI would come up with no vocabulary at all — the same shape of
       // failure the degenerate palette cache caused, and just as confusing.
-      const tmp = `${ROLES_FILE}.tmp`;
+      const target = vocabularyFile();
+      const tmp = `${target}.tmp`;
+      // Only the machine-wide file needs its directory created; a set's folder
+      // is one Live already wrote a .als into.
+      if (target === DEFAULT_ROLES_FILE) ensureStateDir();
       fs.writeFileSync(tmp, JSON.stringify({ roles }, null, 2));
-      fs.renameSync(tmp, ROLES_FILE);
-      Max.post(`roles: ${roles.length} saved`);
+      fs.renameSync(tmp, target);
+      Max.post(`roles: ${roles.length} saved to ${target}`);
       send(ws, { type: 'rolesSaved', id: m.id, count: roles.length });
       break;
     }
@@ -308,6 +468,26 @@ Max.addHandler('ready', () => {
   lomReady = true;
   Max.post('LOM ready');
   broadcast({ type: 'status', lomReady: true });
+  Max.outlet('set_info'); // which set is open decides where the roles live
+});
+
+/**
+ * Adopt the open set as the home of the role vocabulary.
+ *
+ * `filePath` is the `.als`; the vocabulary sits in its folder. Silence when
+ * nothing changed — this runs after every snapshot, and a broadcast per refresh
+ * would have every client refetching a file it already has.
+ */
+Max.addHandler('set_info_done', async (dictName: string) => {
+  const info: { filePath?: string; name?: string } = await Max.getDict(dictName);
+  const filePath = typeof info?.filePath === 'string' ? info.filePath : '';
+  const dir = filePath ? path.dirname(filePath) : '';
+  const name = typeof info?.name === 'string' ? info.name : '';
+  if (dir === setDir && name === setName) return;
+  setDir = dir;
+  setName = name;
+  Max.post(dir ? `set: ${name || '(unnamed)'} — roles in ${vocabularyFile()}` : 'set: unsaved — using the machine-wide roles');
+  broadcast({ type: 'setInfo', path: setDir, name: setName });
 });
 
 Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: number) => {
@@ -325,6 +505,9 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   const event: BSV.Event = { type: 'snapshot', id: req?.clientId, dictMs, hostMs, data };
   if (req?.ws) send(req.ws, event);
   else broadcast(event);
+  // Save As can't be observed — file_path has no listener — so re-ask here,
+  // where the UI is re-syncing anyway. Cheap: two property reads, no walk.
+  Max.outlet('set_info');
 });
 
 Max.addHandler('apply_progress', (reqId: number, done: number, total: number) => {
@@ -371,6 +554,7 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   const p: BSV.Palette = await Max.getDict(dictName);
   // Deriving the palette costs a scratch scene, so only ever do it once.
   try {
+    ensureStateDir();
     fs.writeFileSync(PALETTE_FILE, JSON.stringify(p, null, 2));
     Max.post(`palette: ${p.count} colors extracted and cached`);
   } catch (e) {
@@ -415,17 +599,23 @@ Max.addHandler('pong', () => {});
 // Vite's own HMR covers the dev server. This covers the built output being
 // served straight out of public/.
 
+// A shipped device has no public/ at all — its UI is inlined and cannot change
+// underneath it. That's the normal state, not a degraded one, so it gets no
+// warning; a missing folder is only worth reporting when someone meant it to be
+// there, which is exactly the case where it exists and the watch itself fails.
 let reloadTimer: NodeJS.Timeout | undefined;
-try {
-  fs.watch(PUBLIC, { recursive: true }, () => {
-    clearTimeout(reloadTimer);
-    reloadTimer = setTimeout(() => {
-      Max.post('public/ changed — reloading clients');
-      broadcast({ type: 'reload' });
-    }, 120); // editors emit several events per save
-  });
-} catch (e) {
-  Max.post(`could not watch public/ — live reload off (${(e as Error).message})`);
+if (fs.existsSync(PUBLIC)) {
+  try {
+    fs.watch(PUBLIC, { recursive: true }, () => {
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        Max.post('public/ changed — reloading clients');
+        broadcast({ type: 'reload' });
+      }, 120); // editors emit several events per save
+    });
+  } catch (e) {
+    Max.post(`could not watch public/ — live reload off (${describe(e)})`);
+  }
 }
 
 // --- lifecycle --------------------------------------------------------
@@ -448,8 +638,11 @@ function onServerError(e: NodeJS.ErrnoException): void {
 server.on('error', onServerError);
 wss.on('error', onServerError);
 
+migrateLegacyState();
+
 server.listen(PORT, HOST, () => {
   Max.post(`Session Bridge listening on http://${HOST}:${PORT}`);
+  Max.post(`state: ${STATE}`);
   Max.outlet('serving'); // drives the device's status line; routed off before lom
   Max.outlet('hello'); // whichever side is late drives the handshake
 });

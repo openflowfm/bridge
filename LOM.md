@@ -114,6 +114,14 @@ Answered questions, recorded so they stay answered.
   `.als`, which this project never parses.
 - **No stable clip or scene id across sessions.** `LiveAPI.id` is a runtime handle.
   Within a session, address by `(track, scene)`.
+- **No notification that the set was saved, or saved somewhere else.**
+  `Song.file_path` and `Song.name` are **get-only** — the property table lists `get`
+  where their neighbours say `get, observe`, and the pair of docstrings in 12.4.3's own
+  table ("Get the current Live Set's path on disk." / "Get the current Live Set's
+  name.") have no listener counterpart. Both exist and both are confirmed in the
+  binary; neither can be observed. Anything that depends on where the set lives has to
+  re-read it — `bridge.ts` does so after every snapshot. Both are empty for a set that
+  has never been saved, which is a normal answer and not an error.
 
 ## Class index
 

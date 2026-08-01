@@ -13,10 +13,11 @@
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      move <reqId> <dictName> | palette <reqId> | playback <verb> <i> <j>
-//      watch_play <0|1> | ping
+//      watch_play <0|1> | ping | set_info
 // out: ready | snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
 //      move_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
+//      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      pong
 
@@ -27,6 +28,7 @@ outlets = 1;
 const SNAPSHOT_DICT = 'bsv_snapshot';
 const RESULT_DICT = 'bsv_result';
 const PALETTE_DICT = 'bsv_palette';
+const SET_DICT = 'bsv_set';
 /** node → lom. The only dict we don't create by publishing to it — see ensureDicts. */
 const OPS_DICT = 'bsv_ops';
 
@@ -263,7 +265,7 @@ function publish(dictName: string, payload: unknown): void {
 var heldDicts: Dict[] = [];
 
 function ensureDicts(): void {
-  const names = [SNAPSHOT_DICT, RESULT_DICT, PALETTE_DICT, OPS_DICT];
+  const names = [SNAPSHOT_DICT, RESULT_DICT, PALETTE_DICT, SET_DICT, OPS_DICT];
   heldDicts = [];
   for (let i = 0; i < names.length; i++) {
     try {
@@ -295,6 +297,34 @@ function hello(): void {
 
 function ping(): void {
   outlet(0, 'pong');
+}
+
+/**
+ * Where the open Live Set lives on disk, so the bridge can keep that set's role
+ * vocabulary beside it instead of in one pile per machine.
+ *
+ * **`file_path` is get-only — there is no observer for it.** Verified in both
+ * sources: the property table lists `get` alone where its neighbours say
+ * `get, observe`, and Live 12.4.3's own docstring ("Get the current Live Set's
+ * path on disk.") sits in the Song block with no listener counterpart. So
+ * nothing can tell us the user picked Save As; the bridge re-asks after every
+ * snapshot, which is the moment it re-syncs anyway.
+ *
+ * **Empty is a normal answer, not a failure.** A set that has never been saved
+ * has no path and no name — the docs say so and the binary agrees — and the
+ * bridge falls back to its machine-wide file rather than treating it as broken.
+ *
+ * Travels by Dict because a path contains spaces and Max atoms are space
+ * separated; see the note on `gstr` in `bridge/README.md`.
+ */
+function set_info(): void {
+  try {
+    const s = at('live_set');
+    publish(SET_DICT, { filePath: gstr(s, 'file_path'), name: gstr(s, 'name') });
+    outlet(0, 'set_info_done', SET_DICT);
+  } catch (e) {
+    fail(undefined, e);
+  }
 }
 
 // --- snapshot ---------------------------------------------------------
