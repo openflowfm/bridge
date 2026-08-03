@@ -122,6 +122,34 @@ Answered questions, recorded so they stay answered.
   binary; neither can be observed. Anything that depends on where the set lives has to
   re-read it — `bridge.ts` does so after every snapshot. Both are empty for a set that
   has never been saved, which is a normal answer and not an error.
+- **No way to read a control surface's session ring — the red box.** It is written,
+  never published. `set_session_highlight(track_offset, scene_offset, …,
+  include_return_tracks, include_rack_chains)` sits in the binary's `c_instance` block
+  beside `set_pad_translation` and `request_rebuild_midi_map` — the interface a MIDI
+  Remote Script uses to push state *into* Live. The offsets live in the script's own
+  process (`ableton/v2/control_surface/components/session_ring.py`,
+  `SessionRingComponent`) and Live does not re-expose them.
+
+  What `control_surfaces N` resolves to is `ControlSurfaceProxy` — "Represents a
+  control surface running in a different process. For use by M4L" — whose whole
+  surface is `type_name`, `control_descriptions`, `grab_control`, `release_control`,
+  `subscribe_to_control`, `unsubscribe_from_control`, `send_value`,
+  `fetch_received_values`, `enable_receive_midi`, `fetch_received_midi_messages`. All
+  undocumented; no offsets, no ring size. A `ControlDescription` "Describes a control
+  present in a control surface proxy" — a pad, an encoder, a button — so the ring
+  isn't one, and values flow hardware→you rather than the direction the highlight went.
+
+  **`get_control_names` no longer exists**, so the Live 9/10 docs still circulating for
+  it are stale — it is absent from 12.4.3's table entirely, which is a real negative for
+  a name this distinctive. `get_control_by_name` *is* present, but in the
+  `TMidiRemoteScript` block next to `build_midi_map` and `lock_to_device`: Live's
+  internal host interface, not reachable from Max.
+
+  Don't try to infer the ring by watching the surface's own nav buttons. `grab_control`
+  *takes* the control from the script, so grabbing the buttons that move the ring stops
+  the ring from moving. The only accurate route is a Remote Script in the User Library
+  that relays its own offsets out — controller-specific, and a second deployable beside
+  the `.amxd`.
 
 ## Class index
 
