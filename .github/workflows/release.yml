@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            bridge/package-lock.json
+
+      # `npm ci` runs the root postinstall, which installs `ws` into
+      # bridge/node_modules. That's load-bearing: build:bridge esbuilds
+      # bridge/src/bridge.ts, and `ws` lives only there, not at the root.
+      - run: npm ci
+
+      # A tag can point at any commit, including one nothing ever checked.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Stage the folder
+        run: |
+          set -eux
+          STAGE="SessionBridge-${GITHUB_REF_NAME#v}"
+          mkdir -p "dist/$STAGE"
+          cp bridge/SessionBridge.amxd bridge/bridge.js bridge/lom.js "dist/$STAGE/"
+          cp .github/INSTALL.txt "dist/$STAGE/"
+          cp LICENSE "dist/$STAGE/LICENSE.txt"
+          (cd dist && zip -r "$STAGE.zip" "$STAGE")
+          echo "ASSET=dist/$STAGE.zip" >> "$GITHUB_ENV"
+
+      # One asset, not a bare .amxd alongside it. The device resolves
+      # bridge.js and lom.js from its own folder, so a lone .amxd is broken —
+      # and it's exactly the file someone would click.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --draft "$ASSET"

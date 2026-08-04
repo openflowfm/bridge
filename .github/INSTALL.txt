@@ -1,0 +1,48 @@
+SessionBridge — better-session-view
+https://github.com/ryangavin/better-session-view
+
+
+WHAT'S IN HERE
+
+  SessionBridge.amxd   the Max for Live device
+  bridge.js            the Node half — the UI is baked into this file
+  lom.js               the [v8] half, the only code that talks to Live
+
+KEEP ALL THREE TOGETHER. The device loads bridge.js and lom.js by name from
+beside itself. Move the folder, not the .amxd.
+
+
+INSTALL
+
+  1. Unzip this folder somewhere permanent — not a Downloads folder you clear
+     out, and not the zip preview.
+  2. In Live, drag SessionBridge.amxd onto any track. It's an audio effect with
+     a straight passthrough, so it's inert on the signal path — the Master
+     track is a fine home.
+  3. Wait for the status line to read "connected to Live".
+  4. Click "Open Session Manager". It opens http://127.0.0.1:17800 in your
+     browser.
+
+
+THE STATUS LINE
+
+  starting…           patcher loaded, Node hasn't booted
+  server up           Node is listening, the LOM handshake hasn't completed
+  connected to Live   both halves talking
+
+Stuck on either of the first two? Options > Max > Open Max Window. Every error
+and every timing line lands there.
+
+
+REQUIREMENTS
+
+  Ableton Live 12 with Max for Live. Built against 12.4.3 Suite (Max 9.1.4).
+  Nothing is downloaded at runtime and the server binds to 127.0.0.1 only.
+
+  Only one copy of the device can run at a time — two would fight over port
+  17800. A second instance posts a warning rather than crashing.
+
+
+LICENSE
+
+  MIT. See LICENSE.txt.
