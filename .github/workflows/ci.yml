@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            bridge/package-lock.json
+
+      # `npm ci` runs the root postinstall, which installs `ws` into
+      # bridge/node_modules. That's load-bearing: build:bridge esbuilds
+      # bridge/src/bridge.ts, and `ws` lives only there, not at the root.
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm test
+
+      # The "must build from a clean tree" rule, enforced rather than
+      # remembered. A clean checkout is the only place it's honestly tested —
+      # a file that's untracked but imported passes locally and fails here.
+      - run: npm run build
+
+      # lom.ts has no automated coverage: it needs Live open with the device
+      # loaded. Attaching the build to every run is the compensating control —
+      # a change can be tried in Live without building the branch by hand.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SessionBridge-${{ github.sha }}
+          path: |
+            bridge/SessionBridge.amxd
+            bridge/bridge.js
+            bridge/lom.js
+          if-no-files-found: error
+          retention-days: 14
