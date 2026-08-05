@@ -140,7 +140,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `move <reqId> <dictName>` | reorder scenes — `{ plan }`. See *Reordering scenes* |
 | `palette <reqId>` | derive Live's color palette |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
-| `watch_play <0\|1>` | install / remove the play-state observers |
+| `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `ping` | |
 
 | → node | |
@@ -154,6 +154,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
+| `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `err <reqId> <msg>` | |
 
 Two wire messages (`launch` and `stop`) collapse onto the single `playback` message with
@@ -165,7 +166,7 @@ waiting to be stepped on.
 `serving` also travels node → lom's direction but is routed off by `[route serving]`
 before reaching `v8`; it only drives the device's status line.
 
-### Play state is the one push that uses atoms, not a Dict
+### Playback pushes use atoms, not Dicts
 
 `play_state` breaks the rule below on purpose, and the reason is worth knowing before
 "fixing" it: **dict names are global.** A request/response payload like the snapshot is
@@ -175,6 +176,11 @@ itself, `v8` overwriting it before Node had finished reading the previous one.
 
 The payload is `1 + 2 × trackCount` plain integers with no punctuation anywhere in it,
 which is precisely the case atoms handle safely. Clip names never are.
+
+Arrangement position is a separate three-integer `song_position` push. It comes from
+Live's `Song.get_current_beats_song_time`, so meter changes and Live's own bar numbering
+stay authoritative. `current_song_time` may notify more often than the header can show;
+`lom.ts` drops repeated ticks and crosses to Node only when bar, beat or sixteenth changes.
 
 ### Large payloads go through Dicts, never message atoms
 

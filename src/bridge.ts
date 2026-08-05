@@ -582,6 +582,21 @@ Max.addHandler('play_state', (...args: number[]) => {
   broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
 });
 
+// Kept separate from play_state: current_song_time changes continuously, and
+// making each tick re-read every track would turn one cheap clock into dozens
+// of LOM calls. lom.ts already reduces this stream to displayed sixteenths.
+Max.addHandler(
+  'song_position',
+  (bar: number, beat: number, sixteenth: number) => {
+    broadcast({
+      type: 'songPosition',
+      bar: Number(bar),
+      beat: Number(beat),
+      sixteenth: Number(sixteenth),
+    });
+  },
+);
+
 Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
   const req = pending.get(reqId);
   pending.delete(reqId);

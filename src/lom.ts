@@ -20,6 +20,7 @@
 //      move_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
+//      song_position <bar> <beat> <sixteenth>
 //      pong
 
 autowatch = 1;
@@ -63,6 +64,10 @@ var observers: LiveAPI[] = [];
 var playObservers: LiveAPI[] = [];
 /** A burst of play-state callbacks is pending a single coalesced report. */
 var playDirty = false;
+/** Song time has changed and a position report is pending. */
+var positionDirty = false;
+/** Last displayed position, so sub-sixteenth callbacks stay local. */
+var lastPositionKey = '';
 var job: ApplyJob | null = null;
 
 // --- helpers ----------------------------------------------------------
@@ -1264,6 +1269,43 @@ var playTask = new Task(function () {
   sendPlayState();
 });
 
+function sendSongPosition(): void {
+  try {
+    const set = at('live_set');
+    const value = set.call('get_current_beats_song_time');
+    const raw = Array.isArray(value) ? value.map(String).join('') : String(value || '');
+    const fields = raw.trim().split('.');
+    if (fields.length < 3) return fail(-1, 'unexpected song position: ' + raw);
+    const bar = Number(fields[0]);
+    const beat = Number(fields[1]);
+    const sixteenth = Number(fields[2]);
+    if (!isFinite(bar) || !isFinite(beat) || !isFinite(sixteenth)) {
+      return fail(-1, 'unexpected song position: ' + raw);
+    }
+
+    // Live also returns ticks. The UI deliberately stops at sixteenths, so
+    // keep the higher-frequency callbacks inside v8 rather than making React
+    // redraw the app for a value it cannot display.
+    const key = bar + '/' + beat + '/' + sixteenth;
+    if (key === lastPositionKey) return;
+    lastPositionKey = key;
+    outlet(0, 'song_position', bar, beat, sixteenth);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function onSongPositionChange(): void {
+  if (positionDirty) return;
+  positionDirty = true;
+  positionTask.schedule(0);
+}
+
+var positionTask = new Task(function () {
+  positionDirty = false;
+  sendSongPosition();
+});
+
 function watch_play(on: number): void {
   clearPlayObservers();
   if (Number(on) !== 1) return;
@@ -1277,6 +1319,14 @@ function watch_play(on: number): void {
     songObs.property = 'is_playing';
     playObservers.push(songObs);
 
+    const positionObs = new LiveAPI(onSongPositionChange, 'live_set');
+    positionObs.property = 'current_song_time';
+    const numeratorObs = new LiveAPI(onSongPositionChange, 'live_set');
+    numeratorObs.property = 'signature_numerator';
+    const denominatorObs = new LiveAPI(onSongPositionChange, 'live_set');
+    denominatorObs.property = 'signature_denominator';
+    playObservers.push(positionObs, numeratorObs, denominatorObs);
+
     for (let t = 0; t < trackCount; t++) {
       const p = new LiveAPI(onPlayChange, 'live_set tracks ' + t);
       p.property = 'playing_slot_index';
@@ -1288,6 +1338,7 @@ function watch_play(on: number): void {
     // Seed it, so the UI shows the truth immediately rather than staying blank
     // until the first launch.
     sendPlayState();
+    sendSongPosition();
   } catch (e) {
     fail(-1, e);
   }
@@ -1295,7 +1346,10 @@ function watch_play(on: number): void {
 
 function clearPlayObservers(): void {
   playTask.cancel();
+  positionTask.cancel();
   playDirty = false;
+  positionDirty = false;
+  lastPositionKey = '';
   for (let i = 0; i < playObservers.length; i++) {
     try {
       playObservers[i].property = '';
