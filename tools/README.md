@@ -9,7 +9,6 @@ build-bridge.ts              bundles bridge.js — ws and the built UI inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             regenerates bridge/LOM.md
 lom-reference.preamble.md    the hand-written half of bridge/LOM.md
-wiki-sync.ts                 renders docs/ into flat wiki pages
 ```
 
 ```sh
@@ -50,33 +49,6 @@ Two things about it are deliberate:
 The page is pinned to **Live 12.1** and we run 12.4.3, so it is not the last word.
 `LOM.md` records what Live's own binary adds and contradicts; the recipe for checking a
 single name against the installed version is in there too.
-
-## The wiki sync
-
-`wiki-sync.ts` renders [`../docs/`](../docs/README.md) into the shape a GitHub wiki
-wants, and `.github/workflows/wiki.yml` pushes the result on every change to `docs/`.
-
-**A wiki is a separate git repository** — `<repo>.wiki.git` — whose pages are flat and
-addressed by filename with the `.md` dropped. So publishing is a rename plus a link
-rewrite, not a copy. `PAGES` holds the mapping (`the-grid.md` → `Reading-the-grid`;
-GitHub renders the hyphens as spaces), and `README.md` becomes `Home`, which is the
-landing page.
-
-Two things it refuses to do quietly, because both would ship a wiki that looks fine and
-isn't:
-
-- **A docs page with no entry in `PAGES` fails the run.** Otherwise a new page simply
-  never appears on the wiki and nothing says so.
-- **A link to an unmapped `.md` fails too.** It would render as a dead link on the wiki,
-  where relative paths don't resolve the way they do in the repo.
-
-It also writes `_Sidebar.md` (the reading order, which isn't alphabetical) and
-`_Footer.md`, which tells anyone editing on github.com that their change will be
-overwritten.
-
-The wiki repository **does not exist until one page has been created through the web
-UI**. Enabling the wiki in settings isn't enough; the clone 404s until then, and the
-workflow says so rather than failing obscurely.
 
 ## The .amxd container format
 
