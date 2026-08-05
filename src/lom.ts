@@ -14,7 +14,8 @@
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      move <reqId> <dictName> | palette <reqId> | playback <verb> <i> <j>
 //      watch_play <0|1> | ping | set_info
-// out: ready | snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
+// out: ready | snapshot_progress <reqId> <n> <total>
+//      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
 //      move_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
 //      set_info_done <dict>
@@ -332,7 +333,22 @@ function set_info(): void {
 function snapshot(reqId: number): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
   const t0 = Date.now();
+  // The four phases do very different amounts of work, so raw item counts
+  // would make the bar jump backwards when the next phase's total becomes
+  // known. Give each phase a stable slice instead. Integer de-duplication also
+  // caps a large set at 101 messages rather than sending one per scene/clip.
+  let lastProgress = -1;
+  function progress(done: number): void {
+    const next = Math.max(0, Math.min(100, Math.floor(done)));
+    if (next === lastProgress) return;
+    lastProgress = next;
+    outlet(0, 'snapshot_progress', reqId, next, 100);
+  }
+  function phase(start: number, span: number, done: number, total: number): void {
+    progress(total > 0 ? start + span * done / total : start + span);
+  }
   try {
+    progress(0);
     const set = at('live_set');
     const trackCount = set.getcount('tracks');
     const sceneCount = set.getcount('scenes');
@@ -362,6 +378,7 @@ function snapshot(reqId: number): void {
         // don't ask for it on a track that isn't a group.
         isFolded: isGroup ? gbool(a, 'fold_state') : false,
       });
+      phase(0, 10, t + 1, trackCount);
     }
     for (let t = 0; t < trackCount; t++) {
       if (!parentIds[t]) continue;
@@ -383,6 +400,7 @@ function snapshot(reqId: number): void {
         isEmpty: gbool(a, 'is_empty'),
         tempo: gnum(a, 'tempo'),
       });
+      phase(10, 10, s + 1, sceneCount);
     }
 
     const tScenes = Date.now();
@@ -401,6 +419,8 @@ function snapshot(reqId: number): void {
     let slotsScanned = 0;
     let tracksViaPath = 0;
     let probe = '';
+    const slotTrackCount = tracks.reduce((n, track) => n + (track.isGroup ? 0 : 1), 0);
+    let slotTracksDone = 0;
     for (let t = 0; t < trackCount; t++) {
       if (tracks[t].isGroup) continue; // group tracks have no real clip slots
 
@@ -435,7 +455,11 @@ function snapshot(reqId: number): void {
           for (let i = 0; i < found.length; i++) occupied.push(found[i]);
         }
       }
-      if (usedIds) continue;
+      if (usedIds) {
+        slotTracksDone++;
+        phase(20, 60, slotTracksDone, slotTrackCount);
+        continue;
+      }
 
       // Path addressing plus has_clip. Slower, and the whole reason the id
       // scan exists — but it's the one this project has actually watched work
@@ -448,7 +472,10 @@ function snapshot(reqId: number): void {
         const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
         if (exists(c)) occupied.push([t, s, Number(c.id)]);
       }
+      slotTracksDone++;
+      phase(20, 60, slotTracksDone, slotTrackCount);
     }
+    phase(20, 60, slotTrackCount, slotTrackCount);
     const tSlots = Date.now();
 
     if (tracksViaPath > 0) {
@@ -478,7 +505,9 @@ function snapshot(reqId: number): void {
         length: gnum(c, 'length'),
         isMidi: gbool(c, 'is_midi_clip'),
       });
+      phase(80, 18, i + 1, occupied.length);
     }
+    phase(80, 18, occupied.length, occupied.length);
     const tClips = Date.now();
 
     const ms = tClips - t0;
@@ -502,7 +531,9 @@ function snapshot(reqId: number): void {
     };
 
     const tDict = Date.now();
+    progress(99);
     publish(SNAPSHOT_DICT, payload);
+    progress(100);
     outlet(0, 'snapshot_done', reqId, SNAPSHOT_DICT, Date.now() - tDict);
   } catch (e) {
     fail(reqId, e);

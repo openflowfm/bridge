@@ -510,6 +510,11 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   Max.outlet('set_info');
 });
 
+Max.addHandler('snapshot_progress', (reqId: number, done: number, total: number) => {
+  const req = pending.get(reqId);
+  send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
+});
+
 Max.addHandler('apply_progress', (reqId: number, done: number, total: number) => {
   const req = pending.get(reqId);
   send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
