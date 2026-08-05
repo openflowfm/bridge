@@ -156,7 +156,10 @@ export function unpack(buf: Buffer): {
 // pathToFileURL, not a `file://` template: it percent-encodes, and this repo
 // lives under a path with a space in it. Comparing against the raw argv path
 // made the whole CLI a silent no-op — it exited 0 having done nothing.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// The argv[1] check is not redundant: under `node -e` there is no script path,
+// and pathToFileURL(undefined) throws — which made importing this module from a
+// -e one-liner (the verification recipe in the README) die before it ran.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [cmd, input, output, type] = process.argv.slice(2) as [string, string, string, DeviceType];
   if (cmd === 'pack') {
     const patcher = JSON.parse(fs.readFileSync(input, 'utf8'));

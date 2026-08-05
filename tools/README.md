@@ -144,8 +144,14 @@ Notes that matter if you edit this:
 - **Presentation view is the only thing Live shows.** `openinpresentation: 1`, and each
   visible box needs `presentation: 1` plus `presentation_rect`. Everything else is
   hidden.
-- **`live.text` needs `mode: 0`.** The default is `1` (Toggle), which fires on both
-  press and release — the browser would open twice per click.
+- **`live.text` needs `mode: 0`** (Button). The default is `1` (Toggle), which would
+  make the launch button a stateful thing that reports 1 and 0 on alternate clicks.
+- **In Button mode `live.text` bangs; it does not send `1`.** Max's own reference:
+  "In button mode, a mouse click … send[s] the text out the second outlet and a bang
+  message out the left outlet." Only Toggle mode sends `1`. The button spent a while
+  wired through a `sel 1`, which a bang never matches, so clicking it did nothing at
+  all — no error anywhere, because nothing was wrong, it just never fired. It also
+  has **two** outlets whatever `numoutlets` claims; the right one carries the label.
 - The launch button sends `; max launchbrowser http://127.0.0.1:17800`.
 
 ### Verifying a patcher change

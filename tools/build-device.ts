@@ -10,6 +10,7 @@
 //                                        -> matched   -> status text
 //   [v8 lom.js] -> [s ---bsv-to-node]
 //   [r ---bsv-to-node] -> [node.script] in0  and  -> [route ready] -> status text
+//   [live.text] -> [; max launchbrowser ...(              (the launch button)
 //   [plugin~] -> [plugout~]                                (audio passthrough)
 //
 // Presentation view — all Live shows is a title, a launch button and a status
@@ -83,9 +84,13 @@ box('live.comment', 'SESSION BRIDGE', [520, 40, 160, 20], {
 
 const launch = box('live.text', 'Open Session Manager', [520, 70, 200, 34], {
   numinlets: 1,
-  numoutlets: 1,
-  outlettype: [''],
-  mode: 0, // 0 = Button (momentary). Default is 1 = Toggle.
+  // Two outlets, always: left is the value, right is the button text. Declaring
+  // one here doesn't make the second disappear, it just makes the patch lie.
+  numoutlets: 2,
+  outlettype: ['', ''],
+  // 0 = Button (momentary), 1 = Toggle. A launch is an action, not a state, so
+  // Button — but see the wiring: Button mode bangs, it does not send 1.
+  mode: 0,
   parameter_enable: 0,
   fontsize: 11.0,
   text: 'Open Session Manager',
@@ -134,8 +139,7 @@ const sToNode = obj('s ---bsv-to-node', [440, 190, 130, 22], 1, 0);
 const routeReady = obj('route ready', [180, 130, 100, 22], 1, 2);
 const msgServing = msg('set "server up"', [370, 124, 120, 22]);
 const msgReady = msg('set "connected to Live"', [180, 164, 160, 22]);
-const selOne = obj('sel 1', [520, 200, 50, 22], 2, 2);
-const msgLaunch = msg(`; max launchbrowser ${URL_}`, [520, 232, 260, 22]);
+const msgLaunch = msg(`; max launchbrowser ${URL_}`, [520, 200, 260, 22]);
 
 comment('LOM side (v8)', [370, 38, 140, 20], { fontsize: 10.0 });
 comment('server side (node)', [20, 110, 160, 20], { fontsize: 10.0 });
@@ -164,8 +168,11 @@ connect(rToNode, 0, routeReady, 0);
 connect(routeReady, 0, msgReady, 0);
 connect(msgReady, 0, status, 0);
 
-connect(launch, 0, selOne, 0);
-connect(selOne, 0, msgLaunch, 0);
+// Straight into the message box. In Button mode live.text's left outlet emits a
+// *bang* on click — the text goes out the right outlet — so the `sel 1` that
+// used to sit here matched nothing and the button did nothing. `sel 1` is for
+// Toggle mode, which is the one mode this button must not be in.
+connect(launch, 0, msgLaunch, 0);
 
 connect(pluginIn, 0, pluginOut, 0);
 connect(pluginIn, 1, pluginOut, 1);
