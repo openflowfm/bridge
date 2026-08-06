@@ -73,6 +73,9 @@ var positionDirty = false;
 var lastPositionKey = '';
 /** Last value seen per track, used to suppress duplicate callbacks. */
 var meterLevels: number[] = [];
+/** Latest momentary channel values; combined into meterLevels with max(L, R). */
+var meterLeft: number[] = [];
+var meterRight: number[] = [];
 var metersWatching = false;
 var job: ApplyJob | null = null;
 
@@ -1580,26 +1583,27 @@ function clearPlayObservers(): void {
 }
 
 // --- output meters ----------------------------------------------------
-// One observer per track, watching Track.output_meter_level. This is Live's
-// mono, one-second hold peak for both audio and MIDI tracks. The stereo
-// left/right properties are deliberately not used: Live's own documentation
-// warns that those add significant GUI load.
+// Audio-output tracks use Live's momentary left/right peaks, combined to the
+// louder channel. `output_meter_level` has a one-second hold and visibly lags a
+// real meter; it remains only as the fallback for MIDI-only tracks, for which
+// Live exposes no momentary property. The stereo properties cost more Live GUI
+// work, which is why these observers exist only while the meter UI is open.
 
 /** Roughly one frame at 30 Hz. Every frame carries the whole current set. */
 var METER_INTERVAL_MS = 33;
 
-function meterValue(args: unknown[]): number | null {
-  // LiveAPI observer callbacks normally arrive as [property, value]. Walk from
-  // the end so this also tolerates a bare [value] without mistaking the
-  // property name for data.
-  for (let i = args.length - 1; i >= 0; i--) {
-    const raw = args[i];
-    if (typeof raw === 'string' && raw.trim() === '') continue;
-    const n = Number(raw);
-    if (!isFinite(n)) continue;
-    return Math.max(0, Math.min(1, n));
-  }
-  return null;
+function meterValue(args: unknown[], property: string): number | null {
+  // Constructing a LiveAPI at a path can call its callback with ['id', N]
+  // before the observed property reports. Treating the last numeric atom as a
+  // level turns every such track into full scale after clamping. Meter updates
+  // are either [property, value] or a bare [value]; nothing else is audio.
+  let raw: unknown;
+  if (args.length === 1) raw = args[0];
+  else if (args.length >= 2 && args[0] === property) raw = args[args.length - 1];
+  else return null;
+  if (raw === undefined || raw === null || raw === '') return null;
+  const n = Number(raw);
+  return isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
 }
 
 function queueMeterLevel(t: number, level: number): void {
@@ -1608,10 +1612,35 @@ function queueMeterLevel(t: number, level: number): void {
   meterLevels[t] = next;
 }
 
-function onMeterChange(t: number, args: unknown[]): void {
+function onMeterChange(
+  t: number,
+  channel: 'left' | 'right' | 'mono',
+  property: string,
+  args: unknown[],
+): void {
   if (!metersWatching) return;
-  const level = meterValue(args);
-  if (level !== null) queueMeterLevel(t, level);
+  const level = meterValue(args, property);
+  if (level === null) return;
+  if (channel === 'mono') {
+    queueMeterLevel(t, level);
+    return;
+  }
+  if (channel === 'left') meterLeft[t] = level;
+  else meterRight[t] = level;
+  queueMeterLevel(t, Math.max(meterLeft[t] ?? 0, meterRight[t] ?? 0));
+}
+
+function addMeterObserver(
+  t: number,
+  property: 'output_meter_left' | 'output_meter_right' | 'output_meter_level',
+  channel: 'left' | 'right' | 'mono',
+): void {
+  const observer = new LiveAPI(
+    function (args: unknown[]) { onMeterChange(t, channel, property, args); },
+    'live_set tracks ' + t,
+  );
+  observer.property = property;
+  meterObservers.push(observer);
 }
 
 function sendMeterLevels(): void {
@@ -1634,15 +1663,17 @@ function watch_meters(on: number): void {
   try {
     const trackCount = at('live_set').getcount('tracks');
     for (let t = 0; t < trackCount; t++) {
-      const observer = new LiveAPI(
-        function (args: unknown[]) { onMeterChange(t, args); },
-        'live_set tracks ' + t,
-      );
-      observer.property = 'output_meter_level';
-      meterObservers.push(observer);
-      // Seed every track. A silent set still proves the observer path is live,
-      // rather than leaving the client waiting indefinitely for a callback.
-      queueMeterLevel(t, gnumOr(observer, 'output_meter_level', 0));
+      // Zero first. Reading output_meter_level here seeded Live's held peak,
+      // which could make a never-active meter appear fully lit until its first
+      // observer callback. Silence must render as silence from frame one.
+      queueMeterLevel(t, 0);
+      const track = at('live_set tracks ' + t);
+      if (gbool(track, 'has_audio_output')) {
+        addMeterObserver(t, 'output_meter_left', 'left');
+        addMeterObserver(t, 'output_meter_right', 'right');
+      } else {
+        addMeterObserver(t, 'output_meter_level', 'mono');
+      }
     }
     sendMeterLevels();
     meterTask.repeat();
@@ -1658,6 +1689,8 @@ function clearMeterObservers(): void {
   metersWatching = false;
   meterTask.cancel();
   meterLevels = [];
+  meterLeft = [];
+  meterRight = [];
   for (let i = 0; i < meterObservers.length; i++) {
     try {
       meterObservers[i].property = '';
