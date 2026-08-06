@@ -13,7 +13,7 @@
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      move <reqId> <dictName> | palette <reqId> | playback <verb> <i> <j>
-//      watch_play <0|1> | ping | set_info
+//      set_fold <track> <0|1> | watch_play <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
@@ -1211,6 +1211,30 @@ function playback(verb: string, i: number, j: number): void {
       default:
         fail(-1, 'unknown playback verb: ' + verb);
     }
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+// --- folding ----------------------------------------------------------
+// Hide or reveal a group track's members, in Live itself.
+//
+// The one write in this file that isn't a set edit. It changes no clip, no
+// scene and nothing about what plays; it moves Live's own Session view. That
+// also means it is *not* wrapped in an undo step — folding a group is not a
+// thing anyone wants back on ⌘Z, and Live doesn't put it there either.
+
+function set_fold(t: number, folded: number): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    const tr = at('live_set tracks ' + t);
+    if (!exists(tr)) return;
+    // fold_state is documented "only available if is_foldable = 1", so this is
+    // a guard against writing an unavailable property rather than politeness.
+    // is_foldable is also how the snapshot decides a track is a group, so a
+    // track that fails here is one the grid should never have offered.
+    if (!gbool(tr, 'is_foldable')) return fail(-1, 'track ' + t + ' is not a group');
+    tr.set('fold_state', folded ? 1 : 0);
   } catch (e) {
     fail(-1, e);
   }

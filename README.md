@@ -331,7 +331,19 @@ behaves the way its name suggests.
   *immediate* parent group's id (groups nest), and `is_grouped` only says whether there
   is one. The snapshot resolves those ids to track indexes; don't infer grouping from
   track order. `fold_state` is Live's own collapsed state, and is documented as only
-  available when `is_foldable` — don't read it on a track that isn't a group.
+  available when `is_foldable` — don't read it on a track that isn't a group, and
+  `set_fold` checks `is_foldable` before writing it for the same reason. Folding is the
+  one write here that isn't a set edit: it moves Live's own Session view, changes nothing
+  about what plays, and deliberately isn't wrapped in an undo step.
+- **A group track's clip slots are real slots.** They hold no clip, and
+  `ClipSlot.fire()` on one fires every clip the group has in that scene — which is how
+  the grid launches groups without a message of its own, since `playback clip` addresses
+  a slot by position rather than looking a clip up. `stop_all_clips` on a group track
+  likewise takes its members with it. The snapshot still skips group tracks in the slot
+  scan: what a group slot *shows* (whether it has anything to fire, and its color) is
+  derivable from the member clips already in the snapshot, so reading
+  `controls_other_clips` per slot would cost trackCount × sceneCount for an answer we
+  already have. See `core/src/groupSlot.ts`.
 - **A property Live documents as optional needs its own "absent" value.** A scene's
   `color_index` "Can be None for no color", and `gnum` would report that as palette
   slot 0 — a real color. `gnumOr` exists for this; see also `gref` for object refs.

@@ -446,6 +446,12 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       else Max.outlet('playback', 'stopSong', 0, 0);
       break;
     }
+    // Also fire-and-forget, and for the same reason as playback: the client
+    // folded its own columns before sending. See `setFold` in the protocol.
+    case 'setFold':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      Max.outlet('set_fold', m.t, m.folded ? 1 : 0);
+      break;
     case 'watchPlay':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('watch_play', m.on ? 1 : 0);
