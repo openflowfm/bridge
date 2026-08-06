@@ -456,6 +456,10 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('watch_play', m.on ? 1 : 0);
       break;
+    case 'watchMeters':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      Max.outlet('watch_meters', m.on ? 1 : 0);
+      break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -586,6 +590,19 @@ Max.addHandler('play_state', (...args: number[]) => {
     tracks.push({ playing: Number(args[i]), fired: Number(args[i + 1]) });
   }
   broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
+});
+
+// One coherent frame of track/level pairs. lom.ts updates the values from
+// independent observers, then sends every track's latest value together.
+Max.addHandler('meter_levels', (...args: number[]) => {
+  const meters: BSV.TrackMeterLevel[] = [];
+  for (let i = 0; i + 1 < args.length; i += 2) {
+    const t = Number(args[i]);
+    const level = Number(args[i + 1]);
+    if (!Number.isFinite(t) || !Number.isFinite(level)) continue;
+    meters.push({ t, level });
+  }
+  if (meters.length) broadcast({ type: 'meterLevels', meters });
 });
 
 // Kept separate from play_state: current_song_time changes continuously, and

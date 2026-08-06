@@ -13,7 +13,7 @@
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      move <reqId> <dictName> | palette <reqId> | playback <verb> <i> <j>
-//      set_fold <track> <0|1> | watch_play <0|1> | ping | set_info
+//      set_fold <track> <0|1> | watch_play <0|1> | watch_meters <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
@@ -21,6 +21,7 @@
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      song_position <bar> <beat> <sixteenth>
+//      meter_levels <track0> <level0> <track1> <level1> …
 //      pong
 
 autowatch = 1;
@@ -62,12 +63,16 @@ var helloPending = false;
 var cursorApi: LiveAPI | null = null;
 var observers: LiveAPI[] = [];
 var playObservers: LiveAPI[] = [];
+var meterObservers: LiveAPI[] = [];
 /** A burst of play-state callbacks is pending a single coalesced report. */
 var playDirty = false;
 /** Song time has changed and a position report is pending. */
 var positionDirty = false;
 /** Last displayed position, so sub-sixteenth callbacks stay local. */
 var lastPositionKey = '';
+/** Last value seen per track, used to suppress duplicate callbacks. */
+var meterLevels: number[] = [];
+var metersWatching = false;
 var job: ApplyJob | null = null;
 
 // --- helpers ----------------------------------------------------------
@@ -1384,6 +1389,95 @@ function clearPlayObservers(): void {
   playObservers = [];
 }
 
+// --- output meters ----------------------------------------------------
+// One observer per track, watching Track.output_meter_level. This is Live's
+// mono, one-second hold peak for both audio and MIDI tracks. The stereo
+// left/right properties are deliberately not used: Live's own documentation
+// warns that those add significant GUI load.
+
+/** Roughly one frame at 30 Hz. Every frame carries the whole current set. */
+var METER_INTERVAL_MS = 33;
+
+function meterValue(args: unknown[]): number | null {
+  // LiveAPI observer callbacks normally arrive as [property, value]. Walk from
+  // the end so this also tolerates a bare [value] without mistaking the
+  // property name for data.
+  for (let i = args.length - 1; i >= 0; i--) {
+    const raw = args[i];
+    if (typeof raw === 'string' && raw.trim() === '') continue;
+    const n = Number(raw);
+    if (!isFinite(n)) continue;
+    return Math.max(0, Math.min(1, n));
+  }
+  return null;
+}
+
+function queueMeterLevel(t: number, level: number): void {
+  const next = Math.max(0, Math.min(1, level));
+  if (meterLevels[t] === next) return;
+  meterLevels[t] = next;
+}
+
+function onMeterChange(t: number, args: unknown[]): void {
+  if (!metersWatching) return;
+  const level = meterValue(args);
+  if (level !== null) queueMeterLevel(t, level);
+}
+
+function sendMeterLevels(): void {
+  if (!metersWatching || !meterLevels.length) return;
+  const atoms: unknown[] = [];
+  for (let t = 0; t < meterLevels.length; t++) {
+    atoms.push(t, meterLevels[t] === undefined ? 0 : meterLevels[t]);
+  }
+  outlet(0, 'meter_levels', ...atoms);
+}
+
+var meterTask = new Task(sendMeterLevels);
+meterTask.interval = METER_INTERVAL_MS;
+
+function watch_meters(on: number): void {
+  clearMeterObservers();
+  if (Number(on) !== 1) return;
+  if (!deviceReady) return fail(-1, 'device not ready');
+  metersWatching = true;
+  try {
+    const trackCount = at('live_set').getcount('tracks');
+    for (let t = 0; t < trackCount; t++) {
+      const observer = new LiveAPI(
+        function (args: unknown[]) { onMeterChange(t, args); },
+        'live_set tracks ' + t,
+      );
+      observer.property = 'output_meter_level';
+      meterObservers.push(observer);
+      // Seed every track. A silent set still proves the observer path is live,
+      // rather than leaving the client waiting indefinitely for a callback.
+      queueMeterLevel(t, gnumOr(observer, 'output_meter_level', 0));
+    }
+    sendMeterLevels();
+    meterTask.repeat();
+  } catch (e) {
+    clearMeterObservers();
+    fail(-1, e);
+  }
+}
+
+function clearMeterObservers(): void {
+  // Set this before detaching properties: a late callback from an observer
+  // being torn down must not schedule one last batch after watching is off.
+  metersWatching = false;
+  meterTask.cancel();
+  meterLevels = [];
+  for (let i = 0; i < meterObservers.length; i++) {
+    try {
+      meterObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  meterObservers = [];
+}
+
 // --- observers --------------------------------------------------------
 // MVP watches structure only (track/scene lists). Per-clip observers would be
 // ~1 per slot; measure the snapshot cost before deciding that's worth it.
@@ -1424,6 +1518,7 @@ function anything(): void {
 function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
+  clearMeterObservers();
   applyTask.cancel();
   moveTask.cancel();
   // An undo step left open would swallow everything the user does next into our

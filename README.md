@@ -141,6 +141,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `palette <reqId>` | derive Live's color palette |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
+| `watch_meters <0\|1>` | install / remove the per-track output-meter observers |
 | `ping` | |
 
 | → node | |
@@ -154,6 +155,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
+| `meter_levels <track> <level> …` | complete current track/output-level frame |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `err <reqId> <msg>` | |
 
@@ -166,16 +168,19 @@ waiting to be stepped on.
 `serving` also travels node → lom's direction but is routed off by `[route serving]`
 before reaching `v8`; it only drives the device's status line.
 
-### Playback pushes use atoms, not Dicts
+### Realtime numeric pushes use atoms, not Dicts
 
-`play_state` breaks the rule below on purpose, and the reason is worth knowing before
-"fixing" it: **dict names are global.** A request/response payload like the snapshot is
-safe in `bsv_snapshot` because only one is ever in flight. Play state pushes on every
-observer callback — many times a second while the set is rolling — so a dict would race
-itself, `v8` overwriting it before Node had finished reading the previous one.
+`play_state` and `meter_levels` break the rule below on purpose, and the reason is worth
+knowing before "fixing" it: **dict names are global.** A request/response payload like
+the snapshot is safe in `bsv_snapshot` because only one is ever in flight. Realtime
+pushes can arrive many times a second, so a dict would race itself, `v8` overwriting it
+before Node had finished reading the previous one.
 
-The payload is `1 + 2 × trackCount` plain integers with no punctuation anywhere in it,
-which is precisely the case atoms handle safely. Clip names never are.
+Both payloads are plain numbers with no punctuation anywhere in them, which is precisely
+the case atoms handle safely. Meter observers update an in-device array independently;
+roughly every 33ms, the entire array crosses as one coherent frame containing every
+track's latest value. There is no queue of historical meter callbacks to drain. Clip
+names never are.
 
 Arrangement position is a separate three-integer `song_position` push. It comes from
 Live's `Song.get_current_beats_song_time`, so meter changes and Live's own bar numbering
