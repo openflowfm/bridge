@@ -109,6 +109,29 @@ Answered questions, recorded so they stay answered.
   Reordering is therefore build-then-delete: `create_scene` at the destination,
   `ClipSlot.duplicate_clip_to` per occupied slot, then `delete_scene` at the source.
   See *Reordering scenes* in [`README.md`](README.md) for what that costs.
+- **`group_tracks` in the binary is Push's, not the LOM's, and `ungroup` is a rack
+  call.** Both are there under `strings`, and neither groups a track for us.
+  `group_tracks` sits 35 lines from `move_scene_call` in a block of `*_call` /
+  `*_response` pairs, and the mangled symbol
+  `ableton::push_live_model::Song::Message_group_tracks` names its owner outright —
+  the same trap as `move_scene_call`, one block over. `ungroup` sits among
+  `macro_variations`, `move_into_new_chain` and `DrumRackDevice`: it ungroups a rack's
+  chains. **There is no way to put a track into or out of a group from the LOM**, which
+  `Track.group_track` being `get` already implied and this confirms from the other side.
+- **Duplicate-then-delete cannot reorder tracks**, though it is exactly what reorders
+  scenes. The difference is that both halves of the scene trick are addressable:
+  `create_scene(index)` puts a blank *anywhere* and `duplicate_clip_to(target)` fills
+  *anywhere*. For tracks only the first half exists — `create_audio_track(index)` and
+  `create_midi_track(index)` do take a destination — and `duplicate_track(index)` takes
+  only *which* track, no destination, so Live drops the copy beside its source.
+  Duplicating and deleting the original therefore leaves the copy in the original's
+  place: the sequence is order-*preserving*, whatever order you run it in.
+  Reconstructing a track into a blank at the right index gets further than it looks —
+  `duplicate_clip_to` carries clips across same-type tracks, `move_device` carries the
+  devices, and mixer, routing, name and color are all settable — but automation, take
+  lanes and Arrangement content have no copy path, and the grouping can't be rebuilt
+  per the entry above. Track order is Live's to change; the app follows, because
+  `observe` watches `live_set tracks` and re-snapshots on `changed structure`.
 - **No session-view layout.** No column widths, no row heights.
   `Track.View.is_collapsed` is documented as the *arranger*. Those live only in the
   `.als`, which this project never parses.
