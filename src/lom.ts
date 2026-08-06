@@ -17,7 +17,8 @@
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
-//      move_done <reqId> <dict> <ms> | palette_done <reqId> <dict> | changed <kind>
+//      move_done <reqId> <dict> <ms> | move_clips_done <reqId> <dict> <ms>
+//      palette_done <reqId> <dict> | changed <kind>
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      song_position <bar> <beat> <sixteenth>
@@ -572,7 +573,7 @@ function asList<T>(v: unknown): T[] {
 
 function apply(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  if (job) return fail(reqId, 'apply already in progress');
+  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
@@ -816,37 +817,43 @@ function copySceneProps(fromPath: string, toPath: string): void {
 }
 
 /**
- * Copy one clip across.
+ * Copy one clip across, to any slot on any track.
  *
  * `duplicate_clip_to` takes a **ClipSlot object**, not a path or an index, so
  * the target goes in as an id. It raises when the source slot is empty, when the
  * two tracks differ in type, and when either slot belongs to a group track — the
- * planner filters all three out, so a raise here means the plan disagrees with
- * the set and the caller needs to know rather than have it swallowed.
+ * planners filter all three out, so a raise here means a plan disagrees with the
+ * set and the caller needs to know rather than have it swallowed.
+ *
+ * Both ends are addressed independently because two callers need it that way: a
+ * scene reorder moves clips down one track, and a clip drag moves them across
+ * tracks too. One function rather than two nearly identical ones — this file has
+ * no automated coverage, and a second copy of this dance is a second place for
+ * the source/target mix-up below to be got wrong.
  */
-function copyClip(track: number, fromScene: number, toScene: number): void {
+function copyClip(fromT: number, fromS: number, toT: number, toS: number): void {
   const target = new LiveAPI(
     function () {},
-    'live_set tracks ' + track + ' clip_slots ' + toScene,
+    'live_set tracks ' + toT + ' clip_slots ' + toS,
   );
   if (!exists(target)) {
-    throw new Error('move: target slot ' + track + '/' + toScene + ' did not resolve');
+    throw new Error('move: target slot ' + toT + '/' + toS + ' did not resolve');
   }
   // A second cursor, because at() hands back the same object every time and both
   // ends of this call have to be held at once.
   const source = new LiveAPI(
     function () {},
-    'live_set tracks ' + track + ' clip_slots ' + fromScene,
+    'live_set tracks ' + fromT + ' clip_slots ' + fromS,
   );
   if (!exists(source)) {
-    throw new Error('move: source slot ' + track + '/' + fromScene + ' did not resolve');
+    throw new Error('move: source slot ' + fromT + '/' + fromS + ' did not resolve');
   }
   source.call('duplicate_clip_to', 'id', target.id);
 }
 
 function move(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  if (job || moveJob) return fail(reqId, 'a write is already in progress');
+  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
@@ -950,7 +957,7 @@ function moveStep(): void {
         const tracks = asList<number>(step.tracks);
         for (let k = 0; k < tracks.length; k++) {
           try {
-            copyClip(tracks[k], step.from, step.to);
+            copyClip(tracks[k], step.from, tracks[k], step.to);
             j.copied++;
           } catch (e) {
             j.failed++;
@@ -1018,6 +1025,189 @@ function finishMove(): void {
 
 var moveTask = new Task(moveStep);
 moveTask.interval = 2;
+
+// --- moving clips -----------------------------------------------------
+// Dragging clips to another place in the grid. Slots only: nothing here creates
+// or deletes a scene, so every index means afterwards what it meant before.
+//
+// The same copy-then-delete shape as the scene reorder, and the same two rules
+// that shape it:
+//
+// - The ordering is NOT here. `core/src/clipMove.ts` sorts the copies against
+//   the direction of travel so that no clip is overwritten before it has been
+//   read, and they arrive already in that order. **Do not re-sort `steps`.**
+//   Getting it wrong doesn't raise; it silently drops clips in the overlap.
+// - Deletes don't run if any copy failed. Clips copied with the originals still
+//   in place is a set someone can fix by hand. The other way round is not.
+
+interface ClipMoveJob {
+  reqId: number;
+  steps: BSV.ClipMoveStep[];
+  remove: Array<{ t: number; s: number }>;
+  /** Position across steps → remove, as one flat index. */
+  i: number;
+  copied: number;
+  removed: number;
+  failed: number;
+  undoStep: boolean;
+  t0: number;
+}
+
+var clipJob: ClipMoveJob | null = null;
+
+function move_clips(reqId: number, dictName: string): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
+  try {
+    const d = new Dict(dictName);
+    const raw = d.stringify();
+    let parsed: { clipPlan?: BSV.ClipMovePlan };
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        'could not parse ' + dictName + ' as JSON: ' + String(raw).substring(0, 200),
+      );
+    }
+
+    const plan = parsed.clipPlan;
+    const steps = plan ? asList<BSV.ClipMoveStep>(plan.steps) : [];
+    const remove = plan ? asList<{ t: number; s: number }>(plan.remove) : [];
+    if (!steps.length) return fail(reqId, 'move_clips: empty plan');
+    // More deletions than copies can only mean clearing slots nothing was moved
+    // out of. Refuse rather than run a plan we can already see loses clips.
+    if (remove.length > steps.length) {
+      throw new Error(
+        'move_clips: plan copies ' + steps.length + ' clips but deletes ' +
+          remove.length + ' — refusing',
+      );
+    }
+
+    // One entry in Live's undo history if Live will let us — see the same call
+    // in `move`, and bridge/LOM.md on why it's wrapped.
+    let undoStep = false;
+    try {
+      const song = at('live_set');
+      song.call('begin_undo_step');
+      undoStep = true;
+    } catch (e) {
+      post('bsv move_clips: begin_undo_step unavailable — ' + describe(e) + '\n');
+    }
+
+    clipJob = {
+      reqId: reqId,
+      steps: steps,
+      remove: remove,
+      i: 0,
+      copied: 0,
+      removed: 0,
+      failed: 0,
+      undoStep: undoStep,
+      t0: Date.now(),
+    };
+    clipMoveTask.repeat();
+  } catch (e) {
+    clipJob = null;
+    fail(reqId, e);
+  }
+}
+
+/**
+ * One chunk of the move: copies first, every one of them, then the deletions.
+ *
+ * A clip is one unit here where a whole scene is one unit in `moveStep`. It can
+ * be, because nothing in this plan is renumbering the set underneath itself —
+ * yielding between two clips leaves a grid that is merely part-way, not one
+ * whose indexes have shifted.
+ */
+function clipMoveStep(): void {
+  const j = clipJob;
+  if (!j) {
+    clipMoveTask.cancel();
+    return;
+  }
+  const nSteps = j.steps.length;
+  const total = nSteps + j.remove.length;
+  const end = Math.min(j.i + CHUNK, total);
+
+  while (j.i < end) {
+    if (j.i < nSteps) {
+      const step = j.steps[j.i];
+      try {
+        copyClip(step.fromT, step.fromS, step.toT, step.toS);
+        j.copied++;
+      } catch (e) {
+        j.failed++;
+        post(
+          'bsv move_clips: ' + step.fromT + '/' + step.fromS + ' → ' + step.toT + '/' +
+            step.toS + ' failed: ' + describe(e) + '\n',
+        );
+      }
+    } else {
+      // Nothing gets cleared if a copy was lost — see the header. Skipping the
+      // whole delete pass rather than stopping the job keeps the counts honest
+      // and still reports.
+      if (j.failed === 0) {
+        const gone = j.remove[j.i - nSteps];
+        try {
+          const slot = at('live_set tracks ' + gone.t + ' clip_slots ' + gone.s);
+          // has_clip first: the slot may already be empty if the same drag's
+          // copy pass moved something out of it, and delete_clip raises on one
+          // that holds nothing.
+          if (exists(slot) && gbool(slot, 'has_clip')) {
+            slot.call('delete_clip');
+            j.removed++;
+          }
+        } catch (e) {
+          j.failed++;
+          post(
+            'bsv move_clips: clearing ' + gone.t + '/' + gone.s + ' failed: ' +
+              describe(e) + '\n',
+          );
+        }
+      }
+    }
+    j.i++;
+  }
+
+  outlet(0, 'move_progress', j.reqId, j.i, total);
+  if (j.i >= total) {
+    clipMoveTask.cancel();
+    finishClipMove();
+  }
+}
+
+function finishClipMove(): void {
+  const j = clipJob;
+  if (!j) return;
+  if (j.undoStep) {
+    try {
+      at('live_set').call('end_undo_step');
+    } catch (e) {
+      post('bsv move_clips: end_undo_step failed — ' + describe(e) + '\n');
+    }
+  }
+  const ms = Date.now() - j.t0;
+  const result = {
+    copied: j.copied,
+    removed: j.removed,
+    failed: j.failed,
+    undoStep: j.undoStep,
+  };
+  clipJob = null;
+  publish(RESULT_DICT, result);
+  outlet(0, 'move_clips_done', j.reqId, RESULT_DICT, ms);
+
+  if (result.failed) {
+    post(
+      'bsv move_clips: ' + result.failed + ' operation(s) failed — nothing was ' +
+        'deleted. The originals are all still where they were.\n',
+    );
+  }
+}
+
+var clipMoveTask = new Task(clipMoveStep);
+clipMoveTask.interval = 2;
 
 // --- palette ----------------------------------------------------------
 // Live exposes no way to read its color palette, so derive it: make a scratch

@@ -395,6 +395,43 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('move', reqId, 'bsv_ops');
       break;
     }
+    // Slots, not scenes — see `moveClips` in the protocol. Shares `bsv_ops` with
+    // the two writes above for the same reason they share it: one staging dict,
+    // and only one write can be in flight at a time anyway.
+    case 'moveClips': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const plan = m.plan;
+      const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+      const remove = Array.isArray(plan?.remove) ? plan.remove : [];
+      if (!steps.length) {
+        return send(ws, { type: 'error', id: m.id, message: 'refusing an empty clip move' });
+      }
+      // A plan that clears more than it copies can only be one that deletes
+      // clips it never moved. Caught here as well as in lom.ts, because the
+      // failure mode is silent data loss rather than a visible error.
+      if (remove.length > steps.length) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message:
+            `refusing a clip move that copies ${steps.length} and deletes ` +
+            `${remove.length} — the plan is malformed`,
+        });
+      }
+      const reqId = track(ws, m);
+      try {
+        await Max.setDict('bsv_ops', { clipPlan: { steps, remove } });
+      } catch (e) {
+        pending.delete(reqId);
+        throw new Error(
+          `could not stage a move of ${steps.length} clips into bsv_ops — ` +
+            `${describe(e)}. The dict must exist before Node can write it; ` +
+            `lom.ts creates it on init.`,
+        );
+      }
+      Max.outlet('move_clips', reqId, 'bsv_ops');
+      break;
+    }
     case 'palette': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('palette', track(ws, m));
@@ -542,6 +579,22 @@ Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number)
 Max.addHandler('move_progress', (reqId: number, done: number, total: number) => {
   const req = pending.get(reqId);
   send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
+});
+
+Max.addHandler('move_clips_done', async (reqId: number, dictName: string, ms: number) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const r: { copied: number; removed: number; failed: number; undoStep: boolean } =
+    await Max.getDict(dictName);
+  Max.post(
+    `moveClips: ${r.copied} copied, ${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
+      (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
+  );
+  send(req?.ws, { type: 'clipsMoved', id: req?.clientId, lomMs: ms, ...r });
+  // Not structural the way a scene move is — every index still means what it
+  // meant — but the grid's contents moved, so other clients are showing clips
+  // where there aren't any.
+  broadcast({ type: 'changed', kind: 'clipsMoved' });
 });
 
 Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) => {
