@@ -7,5 +7,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts", "../protocol/**/*.ts", "../protocol/**/*.d.ts"]
 }

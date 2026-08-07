@@ -119,8 +119,11 @@ alongside the `.amxd` so you can open the same patch in Max to debug.
 [live.thisdevice] ─> [init(  ─────────────> [s ---bsv-to-lom]
 [node.script] out0 ──────────────────────-> [s ---bsv-to-lom]
 
-[r ---bsv-to-lom] ─> [route serving] ─┬─ matched ──> status text
-                                      └─ rest ─────> [deferlow] ─> [v8 lom.js]
+[r ---bsv-to-lom] ─> [route serving device_state_get device_state_set]
+                       ├─ serving ─────> status text
+                       ├─ state get/set > [pattr bsv-state]
+                       └─ rest ────────> [deferlow] ─> [v8 lom.js]
+[pattr bsv-state] ─> [prepend device_state] ─> [s ---bsv-to-node]
 [v8 lom.js] ────────────────────────────────────────> [s ---bsv-to-node]
 
 [r ---bsv-to-node] ─┬─> [node.script] in0
@@ -137,8 +140,11 @@ Notes that matter if you edit this:
   stack.
 - **`live.thisdevice` fires `init`** — LiveAPI is unsafe before the device is fully
   loaded.
-- **`[route serving]`** peels off the status message so it never reaches `v8` and trips
-  the unhandled-message log.
+- **The route peels off device state as well as status.** State travels directly
+  between Node and the parameter-enabled pattr; it is not part of the Live Object Model.
+- **`pattr bsv-state` is a Blob parameter registered in the patcher's `parameters`
+  map.** Both pieces are required for Live to store the base64url-encoded JSON in the
+  `.als`. It is marked Stored Only so it cannot be automated.
 - **`plugin~` and `plugout~` are both 2-in/2-out `signal`**, copied verbatim from
   Live's own template. Getting these wrong breaks the audio path.
 - **Presentation view is the only thing Live shows.** `openinpresentation: 1`, and each
@@ -176,3 +182,16 @@ import("./tools/amxd.ts").then(({unpack})=>{
   console.log("wiring errors:",bad,"| presentation:",p.openinpresentation);
 });'
 ```
+
+### Checking the embedded Live palette
+
+With Live open and Session Bridge connected, run:
+
+```sh
+npm run dev:check-palette
+```
+
+The script invokes the developer-only LOM sweep, compares every returned RGB value with
+`core/src/livePalette.ts`, and prints the current table if it differs. It creates and
+removes one scratch MIDI track, so this is an explicit release-maintenance check rather
+than app startup behavior.

@@ -6,8 +6,10 @@
 //
 //   [live.thisdevice] -> [init(  -> [s ---bsv-to-lom]
 //   [node.script] out0 ---------> [s ---bsv-to-lom]
-//   [r ---bsv-to-lom] -> [route serving] -> unmatched -> [deferlow] -> [v8 lom.js]
-//                                        -> matched   -> status text
+//   [r ---bsv-to-lom] -> [route serving device_state_get device_state_set]
+//                         serving -> status text; state get/set -> stored pattr
+//                         unmatched -> [deferlow] -> [v8 lom.js]
+//   [pattr bsv-state] -> [prepend device_state] -> [s ---bsv-to-node]
 //   [v8 lom.js] -> [s ---bsv-to-node]
 //   [r ---bsv-to-node] -> [node.script] in0  and  -> [route ready] -> status text
 //   [live.text] -> [; max launchbrowser ...(              (the launch button)
@@ -130,10 +132,54 @@ const nodeScript = obj('node.script bridge.js @autostart 1 @watch 1', [20, 164, 
 const sToLom = obj('s ---bsv-to-lom', [20, 202, 120, 22], 1, 0);
 
 const rToLom = obj('r ---bsv-to-lom', [370, 58, 120, 22], 0, 1);
-const routeServing = obj('route serving', [370, 90, 110, 22], 1, 2);
+const routeServing = obj(
+  'route serving device_state_get device_state_set',
+  [370, 90, 310, 22],
+  1,
+  4,
+);
 const deferlow = obj('deferlow', [440, 124, 70, 22], 1, 1);
 const v8 = obj('v8 lom.js', [440, 156, 100, 22], 1, 1);
 const sToNode = obj('s ---bsv-to-node', [440, 190, 130, 22], 1, 0);
+
+// One opaque, versioned JSON blob encoded as a base64url symbol. Parameter
+// type 3 is Max for Live's Blob type; parameter_invisible makes it Stored Only,
+// so Live saves it in the .als without offering meaningless automation.
+// `restore` is the new-device sentinel — bridge.ts replaces it with migrated or
+// default state the first time it asks.
+const deviceState = obj('pattr bsv-state', [370, 244, 110, 22], 1, 3, {
+  varname: 'bsv-state',
+  restore: [0.0],
+  saved_object_attributes: { parameter_enable: 1 },
+  saved_attribute_attributes: {
+    valueof: {
+      parameter_steps: 0,
+      parameter_exponent: 1.0,
+      parameter_invisible: 1,
+      parameter_unitstyle: 10,
+      parameter_annotation_name: '',
+      parameter_mmax: 127.0,
+      parameter_mmin: 0.0,
+      parameter_type: 3,
+      parameter_initial_enable: 0,
+      parameter_shortname: 'bsv-state',
+      parameter_modmax: 127.0,
+      parameter_longname: 'bsv-state',
+      parameter_modmin: 0.0,
+      parameter_linknames: 0,
+      parameter_modmode: 0,
+      parameter_info: 'Session Bridge set-owned configuration',
+      parameter_units: '',
+      parameter_order: 0,
+      parameter_defer: 0,
+      parameter_speedlim: 0.0,
+    },
+  },
+});
+const prependDeviceState = obj('prepend device_state', [500, 244, 150, 22], 1, 1);
+comment('stored in the Live Set — roles + allowed colors', [370, 274, 310, 20], {
+  fontsize: 10.0,
+});
 
 // status wiring
 const routeReady = obj('route ready', [180, 130, 100, 22], 1, 2);
@@ -158,11 +204,15 @@ connect(rToNode, 0, nodeScript, 0);
 
 connect(rToLom, 0, routeServing, 0);
 connect(routeServing, 0, msgServing, 0); // matched "serving"
-connect(routeServing, 1, deferlow, 0); // everything else -> LOM
+connect(routeServing, 1, deviceState, 0); // get -> bang -> current stored value
+connect(routeServing, 2, deviceState, 0); // set -> new base64url symbol
+connect(routeServing, 3, deferlow, 0); // everything else -> LOM
 connect(msgServing, 0, status, 0);
 
 connect(deferlow, 0, v8, 0);
 connect(v8, 0, sToNode, 0);
+connect(deviceState, 0, prependDeviceState, 0);
+connect(prependDeviceState, 0, sToNode, 0);
 
 connect(rToNode, 0, routeReady, 0);
 connect(routeReady, 0, msgReady, 0);
@@ -183,7 +233,7 @@ const patcher = {
     fileversion: 1,
     appversion: { major: 9, minor: 1, revision: 4, architecture: 'x64', modernui: 1 },
     classnamespace: 'box',
-    rect: [80, 100, 840, 420],
+    rect: [80, 100, 840, 460],
     bglocked: 0,
     openinpresentation: 1,
     default_fontsize: 12.0,
@@ -214,6 +264,12 @@ const patcher = {
     assistshowspatchername: 0,
     boxes,
     lines,
+    // Max writes this index for every parameter-enabled object. Without it the
+    // pattr has parameter metadata but Live does not register it with the
+    // device, so there is nothing for the .als to save.
+    parameters: {
+      [deviceState]: ['bsv-state', 'bsv-state', 0],
+    },
     dependency_cache: [],
     autosave: 0,
   },

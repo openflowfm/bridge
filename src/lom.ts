@@ -12,7 +12,8 @@
 // from the global BSV namespace (see protocol/global.d.ts).
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
-//      move <reqId> <dictName> | palette <reqId> | playback <verb> <i> <j>
+//      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
+//      playback <verb> <i> <j>
 //      set_fold <track> <0|1> | watch_play <0|1> | watch_meters <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
@@ -1212,7 +1213,7 @@ function finishClipMove(): void {
 var clipMoveTask = new Task(clipMoveStep);
 clipMoveTask.interval = 2;
 
-// --- palette ----------------------------------------------------------
+// --- palette developer diagnostic -----------------------------------
 // Live exposes no way to read its color palette, so derive it: make a scratch
 // object, walk its color_index upward reading back the RGB Live assigns each
 // one, then throw the object away. The sweep stops as soon as Live clamps the
@@ -1237,6 +1238,10 @@ clipMoveTask.interval = 2;
 // cached as though it were data. Three guards below: the object must resolve,
 // reads go through gnumOr so absent stays distinct from slot 0, and the result
 // is checked for being a possible palette at all.
+//
+// The app never calls this path. Its checked-in LIVE_PALETTE constant is what
+// ships; this sweep exists only so a developer can verify or regenerate that
+// constant after an Ableton update.
 
 /** Distinct values in `xs`. A real palette is dozens; one or two means a broken read. */
 function countDistinct(xs: number[]): number {

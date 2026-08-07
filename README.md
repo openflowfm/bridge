@@ -82,11 +82,10 @@ relative to its own location, so load the `.amxd` from this repo rather than cop
 into the User Library alone. This is the constraint freezing is meant to remove — see
 *What actually ships*.
 
-State is not among those files and never has to move with them: the palette cache lives
-under Application Support and the role vocabulary lives beside your `.als`, so replacing
-the folder wholesale costs you nothing. An older install that wrote `roles.json` or
-`palette.json` into this folder is adopted once, on the next boot, with a line in the
-Max window saying so.
+Set-owned configuration is a hidden Blob parameter in the device, so Live saves it in
+the `.als` and it moves wherever the set moves. Replacing the source folder costs it
+nothing. An older `bsv.json` or `roles.json` is read once when an empty device migrates;
+new writes never create a sidecar file.
 
 Only one copy of the device can run at a time — they'd fight over port 17800. A
 second instance posts a warning rather than crashing. `BSV_PORT` overrides.
@@ -138,7 +137,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `snapshot <reqId>` | walk the set |
 | `apply <reqId> <dictName>` | execute an op batch — `{ ops, sceneOps }` |
 | `move <reqId> <dictName>` | reorder scenes — `{ plan }`. See *Reordering scenes* |
-| `palette <reqId>` | derive Live's color palette |
+| `palette <reqId>` | developer-only sweep of Live's color palette |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove the per-track output-meter observers |
@@ -246,7 +245,7 @@ same bridge), so this is exercised rather than hypothetical.
 
 **Already correct.** `pending` keys by request id and stores the originating socket, so
 replies route to the client that asked. Terminal replies (`snapshot`, `applied`,
-`palette`) go to the requester; only `changed`, `paletteUpdated` and `reload` broadcast.
+`palette`) go to the requester; `changed`, `deviceState` and `reload` broadcast.
 Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-client.
 
 **Not yet guaranteed.** Four things to fix before a second *kind* of client exists:
@@ -450,9 +449,38 @@ be a `call` on the wrong object. Anywhere two objects are live at once here, bot
 mode to watch for is the one this file has produced repeatedly — the write silently does
 nothing and the next snapshot reports the old value. Try it on a copy of a set first.
 
-## Palette derivation
+## Device state
 
-Live exposes no way to read its color palette. `palette()` derives it:
+Roles and the allowed-color subset live in one versioned JSON object. `bridge.ts`
+encodes it as a base64url symbol and sends `device_state_set`; the generated patcher
+routes that around `lom.ts` into `pattr bsv-state`. The pattr is a Max for Live Blob
+parameter with `parameter_invisible: 1`, so it is Stored Only: Live writes it into the
+set but does not expose meaningless automation for it.
+
+On startup Node sends `device_state_get` explicitly. That timing is important — pattr
+may restore before `node.script` has installed its handlers, so relying on the initial
+output would intermittently lose state. The patcher bangs pattr and sends the resulting
+symbol back as `device_state`.
+
+`saveRoles` and `saveAllowedColors` are granular messages even though the stored object
+is one blob. Two clients changing different fields cannot overwrite each other with
+stale whole-object copies; the bridge merges each change into its current state and
+broadcasts the new object. A save request completes only after pattr echoes the exact
+base64url value; a broken route times out visibly instead of reporting false persistence.
+
+An empty pattr imports roles from the old per-project `bsv.json` or machine-wide
+`roles.json`. The UI similarly imports `bsv.allowedColors` from localStorage when the
+restored object lacks that field and that browser origin has an old list, then removes
+the browser value after the device write is acknowledged.
+
+## Embedded palette
+
+The product uses the checked-in `LIVE_PALETTE` table in `core/src/livePalette.ts`.
+Startup and snapshots never add a scratch track, never derive colors, and never need a
+palette cache.
+
+Live exposes no direct palette read. The developer-only `palette` bridge/LOM message
+checks the embedded table after an Ableton update by:
 
 1. Append a scratch MIDI track (`create_midi_track -1`) and `create_clip` in its slot 0.
 2. Walk the **clip's** `color_index` upward, reading back the RGB Live assigns each one.
@@ -461,80 +489,8 @@ Live exposes no way to read its color palette. `palette()` derives it:
 4. `delete_track` in a `finally`, which takes the clip with it, so cleanup is one call
    and happens even if the sweep throws.
 
-Nothing the user owns is touched. `bridge.js` caches the result to `palette.json` and
-serves it at `/palette.json`, so it runs once per Live version.
-
-## The role vocabulary
-
-**`bsv.json`, in the folder holding the open `.als`.** Served at `/roles.json`, written
-by the `saveRoles` message. It holds the list of roles and each one's palette slot —
-**not** which scene has which role, which lives in the scene names inside the set (see
-[`../core/README.md`](../core/README.md)).
-
-Per set, because a vocabulary describes the songs in one show. It travels with the set:
-copy the project folder to another machine and the colors come with it, which no amount
-of per-machine state can do.
-
-Server-side rather than `localStorage` for three reasons: the UI is served from two
-origins (`:5173` in dev, `:17800` shipped), so browser storage would quietly diverge
-between them; a cache clear before a gig shouldn't cost you your color scheme; and a
-vocabulary in a browser can't follow the set anywhere.
-
-### Which file, exactly
-
-| the open set | vocabulary read from | written to |
-|---|---|---|
-| saved | `<project folder>/bsv.json`, else the machine-wide file as a seed | `<project folder>/bsv.json` |
-| never saved | the machine-wide file | the machine-wide file |
-| saved somewhere that doesn't exist | the machine-wide file, with a line in the Max window | the machine-wide file |
-
-The machine-wide file is `roles.json` under `~/Library/Application Support/Session Bridge/`
-(`%APPDATA%\Session Bridge` on Windows, `BSV_STATE_DIR` overrides both). It is the
-fallback for an unsaved set and the **seed** for a saved one that has no `bsv.json` yet,
-so a new set opens with the colors you last used rather than nothing. It is never
-written back to on its own — the first `saveRoles` in a saved set writes that set's file
-and leaves the seed alone.
-
-One consequence of keying on the folder rather than the `.als`: several sets in one Live
-Project share a vocabulary. For versions of the same show — which is what Save As
-mostly produces — that's the point, since the colors follow. Two unrelated songs in one
-project would share one too.
-
-### Finding out which set is open
-
-`Song.file_path` is **get-only. There is no observer for it** — the property table lists
-`get` where its neighbours say `get, observe`, and Live 12.4.3's own docstring ("Get the
-current Live Set's path on disk.") has no listener counterpart. So **nothing can tell us
-the user chose Save As.**
-
-The bridge therefore asks, rather than subscribing: `set_info` → `set_info_done <dict>`,
-sent once when the LOM signals ready and again after every `snapshot_done`. A snapshot is
-when the UI re-syncs anyway, and the extra cost is two property reads and no walk. When
-the answer changes, the bridge broadcasts `setInfo` and every open client refetches its
-vocabulary — the one it loaded a moment ago may belong to a different set entirely.
-
-It travels by Dict, not atoms, for the reason in *Large payloads go through Dicts*: a
-path has spaces in it. Note the residue of that — `gstr` rebuilds a symbol property by
-joining its atoms with a single space, so a path containing **two** consecutive spaces
-comes back subtly wrong. That's why the folder is checked for existence on every use
-instead of being trusted once: a wrong-but-plausible directory would otherwise get a
-`bsv.json` written into it silently.
-
-Unlike the palette, **an empty vocabulary is a correct steady state** — it's what a new
-set has — so nothing found answers `200` with `{"roles":[]}` rather than `404`.
-There's nothing to derive and nothing to retry, which is the opposite of the palette's
-situation. The write is write-then-rename: a half-written file would parse as invalid
-JSON and the UI would come up with no vocabulary at all, the same shape of failure the
-degenerate palette cache caused.
-
-**The palette does not move with it.** It's Live's color table, the same 70 entries
-whichever document is open, and deriving it costs a scratch scene — so it stays
-machine-wide even though the vocabulary that indexes into it is per-set.
-
-**The UI triggers it, once, before the first walk** — see `ui/README.md` *Palette*. Not on
-every snapshot: the sweep mutates the set, so that would dirty the document on every
-refresh, churn Live's undo history, and fire the structural observer whose whole purpose is
-to prompt a re-snapshot.
+The diagnostic always removes the track in `finally`, returns the colors to its caller,
+and persists nothing. It is never called by the shipped UI.
 
 ### What Live 12.4.3 actually answers
 
@@ -551,8 +507,9 @@ column runs white → greys down to `#3c3c3c`.
 56: af3333 a95131 724f41 dbc300 85961f 539f31 0a9c8e 236384 1a2f96 2f52a2 624bad a34bad cc2e6e 3c3c3c
 ```
 
-Recorded for reference and as a regression check, **not** as a hardcoded table — the sweep
-stays the source of truth so a future Live with a different palette isn't silently wrong.
+Recorded here and in `LIVE_PALETTE`, with a regression test pinning its length,
+distinctness and boundaries. The sweep is how a developer checks a future Live rather
+than making every user discover the same stable table at runtime.
 The theme `.ask` files contain no clip colors (only `AutomationColor`, `WaveformColor` and
 friends), which is good evidence the palette is theme-independent.
 

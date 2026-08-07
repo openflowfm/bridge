@@ -21,7 +21,7 @@ const WS_PATH = '/ws';
 const PUBLIC = path.join(__dirname, 'public');
 
 /**
- * Where the palette cache and the role vocabulary live.
+ * Where older installs kept role configuration.
  *
  * Deliberately **not** `__dirname`. The device is meant to ship as a single
  * frozen `.amxd`, and Live unpacks a frozen device to a temporary location — so
@@ -29,11 +29,8 @@ const PUBLIC = path.join(__dirname, 'public');
  * unfrozen, `__dirname` ties your color scheme to one copy of one folder, and an
  * upgrade that replaces the folder silently takes the vocabulary with it.
  *
- * Application Support rather than the Ableton User Library: the User Library is
- * relocatable in Live's preferences and nothing here can ask Live where it went,
- * so that path would be a guess that's right on most machines and wrong without
- * warning on the rest. The chosen directory is posted to the Max window on boot,
- * because state you can't find is state you can't back up.
+ * New state is stored in the device's parameter-enabled `pattr` and therefore
+ * in the .als itself. This directory remains read-only migration input.
  */
 function stateDir(): string {
   const override = process.env.BSV_STATE_DIR;
@@ -48,29 +45,27 @@ function stateDir(): string {
 }
 
 const STATE = stateDir();
-const PALETTE_FILE = path.join(STATE, 'palette.json');
 
 /**
- * The machine-wide vocabulary. Not where a saved set's roles live — see
- * `vocabularyFile()` — but the fallback for a set that has never been saved, and
- * the seed a set inherits before it has a `bsv.json` of its own.
+ * The old machine-wide vocabulary, read only when a device has no embedded
+ * state yet.
  */
 const DEFAULT_ROLES_FILE = path.join(STATE, 'roles.json');
 
-/** The file the role vocabulary is served from, per set. */
+/** The old per-project vocabulary filename. */
 const VOCABULARY = 'bsv.json';
 
 /**
- * Where the open set lives. Empty until `lom.ts` answers, and empty forever for
- * a set that has never been saved.
+ * Where the open set lives, used only to find a legacy bsv.json during the
+ * first migration into device state.
  */
 let setDir = '';
 let setName = '';
 
 /**
- * The vocabulary file for the open set, or the machine-wide one.
+ * The legacy vocabulary file for the open set, or the machine-wide one.
  *
- * The directory is checked on every call rather than cached with the path,
+ * The directory is checked when migration runs rather than trusted blindly,
  * because the answer is only as good as the string Live handed us: LiveAPI
  * returns symbol properties as space-separated atoms, so `gstr` rebuilds a path
  * containing spaces by joining on a single space, and a path with a double space
@@ -81,10 +76,10 @@ let setName = '';
  */
 let reportedMissingDir = '';
 
-function vocabularyFile(): string {
+function legacyVocabularyFile(): string {
   if (!setDir) return DEFAULT_ROLES_FILE;
   if (!fs.existsSync(setDir)) {
-    // Once per folder, not once per request: this runs on every /roles.json.
+    // Report once per folder during migration.
     if (reportedMissingDir !== setDir) {
       reportedMissingDir = setDir;
       Max.post(`set folder does not exist, using the machine-wide roles: ${setDir}`);
@@ -95,14 +90,17 @@ function vocabularyFile(): string {
 }
 
 /**
- * The vocabulary to serve: this set's, else the machine-wide one as a seed.
+ * The vocabulary to migrate: this set's, else the machine-wide one as a seed.
  *
- * A set with no `bsv.json` yet inherits whatever you last used, so a new set
- * opens with your usual colors instead of nothing. The seed is never written
- * back on its own — it becomes this set's file the first time roles are saved.
+ * A set with no `bsv.json` falls back to whatever the older install kept
+ * machine-wide. Neither source is written again after migration.
  */
-function readVocabulary(): Buffer | null {
-  for (const file of [vocabularyFile(), DEFAULT_ROLES_FILE]) {
+function readLegacyVocabulary(): Buffer | null {
+  for (const file of [
+    legacyVocabularyFile(),
+    DEFAULT_ROLES_FILE,
+    path.join(__dirname, 'roles.json'),
+  ]) {
     try {
       return fs.readFileSync(file);
     } catch {
@@ -112,33 +110,107 @@ function readVocabulary(): Buffer | null {
   return null;
 }
 
-/** Create the state directory on demand. Every write goes through this. */
-function ensureStateDir(): void {
-  fs.mkdirSync(STATE, { recursive: true });
+// --- device state ----------------------------------------------------
+
+/** Keep malformed or stale state from reaching React or being written back. */
+function cleanRoles(value: unknown): BSV.Role[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (r): r is BSV.Role =>
+      !!r && typeof r === 'object' &&
+      typeof (r as BSV.Role).name === 'string' &&
+      (r as BSV.Role).name.trim() !== '' &&
+      Number.isInteger((r as BSV.Role).colorIndex) &&
+      (r as BSV.Role).colorIndex >= -1,
+  ).map((r) => ({ name: r.name.trim(), colorIndex: r.colorIndex }));
 }
 
-/**
- * Adopt state left beside the script by an older install, once.
- *
- * Only ever copies into an empty slot, so it can't overwrite newer state, and a
- * failure is reported and then ignored — an unmigrated vocabulary is an
- * inconvenience, a bridge that won't boot is a dead gig.
- */
-function migrateLegacyState(): void {
-  const moves: [from: string, to: string, what: string][] = [
-    [path.join(__dirname, 'roles.json'), DEFAULT_ROLES_FILE, 'role vocabulary'],
-    [path.join(__dirname, 'palette.json'), PALETTE_FILE, 'palette cache'],
-  ];
-  for (const [from, to, what] of moves) {
+function cleanAllowedColors(value: unknown): number[] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value.filter((v): v is number => Number.isInteger(v) && v >= 0),
+  )].sort((a, b) => a - b);
+}
+
+function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
+  if (!value || typeof value !== 'object' || (value as { version?: unknown }).version !== 1) {
+    return null;
+  }
+  const source = value as { roles?: unknown; allowedColors?: unknown };
+  const state: BSV.DeviceState = { version: 1, roles: cleanRoles(source.roles) };
+  if (Object.prototype.hasOwnProperty.call(source, 'allowedColors')) {
+    state.allowedColors = cleanAllowedColors(source.allowedColors);
+  }
+  return state;
+}
+
+function encodeDeviceState(state: BSV.DeviceState): string {
+  return Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+}
+
+function decodeDeviceState(encoded: unknown): BSV.DeviceState | null {
+  if (typeof encoded !== 'string' || encoded === '' || encoded === '0') return null;
+  try {
+    return normalizeDeviceState(
+      JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')),
+    );
+  } catch {
+    return null;
+  }
+}
+
+let deviceState: BSV.DeviceState | null = null;
+let deviceStateEncoded = '';
+let needsLegacyState = false;
+let setInfoKnown = false;
+
+interface DeviceStateWaiter {
+  resolve: () => void;
+  timer: NodeJS.Timeout;
+}
+
+const deviceStateWaiters = new Map<string, DeviceStateWaiter[]>();
+
+function publishDeviceState(next: BSV.DeviceState): Promise<void> {
+  const normalized = normalizeDeviceState(next) ?? { version: 1, roles: [] };
+  deviceState = normalized;
+  deviceStateEncoded = encodeDeviceState(normalized);
+  const encoded = deviceStateEncoded;
+  const confirmed = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const waiting = deviceStateWaiters.get(encoded) ?? [];
+      deviceStateWaiters.set(encoded, waiting.filter((w) => w.resolve !== resolve));
+      reject(new Error('device did not confirm its stored state within 5 seconds'));
+    }, 5000);
+    const waiting = deviceStateWaiters.get(encoded) ?? [];
+    waiting.push({ resolve, timer });
+    deviceStateWaiters.set(encoded, waiting);
+  });
+  // Routed around lom.ts by the generated patcher into a Stored Only pattr.
+  Max.outlet('device_state_set', encoded);
+  broadcast({ type: 'deviceState', state: normalized });
+  return confirmed;
+}
+
+/** Finish the one-time bsv.json/roles.json migration once set_info is known. */
+function migrateLegacyDeviceState(): void {
+  if (!needsLegacyState || !setInfoKnown) return;
+  let roles: BSV.Role[] = [];
+  const legacy = readLegacyVocabulary();
+  if (legacy) {
     try {
-      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
-      ensureStateDir();
-      fs.copyFileSync(from, to);
-      Max.post(`migrated ${what} from the device folder to ${to}`);
-    } catch (e) {
-      Max.post(`could not migrate ${what} — ${describe(e)}`);
+      roles = cleanRoles((JSON.parse(legacy.toString()) as { roles?: unknown }).roles);
+    } catch {
+      Max.post('legacy role vocabulary is invalid — starting with no configured roles');
     }
   }
+  needsLegacyState = false;
+  // allowedColors is deliberately absent. The first connected UI migrates its
+  // old localStorage value, where that browser-owned value can still be read.
+  void publishDeviceState({ version: 1, roles })
+    .then(() => Max.post(`device state: migrated ${roles.length} role(s) into the Live Set`))
+    .catch((e) => Max.post(`device state migration failed — ${describe(e)}`));
 }
 
 interface Pending {
@@ -180,18 +252,6 @@ function describe(e: unknown): string {
   return 'unknown bridge error — see the Max window';
 }
 
-/** The cache file's contents if they could plausibly be Live's palette, else null. */
-function usablePalette(buf: Buffer): string | null {
-  try {
-    const p = JSON.parse(buf.toString()) as BSV.Palette;
-    if (!Array.isArray(p.colors) || p.colors.length < 2) return null;
-    if (new Set(p.colors).size < 2) return null;
-    return buf.toString();
-  } catch {
-    return null; // truncated or hand-edited
-  }
-}
-
 /**
  * The built UI, inlined at bundle time as `path -> base64`.
  *
@@ -223,50 +283,6 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`);
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
-
-  // The palette is Live's, not the set's: the same 70 colors whichever document
-  // is open, and deriving them costs a scratch scene. So it stays machine-wide
-  // even though the vocabulary that uses it is per-set.
-  //
-  // A degenerate cache is treated as no cache at all. A broken sweep once wrote
-  // a one-entry black palette here, and because the file existed and parsed, the
-  // UI showed a single swatch forever rather than "not extracted yet" — the bad
-  // data looked exactly like data. Live's palette is dozens of colors, so
-  // anything under two is a failure to serve, not a palette.
-  if (rel === '/palette.json') {
-    fs.readFile(PALETTE_FILE, (err, buf) => {
-      const body = err ? null : usablePalette(buf);
-      res.writeHead(body ? 200 : 404, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-      });
-      res.end(body ?? '{"count":0,"colors":[]}');
-    });
-    return;
-  }
-
-  // The role vocabulary — this set's bsv.json, or the machine-wide fallback.
-  //
-  // Server-side rather than localStorage for two reasons: the UI is served from
-  // two origins (:5173 in dev, :17800 shipped) so browser storage would quietly
-  // diverge between them, and a cache clear before a gig shouldn't cost you your
-  // color scheme. Now there's a third — a vocabulary in a browser can't follow
-  // the set to another machine, and a bsv.json beside the .als can.
-  //
-  // Read per request, not cached: the answer depends on which set is open, and
-  // that changes underneath us. Unlike the palette, an empty vocabulary is a
-  // perfectly good steady state — it's what a new set has — so nothing found
-  // answers 200 with an empty list rather than 404. There is nothing to derive
-  // and nothing to retry.
-  if (rel === '/roles.json') {
-    const buf = readVocabulary();
-    res.writeHead(200, {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-    });
-    res.end(buf ?? '{"roles":[]}');
-    return;
-  }
 
   const file = path.join(PUBLIC, path.normalize(rel));
   if (file !== PUBLIC && !file.startsWith(PUBLIC + path.sep)) {
@@ -303,6 +319,7 @@ function broadcast(event: BSV.Event): void {
 wss.on('connection', (ws: WebSocket) => {
   Max.post(`client connected (${wss.clients.size} total)`);
   send(ws, { type: 'status', lomReady });
+  if (deviceState) send(ws, { type: 'deviceState', state: deviceState });
 
   ws.on('message', async (raw) => {
     let m: BSV.Request;
@@ -437,27 +454,25 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('palette', track(ws, m));
       break;
     }
-    // Pure file I/O — no LOM involved, so no lomReady gate. The roles
-    // themselves live in the scene names inside the set; this file is only the
-    // vocabulary and its colors.
+    // Device configuration is a Stored Only Max parameter. No LOM gate: it
+    // belongs to this device instance and Live persists it with the .als.
     case 'saveRoles': {
-      const roles = (Array.isArray(m.roles) ? m.roles : []).filter(
-        (r): r is BSV.Role =>
-          !!r && typeof r.name === 'string' && r.name.trim() !== '' &&
-          typeof r.colorIndex === 'number' && Number.isFinite(r.colorIndex),
-      );
-      // Write-then-rename. A half-written file here would parse as invalid JSON
-      // and the UI would come up with no vocabulary at all — the same shape of
-      // failure the degenerate palette cache caused, and just as confusing.
-      const target = vocabularyFile();
-      const tmp = `${target}.tmp`;
-      // Only the machine-wide file needs its directory created; a set's folder
-      // is one Live already wrote a .als into.
-      if (target === DEFAULT_ROLES_FILE) ensureStateDir();
-      fs.writeFileSync(tmp, JSON.stringify({ roles }, null, 2));
-      fs.renameSync(tmp, target);
-      Max.post(`roles: ${roles.length} saved to ${target}`);
+      const roles = cleanRoles(m.roles);
+      await publishDeviceState({
+        ...(deviceState ?? { version: 1 as const, roles: [] }),
+        roles,
+      });
+      Max.post(`device state: ${roles.length} role(s) saved`);
       send(ws, { type: 'rolesSaved', id: m.id, count: roles.length });
+      break;
+    }
+    case 'saveAllowedColors': {
+      const colors = cleanAllowedColors(m.colors);
+      await publishDeviceState({
+        ...(deviceState ?? { version: 1 as const, roles: [] }),
+        allowedColors: colors,
+      });
+      send(ws, { type: 'allowedColorsSaved', id: m.id, colors });
       break;
     }
     case 'observe':
@@ -511,30 +526,71 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
 
 // --- messages from lom.ts --------------------------------------------
 
+// The generated patcher routes this around lom.ts. A base64url symbol is safe
+// as one Max atom; JSON itself is not (spaces, commas and semicolons are Max
+// message syntax). Asking explicitly on Node startup avoids depending on
+// whether pattr restored before node.script had installed this handler.
+Max.addHandler('device_state', (...atoms: unknown[]) => {
+  const encoded = atoms.map(String).join('');
+  const restored = decodeDeviceState(encoded);
+  if (!restored) {
+    needsLegacyState = true;
+    migrateLegacyDeviceState();
+    return;
+  }
+  needsLegacyState = false;
+  const canonical = encodeDeviceState(restored);
+  const waiting = deviceStateWaiters.get(canonical) ?? [];
+  deviceStateWaiters.delete(canonical);
+  // An older write may echo after a newer one was already emitted. Confirm the
+  // old request without rolling the in-memory merge base back and losing a
+  // field from the newer state.
+  const superseded = waiting.length > 0 && canonical !== deviceStateEncoded;
+  if (!superseded) {
+    const changed = canonical !== deviceStateEncoded;
+    deviceState = restored;
+    deviceStateEncoded = canonical;
+    if (changed) broadcast({ type: 'deviceState', state: restored });
+  }
+  for (const waiter of waiting) {
+    clearTimeout(waiter.timer);
+    waiter.resolve();
+  }
+  Max.post(
+    `device state: restored ${restored.roles.length} role(s)` +
+      (restored.allowedColors === undefined
+        ? ' · awaiting allowed-color migration'
+        : ` · ${restored.allowedColors === null ? 'all' : restored.allowedColors.length} allowed color(s)`),
+  );
+});
+
 Max.addHandler('ready', () => {
   lomReady = true;
   Max.post('LOM ready');
   broadcast({ type: 'status', lomReady: true });
-  Max.outlet('set_info'); // which set is open decides where the roles live
+  // Only needed when the pattr is empty and an old bsv.json may need importing.
+  Max.outlet('set_info');
 });
 
 /**
- * Adopt the open set as the home of the role vocabulary.
+ * Locate an old per-set bsv.json for one-time migration.
  *
- * `filePath` is the `.als`; the vocabulary sits in its folder. Silence when
- * nothing changed — this runs after every snapshot, and a broadcast per refresh
- * would have every client refetching a file it already has.
+ * `filePath` is the `.als`; the old vocabulary sits in its folder. This query
+ * runs once when the LOM becomes ready and is irrelevant after a pattr restores.
  */
 Max.addHandler('set_info_done', async (dictName: string) => {
   const info: { filePath?: string; name?: string } = await Max.getDict(dictName);
   const filePath = typeof info?.filePath === 'string' ? info.filePath : '';
   const dir = filePath ? path.dirname(filePath) : '';
   const name = typeof info?.name === 'string' ? info.name : '';
-  if (dir === setDir && name === setName) return;
+  setInfoKnown = true;
+  if (dir === setDir && name === setName) {
+    migrateLegacyDeviceState();
+    return;
+  }
   setDir = dir;
   setName = name;
-  Max.post(dir ? `set: ${name || '(unnamed)'} — roles in ${vocabularyFile()}` : 'set: unsaved — using the machine-wide roles');
-  broadcast({ type: 'setInfo', path: setDir, name: setName });
+  migrateLegacyDeviceState();
 });
 
 Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: number) => {
@@ -552,9 +608,6 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   const event: BSV.Event = { type: 'snapshot', id: req?.clientId, dictMs, hostMs, data };
   if (req?.ws) send(req.ws, event);
   else broadcast(event);
-  // Save As can't be observed — file_path has no listener — so re-ask here,
-  // where the UI is re-syncing anyway. Cheap: two property reads, no walk.
-  Max.outlet('set_info');
 });
 
 Max.addHandler('snapshot_progress', (reqId: number, done: number, total: number) => {
@@ -620,16 +673,8 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
   const p: BSV.Palette = await Max.getDict(dictName);
-  // Deriving the palette costs a scratch scene, so only ever do it once.
-  try {
-    ensureStateDir();
-    fs.writeFileSync(PALETTE_FILE, JSON.stringify(p, null, 2));
-    Max.post(`palette: ${p.count} colors extracted and cached`);
-  } catch (e) {
-    Max.post(`palette: extracted but could not cache — ${(e as Error).message}`);
-  }
+  Max.post(`palette diagnostic: ${p.count} colors extracted (not persisted)`);
   send(req?.ws, { type: 'palette', id: req?.clientId, ...p });
-  broadcast({ type: 'paletteUpdated' });
 });
 
 Max.addHandler('changed', (kind: string) => broadcast({ type: 'changed', kind }));
@@ -734,12 +779,10 @@ function onServerError(e: NodeJS.ErrnoException): void {
 server.on('error', onServerError);
 wss.on('error', onServerError);
 
-migrateLegacyState();
-
 server.listen(PORT, HOST, () => {
   Max.post(`Session Bridge listening on http://${HOST}:${PORT}`);
-  Max.post(`state: ${STATE}`);
   Max.outlet('serving'); // drives the device's status line; routed off before lom
+  Max.outlet('device_state_get'); // restored pattr -> device_state handler above
   Max.outlet('hello'); // whichever side is late drives the handshake
 });
 
