@@ -136,6 +136,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `hello` | handshake; whichever side boots last drives it |
 | `snapshot <reqId>` | walk the set |
 | `apply <reqId> <dictName>` | execute an op batch — `{ ops, sceneOps }` |
+| `add_scenes <reqId> <dictName>` | insert and configure blank scenes — `{ addition }` |
 | `move <reqId> <dictName>` | reorder scenes — `{ plan }`. See *Reordering scenes* |
 | `palette <reqId>` | developer-only sweep of Live's color palette |
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
@@ -151,6 +152,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `snapshot_done <reqId> <dict> <dictMs>` | |
 | `apply_progress <reqId> <done> <total>` | |
 | `apply_done <reqId> <dict> <ms>` | |
+| `add_scenes_done <reqId> <dict> <ms>` | |
 | `move_progress <reqId> <done> <total>` | |
 | `move_done <reqId> <dict> <ms>` | |
 | `palette_done <reqId> <dict>` | |

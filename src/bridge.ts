@@ -448,6 +448,54 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('apply', reqId, 'bsv_ops');
       break;
     }
+    // Additive scene creation gets its own route rather than borrowing the
+    // reorder route, whose valid shape necessarily includes a delete pass.
+    case 'addScenes': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const addition = m.addition;
+      const at = Number(addition?.at);
+      const count = Number(addition?.count);
+      const name = typeof addition?.name === 'string' ? addition.name.trim() : '';
+      const color = addition?.color;
+      const tempo = addition?.tempo;
+      if (!Number.isInteger(at) || at < 0 || count !== 8) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: 'refusing malformed scene addition — expected eight scenes and a valid gap',
+        });
+      }
+      if (!name) {
+        return send(ws, { type: 'error', id: m.id, message: 'new scenes need a name' });
+      }
+      if (
+        color !== undefined &&
+        (!Number.isInteger(color) || color < 0 || color > 0xffffff)
+      ) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid scene color' });
+      }
+      if (
+        tempo !== undefined &&
+        (!Number.isFinite(tempo) || tempo < 20 || tempo > 1000)
+      ) {
+        return send(ws, { type: 'error', id: m.id, message: 'tempo must be 20–1000 BPM' });
+      }
+      const clean: BSV.SceneAddition = { at, count, name };
+      if (color !== undefined) clean.color = color;
+      if (tempo !== undefined) clean.tempo = tempo;
+      const reqId = track(ws, m);
+      try {
+        await Max.setDict('bsv_ops', { addition: clean });
+      } catch (e) {
+        pending.delete(reqId);
+        throw new Error(
+          `could not stage ${count} new scenes into bsv_ops — ${describe(e)}. ` +
+            `The dict must exist before Node can write it; lom.ts creates it on init.`,
+        );
+      }
+      Max.outlet('add_scenes', reqId, 'bsv_ops');
+      break;
+    }
     // Reordering scenes. Shares `bsv_ops` with apply — one write is in flight at
     // a time and lom.ts refuses either while the other is running, so there's no
     // second dict to keep alive. It does NOT share the `apply` message: this one
@@ -714,6 +762,21 @@ Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number)
   Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
   send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
   broadcast({ type: 'changed', kind: 'applied' });
+});
+
+Max.addHandler('add_scenes_done', async (reqId: number, dictName: string, ms: number) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const r: BSV.ScenesAddedResult = await Max.getDict(dictName);
+  Max.post(
+    `addScenes: ${r.created} created, ${r.configured} configured, ` +
+      `${r.failed} failed, ${ms}ms` +
+      (r.undoStep ? ' (one undo step)' : ' (NOT grouped in Live undo)'),
+  );
+  send(req?.ws, { type: 'scenesAdded', id: req?.clientId, lomMs: ms, ...r });
+  // Every scene index at or below the insertion point changed. Other clients
+  // must discard their snapshots before another click can address the old row.
+  broadcast({ type: 'changed', kind: 'structure' });
 });
 
 Max.addHandler('move_progress', (reqId: number, done: number, total: number) => {

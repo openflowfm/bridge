@@ -12,6 +12,7 @@
 // from the global BSV namespace (see protocol/global.d.ts).
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
+//      add_scenes <reqId> <dictName>
 //      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
@@ -19,7 +20,8 @@
 //      watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
-//      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
+//      apply_done <reqId> <dict> <ms> | add_scenes_done <reqId> <dict> <ms>
+//      move_progress <reqId> <n> <total>
 //      move_done <reqId> <dict> <ms> | move_clips_done <reqId> <dict> <ms>
 //      palette_done <reqId> <dict> | changed <kind> | delta <dict>
 //      set_info_done <dict>
@@ -89,6 +91,8 @@ var meterLeft: number[] = [];
 var meterRight: number[] = [];
 var metersWatching = false;
 var job: ApplyJob | null = null;
+/** Suppress the per-scene observer burst while add_scenes emits one terminal structural event. */
+var addingScenes = false;
 
 // --- helpers ----------------------------------------------------------
 
@@ -694,6 +698,132 @@ function setSceneTempo(a: LiveAPI, tempo: number): void {
   a.set('tempo_enabled', 1);
   a.set('tempo', tempo);
 }
+
+/**
+ * Insert a run of blank scenes and configure them as one song.
+ *
+ * This is intentionally not a degenerate scene move. A move's final pass
+ * deletes scenes; an additive feature should be structurally incapable of
+ * reaching that code, not merely promise to send an empty remove list.
+ *
+ * Eight scenes are small enough to do synchronously, and configuring each one
+ * immediately after creation means a failure leaves a plainly visible partial
+ * block rather than eight anonymous rows whose intended metadata is lost.
+ */
+function add_scenes(reqId: number, dictName: string): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
+  const t0 = Date.now();
+  try {
+    const d = new Dict(dictName);
+    const raw = d.stringify();
+    let parsed: { addition?: BSV.SceneAddition };
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        'could not parse ' + dictName + ' as JSON: ' + String(raw).substring(0, 200),
+      );
+    }
+
+    const addition = parsed.addition;
+    if (!addition) throw new Error('add_scenes: no addition found');
+    const atIndex = Number(addition.at);
+    const count = Number(addition.count);
+    const name = String(addition.name || '').trim();
+    if (Math.floor(atIndex) !== atIndex || atIndex < 0 || count !== 8 || !name) {
+      throw new Error('add_scenes: malformed insertion point, count or name');
+    }
+    const before = at('live_set').getcount('scenes');
+    if (atIndex > before) {
+      throw new Error(
+        'add_scenes: insertion point ' + atIndex + ' is past ' + before + ' scenes',
+      );
+    }
+
+    const color = addition.color === undefined ? undefined : Number(addition.color);
+    const tempo = addition.tempo === undefined ? undefined : Number(addition.tempo);
+    if (
+      color !== undefined &&
+      (Math.floor(color) !== color || color < 0 || color > 0xffffff)
+    ) {
+      throw new Error('add_scenes: invalid scene color');
+    }
+    if (tempo !== undefined && (!isFinite(tempo) || tempo < 20 || tempo > 1000)) {
+      throw new Error('add_scenes: tempo must be 20–1000 BPM');
+    }
+    let undoStep = false;
+    try {
+      at('live_set').call('begin_undo_step');
+      undoStep = true;
+    } catch (e) {
+      post('bsv add_scenes: begin_undo_step unavailable — ' + describe(e) + '\n');
+    }
+
+    let created = 0;
+    let configured = 0;
+    let failed = 0;
+    addingScenes = true;
+    try {
+      for (let i = 0; i < count; i++) {
+        const s = atIndex + i;
+        try {
+          // Re-address the Song every time: at() is one reusable cursor, and
+          // configuring the previous scene pointed it away from live_set.
+          at('live_set').call('create_scene', s);
+          created++;
+        } catch (e) {
+          failed += count - i;
+          post('bsv add_scenes: create at ' + s + ' failed — ' + describe(e) + '\n');
+          break;
+        }
+
+        try {
+          const scene = at('live_set scenes ' + s);
+          if (!exists(scene)) throw new Error('new scene did not resolve');
+          setName(scene, name);
+          if (color !== undefined) scene.set('color', color);
+          if (tempo !== undefined) setSceneTempo(scene, tempo);
+          configured++;
+        } catch (e) {
+          failed++;
+          post('bsv add_scenes: configure scene ' + s + ' failed — ' + describe(e) + '\n');
+        }
+      }
+    } finally {
+      if (undoStep) {
+        try {
+          at('live_set').call('end_undo_step');
+        } catch (e) {
+          undoStep = false;
+          post('bsv add_scenes: end_undo_step failed — ' + describe(e) + '\n');
+        }
+      }
+      // Live may deliver the scenes observer callbacks just after create_scene
+      // returns. Keep the burst muted briefly; Node emits one structural event
+      // after this function's terminal result.
+      addStructureTask.cancel();
+      addStructureTask.schedule(100);
+    }
+
+    const result: BSV.ScenesAddedResult = {
+      created: created,
+      configured: configured,
+      failed: failed,
+      from: atIndex,
+      to: atIndex + created - 1,
+      undoStep: undoStep,
+    };
+    publish(RESULT_DICT, result);
+    outlet(0, 'add_scenes_done', reqId, RESULT_DICT, Date.now() - t0);
+  } catch (e) {
+    fail(reqId, e);
+  }
+}
+
+var addStructureTask = new Task(function () {
+  addingScenes = false;
+});
 
 function applyStep(): void {
   const j = job;
@@ -1964,6 +2094,10 @@ function onStructureChange(): void {
   selDirty = {};
   selPrevTrack = -1;
   selTask.cancel();
+  // add_scenes creates a fixed run synchronously. Its Node-side completion
+  // broadcasts one structural change after all eight rows are configured;
+  // emitting once per create would launch eight overlapping full snapshots.
+  if (addingScenes) return;
   outlet(0, 'changed', 'structure');
 }
 
@@ -2338,6 +2472,8 @@ function notifydeleted(): void {
   diagDetach();
   applyTask.cancel();
   moveTask.cancel();
+  addStructureTask.cancel();
+  addingScenes = false;
   // An undo step left open would swallow everything the user does next into our
   // half-finished move. Closing it is the one bit of cleanup here that touches
   // Live rather than just releasing our own handles.
