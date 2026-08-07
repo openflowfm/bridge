@@ -520,6 +520,10 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('watch_meters', m.on ? 1 : 0);
       break;
+    case 'watchSelection':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      Max.outlet('watch_selection', m.on ? 1 : 0);
+      break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -686,6 +690,27 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
 });
 
 Max.addHandler('changed', (kind: string) => broadcast({ type: 'changed', kind }));
+
+// A partial re-read, pushed because the user changed something in Live rather
+// than because anyone asked. Broadcast: every client holds the same set, and a
+// delta is far cheaper than each of them walking it. Unlike the realtime pushes
+// below this carries clip names, so it travels by Dict — names contain spaces,
+// commas and semicolons, all special in Max messages.
+Max.addHandler('delta', async (dictName: string) => {
+  try {
+    const data: BSV.SnapshotDelta = await Max.getDict(dictName);
+    Max.post(
+      `delta: ${data.clips.length} clip(s) across track(s) ` +
+        `${data.tracks.join(', ')} in ${data.ms}ms (rev ${data.prevRev} -> ${data.rev})`,
+    );
+    broadcast({ type: 'delta', data });
+  } catch (e) {
+    // A delta that can't be read is not worth failing a client over — the
+    // client re-walks whenever a rev doesn't line up, so the worst case here
+    // is one skipped update rather than a wrong grid.
+    Max.post(`delta: could not read ${dictName} — ${describe(e)}`);
+  }
+});
 
 // Flat atoms, not a Dict: this pushes on every play-state change, and a global
 // dict name would race itself. See the note above `playStateAtoms` in lom.ts.

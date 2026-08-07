@@ -142,6 +142,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove the per-track output-meter observers |
+| `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
 | `ping` | |
 
 | → node | |
@@ -154,6 +155,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `move_done <reqId> <dict> <ms>` | |
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
+| `delta <dict>` | a partial re-read, pushed after a change in Live |
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
 | `meter_levels <track> <level> …` | complete current track/output-level frame |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
@@ -195,6 +197,7 @@ Anything bigger than a few numbers crosses via a named Max dictionary:
 | dict | direction | contents |
 |---|---|---|
 | `bsv_snapshot` | lom → node | the whole set |
+| `bsv_delta` | lom → node | a partial re-read — some tracks, in full |
 | `bsv_ops` | node → lom | the op batch to apply, **or** a move plan |
 | `bsv_result` | lom → node | applied / skipped / total, **or** a move's counts |
 | `bsv_palette` | lom → node | derived colors |
@@ -264,14 +267,20 @@ Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-cli
    once means N full LOM walks serialized on Live's main thread — and the walk is the
    expensive part. Single-flight plus a cache keyed by `rev` (already in the payload)
    is the fix.
-4. **`observe` has no refcount.** The bridge forwards `observe on|off` straight to a
-   global toggle that clears and rebuilds all observers, so one client turning it off
-   silently blinds the others, and a client that vanishes never decrements. Latent
-   today — nothing in `ui/` sends `observe` yet — which makes now the cheap time.
+4. **`observe` and `watchSelection` have no refcount, and this one is now live.** The
+   bridge forwards each straight to a global toggle that clears and rebuilds all
+   observers, so one client turning it off silently blinds the others, and a client that
+   vanishes never decrements. This used to be latent because nothing in `ui/` sent
+   `observe`; `useBridge` now sends both on mount and clears both on unmount, so **two
+   browser tabs will fight** — the second to unmount stops the first from following Live.
+   The fix is a count per watch kind in `bridge.ts`, toggling `lom.ts` only on the 0↔1
+   edge.
 
-Related: `changed` carries only a `kind`, so a client's only response to someone else's
-write is a full re-walk. Carrying the affected slots and the new `rev` is what makes
-multi-client cheap rather than merely correct. See [`protocol/README.md`](../protocol/README.md).
+`changed` still carries only a `kind`, so it remains a full re-walk for the receiver —
+but that is now the *structural* path only, where a re-walk is the honest answer because
+every index changed meaning. Content changes travel as `delta`, which carries its scope
+and its `rev`, and that is what makes following Live cheap rather than merely correct.
+See *Following Live* below.
 
 ## LOM gotchas worth knowing before you touch `lom.ts`
 
@@ -556,6 +565,86 @@ nothing while writing a plausible-looking cache file.
 `bridge.ts` also treats a degenerate cache file as **no cache at all**. That's what made
 the original failure so quiet: the file existed and parsed, so the UI showed one swatch
 forever rather than "not extracted yet" — the bad data was indistinguishable from data.
+
+## Following Live
+
+Keeping up with edits the user makes *in Live*, without an observer per slot.
+
+**The LOM has no aggregate "a clip in this track changed" signal.** `Track.clip_slots`
+is a *const* list, so it fires on membership — the scene count — and never on content.
+Checked in both sources; see *What the LOM does not have* in [`LOM.md`](LOM.md). The
+complete alternative is `has_clip` per slot, which is `trackCount × sceneCount`
+observers: **~4,400 on a full-size set**, against the `2 × trackCount` that play state
+costs. Attaching them is roughly the cost of the slot scan itself, and every structural
+change invalidates the lot, because an index-addressed observer silently re-points when
+a scene is inserted above it.
+
+So watch the **cursor** instead. `Song.View.selected_track` and `selected_scene` are
+both observable, and Live defines `highlighted_clip_slot` as being derived from them —
+so those two *are* the Session cursor. **Two observers for the whole grid.**
+
+```
+selection moves ──> mark {new track, previous track} dirty ──> 100ms ──> re-read ──> delta
+```
+
+**The cursor says where to look; the re-read says what happened.** Nothing tries to
+detect a drag or classify a drop, and that's what makes it robust — there is no
+inference to get wrong. A selection change that was just a click re-reads a track, finds
+it unchanged, and the client's merge is a no-op.
+
+**Both ends, and this is the part that makes it work.** The cursor lands on a move's
+*destination*; the position it left is the *source*. You have to select a clip to drag
+it, so the previous cursor position is where it came from. Marking only the destination
+would learn that a clip arrived and never that it left — drawing it in two places.
+
+Measured against a real set, a click-and-drag **in one motion on an unselected clip**
+fires twice: at the source on grab, at the destination on drop. That's the assumption the
+whole design rests on, and it's the one `diag watch` was built to check.
+
+### What it costs
+
+| | |
+|---|---|
+| observers | 2, regardless of set size |
+| per selection change | 2 `get`s to read the cursor ids |
+| per re-read | ~11ms a track on a 64-scene set |
+| full walk, for comparison | ~950ms |
+
+The id → index resolution is cached (`trackIndexById`) and dropped on any structural
+change. Resolving it by walking measured **11ms**, which is nothing once and a great deal
+on every click the user makes in Live. The scene index is never resolved at all, because
+the re-read is scoped to whole tracks — which also means a multi-clip or cross-scene drag
+needs no extra machinery.
+
+### What it does not catch
+
+**Edits that move nothing.** Deleting, renaming or recoloring a clip in place leaves the
+cursor where it is, so no callback fires and no delta is sent. Those are covered by the
+client re-walking when the window regains focus, which is the moment that costs nothing
+to spend a walk on. A rename is the one that stings, because in this project the name
+*is* the mapping.
+
+Also uncovered: anything that changes the set without touching Live's selection — another
+M4L device, a remote script, and possibly undo.
+
+### The guards
+
+- **`prevRev`.** Revisions are a monotonic counter in `lom.ts`, bumped once per publish,
+  shared by snapshots and deltas. A delta rewrites only its own scope, so applying one to
+  any state but the exact one it was computed against splices two revisions of the set
+  together. A mismatch is a *missed message*, and the answer is a full walk, not a retry.
+- **Scope-then-replace, never upsert.** The merge is `mergeTrackDelta` in `core/`, where
+  it has tests. An upsert by `(t, s)` keeps a clip the user deleted, because a deleted
+  clip has no incoming entry to overwrite it — and a clip moved *out* of a slot is a
+  deletion at the source. See [`../core/README.md`](../core/README.md).
+- **A write in flight defers the flush.** `apply` results are reconciled by the client
+  from the batch it sent; a delta computed against a half-written set would race that.
+  Our own writes don't move Live's selection, so this is belt-and-braces rather than the
+  common path.
+- **A structural change drops everything index-addressed** — the id cache, the dirty set,
+  the cursor's previous position — and clients re-walk on `changed structure`.
+- **A track that no longer resolves is omitted, not reported empty.** Claiming it is
+  empty would delete its clips from the client's copy.
 
 ## Diagnostics
 

@@ -15,12 +15,13 @@
 //      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
-//      set_fold <track> <0|1> | watch_play <0|1> | watch_meters <0|1> | ping | set_info
+//      set_fold <track> <0|1> | watch_play <0|1> | watch_meters <0|1>
+//      watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | move_progress <reqId> <n> <total>
 //      move_done <reqId> <dict> <ms> | move_clips_done <reqId> <dict> <ms>
-//      palette_done <reqId> <dict> | changed <kind>
+//      palette_done <reqId> <dict> | changed <kind> | delta <dict>
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      song_position <bar> <beat> <sixteenth>
@@ -35,6 +36,8 @@ const SNAPSHOT_DICT = 'bsv_snapshot';
 const RESULT_DICT = 'bsv_result';
 const PALETTE_DICT = 'bsv_palette';
 const SET_DICT = 'bsv_set';
+/** Partial re-reads pushed when the user changes something in Live. */
+const DELTA_DICT = 'bsv_delta';
 /** node → lom. The only dict we don't create by publishing to it — see ensureDicts. */
 const OPS_DICT = 'bsv_ops';
 
@@ -288,7 +291,7 @@ function publish(dictName: string, payload: unknown): void {
 var heldDicts: Dict[] = [];
 
 function ensureDicts(): void {
-  const names = [SNAPSHOT_DICT, RESULT_DICT, PALETTE_DICT, SET_DICT, OPS_DICT];
+  const names = [SNAPSHOT_DICT, RESULT_DICT, PALETTE_DICT, SET_DICT, DELTA_DICT, OPS_DICT];
   heldDicts = [];
   for (let i = 0; i < names.length; i++) {
     try {
@@ -534,7 +537,9 @@ function snapshot(reqId: number): void {
 
     const ms = tClips - t0;
     const payload: BSV.Snapshot = {
-      rev: Date.now(),
+      // Shares the sequence with deltas, so a client can tell a delta that
+      // follows what it holds from one that skipped a step.
+      rev: nextRev(),
       ms: ms,
       timings: {
         tracks: tTracks - t0,
@@ -1713,11 +1718,252 @@ function clearMeterObservers(): void {
   meterObservers = [];
 }
 
+// --- following Live ---------------------------------------------------
+//
+// Keeping up with edits the user makes in Live, without an observer per slot.
+//
+// The LOM has no aggregate "a clip in this track changed" signal — `clip_slots`
+// is a *const* list, so it fires on membership (the scene count) and never on
+// content. See *What the LOM does not have* in LOM.md. The complete alternative
+// is `has_clip` per slot, which is trackCount x sceneCount observers: ~4,400 on
+// a full-size set against the 2 x trackCount that play state costs.
+//
+// So watch the cursor instead. `selected_track` and `selected_scene` are both
+// observable, and Live defines `highlighted_clip_slot` as being derived from
+// them, so those two ARE the Session cursor — two observers for the whole grid.
+//
+// **The cursor says where to look; the re-read says what happened.** Nothing
+// here tries to detect a drag or classify a drop, which is what makes it robust:
+// there is no inference to get wrong. A selection change that turns out to be
+// an ordinary click re-reads a track, finds it unchanged, and publishes nothing.
+//
+// Measured against a real set, a click-and-drag in one motion on an *unselected*
+// clip fires twice — at the source on grab, at the destination on drop. That is
+// what makes `selPrevTrack` the source of a move.
+//
+// **What this does not catch**: edits that move nothing. Deleting, renaming or
+// recoloring a clip in place leaves the cursor where it is, so no callback
+// fires. Those need a full re-read, which is what the client's `changed`
+// handling and its own refresh are for.
+
+/** How long to let the cursor settle before re-reading. */
+const SEL_DEBOUNCE_MS = 100;
+
+var selObservers: LiveAPI[] = [];
+/** Last cursor seen, as raw ids — comparing these needs no index resolution. */
+var selTrackId = 0;
+var selSceneId = 0;
+/** Track index the cursor was in before its current position — a move's source. */
+var selPrevTrack = -1;
+/** Track indexes awaiting a re-read, used as a set. */
+var selDirty: { [t: string]: boolean } = {};
+/** LOM id -> track index. Rebuilt whenever the set's structure changes. */
+var trackIndexById: { [id: string]: number } | null = null;
+/**
+ * Monotonic revision of everything published, snapshots and deltas alike.
+ *
+ * Not a timestamp: two publishes inside one millisecond have to be orderable,
+ * and that ordering is the only thing standing between a client and a delta
+ * merged onto the wrong base.
+ */
+var rev = 0;
+
+function nextRev(): number {
+  rev = rev + 1;
+  return rev;
+}
+
+/**
+ * A track's index from its LOM id, through a cache.
+ *
+ * Resolving this by walking costs ~11ms on a real set, measured — which is
+ * nothing once, and a great deal on every click the user makes in Live. The
+ * cache is dropped on any structural change, because that is exactly when an
+ * index stops meaning what it meant.
+ */
+function trackIndexOf(id: number): number {
+  if (!id) return -1;
+  if (!trackIndexById) {
+    const map: { [id: string]: number } = {};
+    const count = at('live_set').getcount('tracks');
+    for (let t = 0; t < count; t++) map[String(at('live_set tracks ' + t).id)] = t;
+    trackIndexById = map;
+  }
+  const found = trackIndexById[String(id)];
+  return found === undefined ? -1 : found;
+}
+
+/**
+ * Every clip in one track, read by path.
+ *
+ * Deliberately *not* the snapshot's id-addressed fast path. This reads one
+ * track — ~11ms on a 64-scene set — so the fast path would save nothing worth a
+ * second way of doing it, and LOM.md records `goto('id N')` as not resolving
+ * against a real set. Path addressing is the form this project has actually
+ * watched work.
+ */
+function readTrackClips(t: number, sceneCount: number, out: BSV.Clip[]): void {
+  for (let s = 0; s < sceneCount; s++) {
+    const slotPath = 'live_set tracks ' + t + ' clip_slots ' + s;
+    const slot = at(slotPath);
+    if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
+    const c = at(slotPath + ' clip');
+    if (!exists(c)) continue;
+    out.push({
+      t: t,
+      s: s,
+      name: gstr(c, 'name'),
+      colorIndex: gnum(c, 'color_index'),
+      color: gnum(c, 'color'),
+      length: gnum(c, 'length'),
+      isMidi: gbool(c, 'is_midi_clip'),
+    });
+  }
+}
+
+function onSelectionChange(): void {
+  if (!selObservers.length) return;
+  try {
+    const view = at('live_set view');
+    const trackId = gid(view, 'selected_track');
+    const sceneId = gid(view, 'selected_scene');
+    // Two observers watch one cursor, so a move that changes track and scene
+    // together fires both. Without this the same position is handled twice.
+    if (trackId === selTrackId && sceneId === selSceneId) return;
+    selTrackId = trackId;
+    selSceneId = sceneId;
+
+    // Both ends, and this is the part that makes the scheme work. The cursor
+    // lands on a move's DESTINATION; the position it left is the SOURCE.
+    // Marking only the destination would learn that a clip arrived and never
+    // that it left, which draws it in two places at once.
+    const t = trackIndexOf(trackId);
+    if (t >= 0) selDirty[String(t)] = true;
+    if (selPrevTrack >= 0) selDirty[String(selPrevTrack)] = true;
+    selPrevTrack = t;
+
+    // Debounced, and not only to coalesce. Whether Live moves the selection
+    // before or after the clip actually lands is unverified, so reading
+    // synchronously here risks seeing the set as it was a moment ago.
+    selTask.cancel();
+    selTask.schedule(SEL_DEBOUNCE_MS);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function flushSelection(): void {
+  try {
+    // Our own write is mid-flight. Its result is reconciled by the client from
+    // the batch it sent, and a delta computed against a half-written set would
+    // race that. Come back rather than dropping the dirty tracks.
+    if (job || moveJob) {
+      selTask.schedule(SEL_DEBOUNCE_MS);
+      return;
+    }
+
+    const tracks: number[] = [];
+    for (const k in selDirty) {
+      if (Object.prototype.hasOwnProperty.call(selDirty, k)) tracks.push(Number(k));
+    }
+    selDirty = {};
+    if (!tracks.length) return;
+    tracks.sort(function (a, b) {
+      return a - b;
+    });
+
+    const t0 = Date.now();
+    const sceneCount = at('live_set').getcount('scenes');
+    const clips: BSV.Clip[] = [];
+    const scanned: number[] = [];
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      const track = at('live_set tracks ' + t);
+      // A track that no longer resolves was deleted under us. Say nothing about
+      // it: claiming it is empty would delete its clips from the client's copy,
+      // and the structure observer is already sending everyone for a full walk.
+      if (!exists(track)) continue;
+      // Group tracks have no real clip slots of their own — what a group slot
+      // shows is derived from its members. Same skip as the snapshot's scan.
+      if (gbool(track, 'is_foldable')) {
+        scanned.push(t);
+        continue;
+      }
+      scanned.push(t);
+      readTrackClips(t, sceneCount, clips);
+    }
+    if (!scanned.length) return;
+
+    const prevRev = rev;
+    const payload: BSV.SnapshotDelta = {
+      rev: nextRev(),
+      prevRev: prevRev,
+      tracks: scanned,
+      clips: clips,
+      ms: Date.now() - t0,
+    };
+    publish(DELTA_DICT, payload);
+    outlet(0, 'delta', DELTA_DICT);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+var selTask = new Task(flushSelection);
+
+function watch_selection(on: number): void {
+  clearSelObservers();
+  if (Number(on) !== 1) return;
+  try {
+    const t = new LiveAPI(onSelectionChange, 'live_set view');
+    t.property = 'selected_track';
+    const s = new LiveAPI(onSelectionChange, 'live_set view');
+    s.property = 'selected_scene';
+    selObservers = [t, s];
+
+    // Seed from where the cursor is now rather than waiting to be told. An
+    // observer on an object-valued property was not seen to fire on attach the
+    // way the numeric ones do, and without a starting position the first move
+    // would have no previous track — so its source would go unread, which is
+    // the one failure this whole design is built to avoid.
+    const view = at('live_set view');
+    selTrackId = gid(view, 'selected_track');
+    selSceneId = gid(view, 'selected_scene');
+    selPrevTrack = trackIndexOf(selTrackId);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function clearSelObservers(): void {
+  selTask.cancel();
+  for (let i = 0; i < selObservers.length; i++) {
+    try {
+      selObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  selObservers = [];
+  selDirty = {};
+  selPrevTrack = -1;
+  selTrackId = 0;
+  selSceneId = 0;
+}
+
 // --- observers --------------------------------------------------------
-// MVP watches structure only (track/scene lists). Per-clip observers would be
-// ~1 per slot; measure the snapshot cost before deciding that's worth it.
+// Structure only: the track and scene lists. Content is followed by watching
+// the selection instead — see *following Live* above.
 
 function onStructureChange(): void {
+  // Every index now means something different, so anything addressed by one is
+  // stale: the id cache, the dirty set, and the cursor's previous position.
+  // Clients re-walk on `changed`, which is the only honest answer to a set that
+  // just renumbered itself.
+  trackIndexById = null;
+  selDirty = {};
+  selPrevTrack = -1;
+  selTask.cancel();
   outlet(0, 'changed', 'structure');
 }
 
@@ -2087,6 +2333,7 @@ function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
   clearMeterObservers();
+  clearSelObservers();
   clearDiagObservers();
   diagDetach();
   applyTask.cancel();
