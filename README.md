@@ -138,6 +138,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `apply <reqId> <dictName>` | execute an op batch — `{ ops, sceneOps }` |
 | `move <reqId> <dictName>` | reorder scenes — `{ plan }`. See *Reordering scenes* |
 | `palette <reqId>` | developer-only sweep of Live's color palette |
+| `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove the per-track output-meter observers |
@@ -555,6 +556,46 @@ nothing while writing a plausible-looking cache file.
 `bridge.ts` also treats a degenerate cache file as **no cache at all**. That's what made
 the original failure so quiet: the file existed and parsed, so the UI showed one swatch
 forever rather than "not extracted yet" — the bad data was indistinguishable from data.
+
+## Diagnostics
+
+`diag <what> [arg]`, sent by [`../tools/diag.ts`](../tools/diag.ts) and never by the
+shipped UI — the same standing as `palette`.
+
+```sh
+npm run dev:diag -- sel
+npm run dev:diag -- watch 1     # then drag a clip in Live
+```
+
+**The answers land in the Max window, not on the wire**, which is why this message has
+no reply event and nothing in `TERMINAL`. Every question it settles is about what Live
+does *while you drag something in it*, so the readout has to be somewhere you can watch
+without leaving Live.
+
+| what | question it settles |
+|---|---|
+| `ids` | does `goto('id N')` resolve? Decides whether the slot scan can be made fast **and** whether an observer can be attached by id |
+| `slot` | is `ClipSlot.color_index` the contained clip's color on an *ordinary* slot, and does an empty slot answer None? |
+| `sel` | where is the Session cursor, and what does `Track.is_part_of_selection` cover? |
+| `watch 0\|1` | does moving a clip in Live move the cursor — at the source *and* the target? |
+| `scan <track>` | what one track's occupancy rescan costs |
+| `attach <n>` / `detach` | what N slot observers cost to install, and whether they slow *Live* down |
+
+Three of these exist to settle whether the set can be kept in sync by watching Live's
+**selection** rather than every clip slot. The reasoning: there is no aggregate "a clip
+in this track changed" observable (see [`LOM.md`](LOM.md)), but `selected_track` and
+`selected_scene` are observable and cost two observers total — and you have to select a
+clip to move it. So the cursor says *where to look* and a targeted re-read says *what
+happened*, with no drag/drop inference to get wrong.
+
+`watch` is the one that decides it. **Two lines per drag** — one naming the source slot,
+one the target — is what the design needs. One line means only the drop is visible, and
+a resync driven by it would leave the source stale, drawing the clip in both places.
+
+`attach`'s useful output isn't in its own log. Install the observers, then use Live
+normally — delete a scene, undo something — and see whether *Live* got slower. Observer
+callbacks run on Live's main thread, so the cost lands on Live's own operations, which
+is what a user would notice and blame the device for.
 
 ## Snapshot phases
 

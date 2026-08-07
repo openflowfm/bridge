@@ -454,6 +454,14 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('palette', track(ws, m));
       break;
     }
+    // Developer diagnostics. Fire-and-forget like `observe`: no reqId, no
+    // pending entry, no reply, because every answer lands in the Max window
+    // instead. See the `diag` note in protocol/global.d.ts for why.
+    case 'diag': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      Max.outlet('diag', String(m.what), Number(m.arg ?? 0));
+      break;
+    }
     // Device configuration is a Stored Only Max parameter. No LOM gate: it
     // belongs to this device instance and Live persists it with the .als.
     case 'saveRoles': {

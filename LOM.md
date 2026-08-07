@@ -57,6 +57,19 @@ undocumented, so nothing here can be looked up elsewhere.
 | `is_session_clip` | `Clip` | true for a Session clip, as against an Arrangement one |
 | `is_take_lane_clip` | `Clip` | true for a take-lane clip (always also an Arrangement clip) |
 | `create_midi_clip` | `Track` | inserts an empty MIDI clip **into the Arrangement** at a time. Not the Session-grid call — `ClipSlot.create_clip` is that one. |
+| `take_lanes` / `create_take_lane` | `Track` | Arrangement take lanes. Listed for completeness; nothing here reaches them. |
+
+**Two error strings that are really constraints.** Neither appears on the Cycling '74
+page, and both sit in 12.4.3's LiveAPI error block beside `'$1' is not a listenable
+device property`:
+
+> `Changes cannot be triggered by notifications.`
+> `Changes cannot be triggered during undo or redo.`
+
+**You cannot write to the LOM from inside an observer callback.** Live throws. Reads are
+fine, which is what makes the existing dirty-flag-then-`Task` pattern (`onPlayChange`)
+the right shape and not merely a tidy one — it's the only legal shape. Anything that
+wants to react to a change by *writing* has to defer out of the callback first.
 
 `begin_undo_step` / `end_undo_step` matter here more than the rest combined.
 [`README.md`](README.md) has said from the start that LOM writes don't participate in
@@ -132,6 +145,32 @@ Answered questions, recorded so they stay answered.
   lanes and Arrangement content have no copy path, and the grouping can't be rebuilt
   per the entry above. Track order is Live's to change; the app follows, because
   `observe` watches `live_set tracks` and re-snapshots on `changed structure`.
+- **No aggregate "a clip in this track changed" observable.** There is no way to watch a
+  track, a scene, or the set for clip *content*, so anything that wants to know a clip
+  moved has to watch per slot — `trackCount × sceneCount` observers — or find the
+  affected region some other way. `Track.clip_slots` and `Scene.clip_slots` are
+  observable but are **const lists** ("const access to the list of clipslots … for this
+  track"), so they fire on list *membership*: `Track.clip_slots` when the scene count
+  changes, `Scene.clip_slots` when the track count does. Both are therefore redundant
+  with `Song.tracks` / `Song.scenes`. Checked in both sources — the complete `ClipSlot`
+  and `Track` docstring blocks in 12.4.3's own table hold nothing else.
+
+  The one partial exception is **group-track slots**, which do aggregate their members:
+  `ClipSlot.controls_other_clips` ("true if firing this slot will fire clips in other
+  slots") and `ClipSlot.color_index` ("the first clip in the Group Track") are both
+  observable, so a grouped set can be watched at `sceneCount × groupCount`. It's lossy —
+  a move *within* a group that doesn't change the group's first clip fires nothing — so
+  it's a hint about where to re-read, never a fact.
+- **No multi-selection list, and selection extent is readable but not observable.**
+  There is no `selected_tracks` / `selected_scenes` anywhere in either source.
+  `Song.View.selected_track` and `selected_scene` are `get, set, observe` and are the
+  Session cursor — Live defines `highlighted_clip_slot` as *"the clip slot, defined via
+  the selected track and scene"*. `Track.is_part_of_selection` is **`get` with no
+  `observe`**, so the column extent of a selection can be read (one call per track) but
+  never watched, and `Scene` has no counterpart at all, so the row extent is unreadable.
+  Whether `is_part_of_selection` covers a track under a selected *block of clips* or
+  only a selected track *header* is **unverified** — `npm run dev:diag -- sel` settles
+  it, and it decides whether a selection-driven resync can cover a rectangle drag.
 - **No session-view layout.** No column widths, no row heights.
   `Track.View.is_collapsed` is documented as the *arranger*. Those live only in the
   `.als`, which this project never parses.

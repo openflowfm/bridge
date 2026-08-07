@@ -13,6 +13,7 @@
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
+//      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
 //      set_fold <track> <0|1> | watch_play <0|1> | watch_meters <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
@@ -42,6 +43,12 @@ const CHUNK = 50;
 
 /** Safety stop for the palette sweep; real palettes are far smaller. */
 const PALETTE_MAX = 200;
+
+/**
+ * Runaway guard for `diag attach`. A full-size set is ~4,400 slots, so this
+ * leaves room to go past one and still not wedge Live on a typo.
+ */
+const DIAG_ATTACH_MAX = 8000;
 
 interface ApplyJob {
   reqId: number;
@@ -1739,6 +1746,339 @@ function clearObservers(): void {
   observers = [];
 }
 
+// --- developer diagnostics --------------------------------------------
+//
+// `diag <what> [arg]`. Never called by the shipped UI — the same standing as
+// `palette`, and for the same reason: these settle questions about what Live
+// actually does that no amount of reading the docs will answer.
+//
+// **Answers go to the Max window, not over the wire.** Every question here is
+// about what happens *while you drag something in Live*, so the readout has to
+// be somewhere you can watch without leaving Live.
+//
+// Every probe is a read. Live's binary carries the error string "Changes
+// cannot be triggered by notifications", so a write from inside an observer
+// callback throws — `diagWatch` deliberately never writes.
+
+/** Selection observers from `diag watch`. */
+var diagObservers: LiveAPI[] = [];
+/** Slot observers from `diag attach`, kept apart so a watch survives one. */
+var diagAttached: LiveAPI[] = [];
+/** Last cursor position reported, so the watch log shows moves not repeats. */
+var diagLastSel = '';
+
+/**
+ * Does `goto('id N')` resolve?
+ *
+ * [`LOM.md`](../LOM.md) records a measurement saying it doesn't — every one of
+ * 24 tracks fell back — which is why the slot scan uses path addressing and
+ * costs ~758ms of a ~946ms walk. Worth re-asking because it decides two things
+ * at once: whether that scan can be made fast, and whether an observer can be
+ * attached by id. The second matters more. An index-addressed observer silently
+ * re-points when a scene is inserted above it, so if id addressing is dead then
+ * every structural change invalidates the whole observer set.
+ */
+function diagIds(): void {
+  const trackIds = gids(at('live_set'), 'tracks');
+  post('bsv diag ids: live_set tracks -> ' + trackIds.length + ' id(s)\n');
+  if (!trackIds.length) return;
+
+  const byId = at('id ' + trackIds[0]);
+  const trackOk = exists(byId);
+  const viaId = trackOk ? gstr(byId, 'name') : '';
+  const viaPath = gstr(at('live_set tracks 0'), 'name');
+  post(
+    '  track 0 by id ' + trackIds[0] + ': ' + (trackOk ? 'RESOLVED' : 'FAILED') +
+      ' name="' + viaId + '" — by path: "' + viaPath + '"\n',
+  );
+
+  const slotIds = gids(at('live_set tracks 0'), 'clip_slots');
+  if (!slotIds.length) {
+    post('  track 0 reports no clip_slots\n');
+    return;
+  }
+  const slot = at('id ' + slotIds[0]);
+  const slotOk = exists(slot);
+  post(
+    '  slot 0 by id ' + slotIds[0] + ': ' + (slotOk ? 'RESOLVED' : 'FAILED') +
+      " get('clip') -> " + JSON.stringify(slot.get('clip')) + '\n',
+  );
+  post(
+    '  => id addressing ' + (trackOk && slotOk ? 'WORKS' : 'is BROKEN') + '\n',
+  );
+}
+
+/**
+ * Is `ClipSlot.color_index` the contained clip's color on an *ordinary* slot?
+ *
+ * Live's own docstring is generic — "Returns the canonical color index for the
+ * clip slot or None if it does not exist" — while the Cycling '74 page only
+ * describes the group-track case. If the generic reading holds, one observer
+ * per slot reports a clip added (None -> n), removed (n -> None) *and*
+ * recolored (n -> m). That's the work of a `has_clip` observer plus a per-clip
+ * one, with no per-clip observer lifecycle to manage — clip slots never come
+ * and go except structurally, but clips do.
+ */
+function diagSlot(): void {
+  const set = at('live_set');
+  const trackCount = set.getcount('tracks');
+  const sceneCount = set.getcount('scenes');
+
+  for (let t = 0; t < trackCount; t++) {
+    if (gbool(at('live_set tracks ' + t), 'is_foldable')) continue;
+    for (let s = 0; s < sceneCount; s++) {
+      const path = 'live_set tracks ' + t + ' clip_slots ' + s;
+      const slot = at(path);
+      if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
+
+      // Read the slot's own answers before the cursor moves to the clip.
+      const slotIndex = gnumOr(slot, 'color_index', -1);
+      const slotRgb = gnumOr(slot, 'color', -1);
+      const clip = at(path + ' clip');
+      const clipIndex = gnumOr(clip, 'color_index', -1);
+      const clipRgb = gnumOr(clip, 'color', -1);
+      const match = slotIndex >= 0 && slotIndex === clipIndex;
+
+      post('bsv diag slot: occupied slot (' + t + ',' + s + ')\n');
+      post('  slot color_index=' + slotIndex + ' color=' + slotRgb + '\n');
+      post('  clip color_index=' + clipIndex + ' color=' + clipRgb + '\n');
+      post(
+        '  => ' +
+          (match
+            ? 'MATCH — one color_index observer per slot covers add, remove and recolor'
+            : 'NO MATCH — ClipSlot.color_index does not mirror an ordinary ' +
+              "slot's clip, so occupancy still needs has_clip") + '\n',
+      );
+
+      // The other half: an empty slot has to answer "None", not slot 0. gnumOr
+      // is what keeps those apart — gnum would report both as a real color.
+      for (let e = 0; e < sceneCount; e++) {
+        const empty = at('live_set tracks ' + t + ' clip_slots ' + e);
+        if (!exists(empty) || gbool(empty, 'has_clip')) continue;
+        const emptyIndex = gnumOr(empty, 'color_index', -1);
+        post(
+          '  empty slot (' + t + ',' + e + '): color_index=' + emptyIndex +
+            (emptyIndex === -1
+              ? ' — None, so occupancy is readable from this property alone'
+              : ' — a real value, so None is NOT how Live reports an empty slot') +
+            '\n',
+        );
+        return;
+      }
+      post('  (no empty slot on this track to compare against)\n');
+      return;
+    }
+  }
+  post('bsv diag slot: no occupied non-group slot found\n');
+}
+
+/**
+ * Where Live's Session cursor is, and how wide the selection is.
+ *
+ * Live documents `highlighted_clip_slot` as "the clip slot, defined via the
+ * selected track and scene", so `selected_track` + `selected_scene` — both
+ * observable — *are* the cursor.
+ *
+ * `Track.is_part_of_selection` is readable but **not** observable, and what it
+ * means is the open question. If it reports a track covered by a selected
+ * *block of clips*, then a selection-driven resync can widen to cover a
+ * rectangle drag. If it only reports a selected track *header*, it says nothing
+ * about clips and a wide drag can only be caught by a full re-read.
+ *
+ * To settle it: select a 3x3 block of clips in Live, then run `diag sel`.
+ * Three tracks listed means the wide reading holds.
+ */
+function diagSelection(label: string, dedupe: boolean): void {
+  const t0 = Date.now();
+  const view = at('live_set view');
+  const trackId = gid(view, 'selected_track');
+  const sceneId = gid(view, 'selected_scene');
+  const slotId = gid(view, 'highlighted_clip_slot');
+  const detailId = gid(view, 'detail_clip');
+
+  const set = at('live_set');
+  const trackCount = set.getcount('tracks');
+  const sceneCount = set.getcount('scenes');
+
+  // Resolving an id to an index costs a walk. A real implementation would cache
+  // the map and rebuild it on structural change; timing it here is what says
+  // whether that caching is required or merely tidy.
+  let tIndex = -1;
+  const inSelection: number[] = [];
+  for (let t = 0; t < trackCount; t++) {
+    const a = at('live_set tracks ' + t);
+    if (Number(a.id) === trackId) tIndex = t;
+    if (gbool(a, 'is_part_of_selection')) inSelection.push(t);
+  }
+  let sIndex = -1;
+  for (let s = 0; s < sceneCount; s++) {
+    if (Number(at('live_set scenes ' + s).id) === sceneId) {
+      sIndex = s;
+      break;
+    }
+  }
+
+  const key = tIndex + ':' + sIndex;
+  if (dedupe && key === diagLastSel) return;
+  diagLastSel = key;
+
+  post(
+    'bsv diag ' + label + ': track ' + tIndex + ' scene ' + sIndex +
+      ' | slot id ' + slotId + ' detail_clip id ' + detailId +
+      ' | is_part_of_selection [' + inSelection.join(' ') + ']' +
+      ' | resolved in ' + (Date.now() - t0) + 'ms\n',
+  );
+}
+
+function onDiagSelectionChange(): void {
+  // Deduped: both observers point at the same cursor, so a move that changes
+  // track and scene together would otherwise log the same position twice and
+  // make the lines uncountable — which is the one thing this has to get right.
+  diagSelection('sel*', true);
+}
+
+/**
+ * Log every selection change.
+ *
+ * The whole selection-driven resync idea rests on one unverified assumption:
+ * that moving a clip in Live moves the Session cursor, at the source when you
+ * pick it up and at the target when you drop it. Turn this on, drag a clip, and
+ * read the answer off the Max window.
+ *
+ * **What a pass looks like: two lines** — one naming the source slot, one
+ * naming the target. One line means only the drop is visible, and a resync
+ * driven by this would leave the source stale, drawing the clip in both places.
+ */
+function diagWatch(on: number): void {
+  clearDiagObservers();
+  if (Number(on) !== 1) {
+    post('bsv diag: selection watch OFF\n');
+    return;
+  }
+  const t = new LiveAPI(onDiagSelectionChange, 'live_set view');
+  t.property = 'selected_track';
+  const s = new LiveAPI(onDiagSelectionChange, 'live_set view');
+  s.property = 'selected_scene';
+  diagObservers = [t, s];
+  post(
+    'bsv diag: selection watch ON. Drag a clip to another slot and count the ' +
+      'lines — two (source, then target) is what the resync design needs; one ' +
+      'means the source slot goes stale.\n',
+  );
+}
+
+function clearDiagObservers(): void {
+  for (let i = 0; i < diagObservers.length; i++) {
+    try {
+      diagObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  diagObservers = [];
+  diagLastSel = '';
+}
+
+/**
+ * What one track's occupancy rescan costs — the read a selection-driven resync
+ * would actually perform.
+ *
+ * The design rests on this being cheap enough to run on every selection change,
+ * so measure it rather than extrapolating from the snapshot's per-slot average.
+ */
+function diagScan(t: number): void {
+  const index = Math.max(0, Number(t) || 0);
+  const sceneCount = at('live_set').getcount('scenes');
+  const t0 = Date.now();
+  let occupied = 0;
+  for (let s = 0; s < sceneCount; s++) {
+    const slot = at('live_set tracks ' + index + ' clip_slots ' + s);
+    if (exists(slot) && gbool(slot, 'has_clip')) occupied++;
+  }
+  const ms = Date.now() - t0;
+  post(
+    'bsv diag scan: track ' + index + ' — ' + sceneCount + ' slots in ' + ms +
+      'ms (' + (sceneCount ? (ms / sceneCount).toFixed(3) : '0') + 'ms/slot), ' +
+      occupied + ' occupied\n',
+  );
+}
+
+/**
+ * What N observers cost to attach and to release.
+ *
+ * Attaching is synchronous and **will freeze Live for the duration** — that is
+ * the measurement, not a bug. If the total turns out to be the problem rather
+ * than the per-observer cost, `apply` already shows how to spread it over a
+ * `Task` in chunks of CHUNK.
+ *
+ * The number to watch for afterwards isn't in this log: use Live normally with
+ * the observers live — delete a scene, undo something — and see whether *Live*
+ * got slower. That's the cost a user would notice and blame the device for.
+ */
+function diagAttach(n: number): void {
+  diagDetach();
+  const want = Math.max(1, Math.min(Number(n) || 500, DIAG_ATTACH_MAX));
+  const set = at('live_set');
+  const trackCount = set.getcount('tracks');
+  const sceneCount = set.getcount('scenes');
+  const t0 = Date.now();
+  for (let t = 0; t < trackCount && diagAttached.length < want; t++) {
+    for (let s = 0; s < sceneCount && diagAttached.length < want; s++) {
+      const o = new LiveAPI(function () {}, 'live_set tracks ' + t + ' clip_slots ' + s);
+      o.property = 'color_index';
+      diagAttached.push(o);
+    }
+  }
+  const made = diagAttached.length;
+  const ms = Date.now() - t0;
+  post(
+    'bsv diag attach: ' + made + ' slot observers in ' + ms + 'ms (' +
+      (made ? (ms / made).toFixed(3) : '0') + 'ms each). Live was frozen for ' +
+      'that whole time. Now use Live normally and see whether IT feels ' +
+      'different. `diag detach` when done.\n',
+  );
+}
+
+function diagDetach(): void {
+  if (!diagAttached.length) return;
+  const n = diagAttached.length;
+  const t0 = Date.now();
+  for (let i = 0; i < diagAttached.length; i++) {
+    try {
+      diagAttached[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  diagAttached = [];
+  post('bsv diag detach: released ' + n + ' observers in ' + (Date.now() - t0) + 'ms\n');
+}
+
+function diag(what: string, arg: number): void {
+  if (!deviceReady) {
+    post('bsv diag: device not ready\n');
+    return;
+  }
+  const w = String(what || '');
+  try {
+    if (w === 'ids') diagIds();
+    else if (w === 'slot') diagSlot();
+    else if (w === 'sel') diagSelection('sel', false);
+    else if (w === 'watch') diagWatch(arg);
+    else if (w === 'scan') diagScan(arg);
+    else if (w === 'attach') diagAttach(arg);
+    else if (w === 'detach') diagDetach();
+    else {
+      post(
+        'bsv diag: unknown "' + w + '". Try: ids | slot | sel | watch 0|1 | ' +
+          'scan <track> | attach <n> | detach\n',
+      );
+    }
+  } catch (e) {
+    post('bsv diag ' + w + ': ' + describe(e) + '\n');
+  }
+}
+
 function anything(): void {
   post('bsv lom: unhandled message "' + messagename + '"\n');
 }
@@ -1747,6 +2087,8 @@ function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
   clearMeterObservers();
+  clearDiagObservers();
+  diagDetach();
   applyTask.cancel();
   moveTask.cancel();
   // An undo step left open would swallow everything the user does next into our
