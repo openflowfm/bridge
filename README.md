@@ -249,10 +249,25 @@ same bridge), so this is exercised rather than hypothetical.
 
 **Already correct.** `pending` keys by request id and stores the originating socket, so
 replies route to the client that asked. Terminal replies (`snapshot`, `applied`,
-`palette`) go to the requester; `changed`, `deviceState` and `reload` broadcast.
+`palette`) go to the requester; `changed`, `delta`, `deviceState` and `reload` broadcast.
 Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-client.
 
-**Not yet guaranteed.** Four things to fix before a second *kind* of client exists:
+**Watches are refcounted**, which they had to become the moment `useBridge` started
+following Live. Every watch is one global observer list in `lom.ts`, so a client sending
+`watch_play 0` on unmount used to stop play state for every other client too — and a
+client that closed its tab never sent `off` at all, holding the watch open forever.
+`bridge.ts` keeps a `Set` of sockets per watch kind, releases them on socket close, and
+re-arms from that record when the LOM reports ready again after a device reload.
+
+**`on` is always forwarded and only `off` is edge-triggered**, which looks like a bug and
+isn't. `watch_play` and `watch_meters` install an observer per *track*, so a client
+re-sends `on` to rebuild them when a snapshot finds a different track count; suppressing
+that because another client already held the watch would leave the observers addressing a
+set that no longer exists. Forwarding it costs nothing, because every `watch_*` handler in
+`lom.ts` clears before it installs. Sets rather than counters, so a client sending `on`
+twice doesn't need two `off`s to release.
+
+**Not yet guaranteed.** Three things to fix before a second *kind* of client exists:
 
 1. **Dict names are fixed, so a request can read another's payload.** The window is
    narrow, not wide: `lom.ts` reads and publishes synchronously inside one Max message,
@@ -263,18 +278,19 @@ Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-cli
 2. **`apply` rejects instead of queueing.** `if (job) return fail(reqId, 'apply already
    in progress')`. Fine for one client; for two, the second just gets an error and has
    to retry. The chunked `Task` already provides the yield points a FIFO queue needs.
-3. **`snapshot` doesn't coalesce.** There's no guard at all, so N clients asking at
-   once means N full LOM walks serialized on Live's main thread — and the walk is the
-   expensive part. Single-flight plus a cache keyed by `rev` (already in the payload)
-   is the fix.
-4. **`observe` and `watchSelection` have no refcount, and this one is now live.** The
-   bridge forwards each straight to a global toggle that clears and rebuilds all
-   observers, so one client turning it off silently blinds the others, and a client that
-   vanishes never decrements. This used to be latent because nothing in `ui/` sent
-   `observe`; `useBridge` now sends both on mount and clears both on unmount, so **two
-   browser tabs will fight** — the second to unmount stops the first from following Live.
-   The fix is a count per watch kind in `bridge.ts`, toggling `lom.ts` only on the 0↔1
-   edge.
+3. **`snapshot` doesn't coalesce, and following Live made this reachable.** There's no
+   guard at all, so N clients asking at once means N full LOM walks serialized on Live's
+   main thread — and the walk is the expensive part. It used to take N people pressing a
+   button at the same moment; now a single structural change broadcasts
+   `changed structure` and **every connected client re-walks at once**, which is ~950ms
+   each on a real set. Single-flight plus a cache keyed by `rev` is the fix, and `rev` is
+   now a real sequence rather than a timestamp, so the cache key works.
+
+   Related and narrower: **`bsv_delta` is a fixed dict name like the rest**, and a delta
+   is pushed rather than requested, so two flushes 100ms apart could in principle have
+   the second overwrite the dict before `bridge.ts`'s `await Max.getDict` lands. The
+   failure is a garbled delta rather than a wrong grid — `prevRev` won't line up and the
+   client re-walks — but it's one more instance of item 1.
 
 `changed` still carries only a `kind`, so it remains a full re-walk for the receiver —
 but that is now the *structural* path only, where a re-walk is the honest answer because

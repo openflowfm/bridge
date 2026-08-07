@@ -337,13 +337,85 @@ wss.on('connection', (ws: WebSocket) => {
     }
   });
 
-  ws.on('close', () => Max.post(`client disconnected (${wss.clients.size} left)`));
+  ws.on('close', () => {
+    // Before the log line: a client that closed the tab never sent `off`, and
+    // its watches would otherwise be held open forever by a socket that is gone.
+    releaseWatches(ws);
+    Max.post(`client disconnected (${wss.clients.size} left)`);
+  });
 });
 
 function track(ws: WebSocket, m: BSV.Request): number {
   const reqId = nextReqId++;
   pending.set(reqId, { ws, type: m.type, clientId: m.id, started: Date.now() });
   return reqId;
+}
+
+// --- watch refcounting ------------------------------------------------
+//
+// Every watch is global in `lom.ts` — one observer list per kind, not one per
+// client — so without this a client turning one off silently blinds every other
+// client, and a client that vanishes never releases anything. Several UI dev
+// servers already share one device, so this is exercised rather than
+// hypothetical.
+//
+// **`on` is always forwarded; only `off` is edge-triggered**, and that asymmetry
+// is deliberate rather than an oversight. `watch_play` and `watch_meters`
+// install an observer per *track*, so a client re-sends `on` to rebuild them
+// when a snapshot reports a different track count — suppressing that because
+// someone else already held the watch would leave the observers pointed at a
+// set that no longer exists. Forwarding it costs nothing: every `watch_*`
+// handler in `lom.ts` clears before it installs.
+//
+// Sets of sockets rather than integer counters, so a client sending `on` twice
+// doesn't need two `off`s to release, and a dropped socket releases exactly what
+// it was holding and nothing else.
+
+const WATCH_MESSAGE = {
+  observe: 'observe',
+  selection: 'watch_selection',
+  play: 'watch_play',
+  meters: 'watch_meters',
+} as const;
+
+type WatchKind = keyof typeof WATCH_MESSAGE;
+
+const watchers: Record<WatchKind, Set<WebSocket>> = {
+  observe: new Set(),
+  selection: new Set(),
+  play: new Set(),
+  meters: new Set(),
+};
+
+function setWatch(ws: WebSocket, kind: WatchKind, on: boolean): void {
+  const subs = watchers[kind];
+  if (on) {
+    subs.add(ws);
+    Max.outlet(WATCH_MESSAGE[kind], 1);
+    return;
+  }
+  // Nothing to release, or someone else still wants it.
+  if (!subs.delete(ws) || subs.size > 0) return;
+  Max.outlet(WATCH_MESSAGE[kind], 0);
+}
+
+/** A vanished client never sends `off`. Release whatever it was holding. */
+function releaseWatches(ws: WebSocket): void {
+  for (const kind of Object.keys(watchers) as WatchKind[]) setWatch(ws, kind, false);
+}
+
+/**
+ * The LOM came back — the device reloaded, so its observer lists are empty
+ * while our record of who wants what survived.
+ *
+ * Re-arm from that record instead of waiting for every client to notice on its
+ * own. `useBridge` does re-send on `lomReady`, but a client that doesn't would
+ * otherwise sit there believing it was still following Live.
+ */
+function rearmWatches(): void {
+  for (const kind of Object.keys(watchers) as WatchKind[]) {
+    if (watchers[kind].size > 0) Max.outlet(WATCH_MESSAGE[kind], 1);
+  }
 }
 
 async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
@@ -484,7 +556,7 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       break;
     }
     case 'observe':
-      Max.outlet('observe', m.on ? 1 : 0);
+      setWatch(ws, 'observe', m.on);
       break;
     // Playback is fire-and-forget: no reqId, no pending entry, no reply. The
     // caller's feedback is the play_state push, and awaiting an ack would only
@@ -514,15 +586,15 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       break;
     case 'watchPlay':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      Max.outlet('watch_play', m.on ? 1 : 0);
+      setWatch(ws, 'play', m.on);
       break;
     case 'watchMeters':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      Max.outlet('watch_meters', m.on ? 1 : 0);
+      setWatch(ws, 'meters', m.on);
       break;
     case 'watchSelection':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      Max.outlet('watch_selection', m.on ? 1 : 0);
+      setWatch(ws, 'selection', m.on);
       break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
@@ -580,6 +652,9 @@ Max.addHandler('ready', () => {
   lomReady = true;
   Max.post('LOM ready');
   broadcast({ type: 'status', lomReady: true });
+  // A reloaded device has empty observer lists but our record of who wants what
+  // survived, so put back whatever clients were already holding.
+  rearmWatches();
   // Only needed when the pattr is empty and an old bsv.json may need importing.
   Max.outlet('set_info');
 });
