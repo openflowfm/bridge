@@ -224,6 +224,38 @@ let lomReady = false;
 let nextReqId = 1;
 const pending = new Map<number, Pending>();
 
+/**
+ * The walk in flight, and everyone who asked for it after it started.
+ *
+ * `snapshot` had no coalescing at all, which was survivable while it took
+ * someone pressing a button — and stopped being so when the app started
+ * following Live. One structural change broadcasts `changed structure` to every
+ * connected client, each of them answers by re-walking, and N walks serialize on
+ * Live's main thread at ~950ms apiece.
+ *
+ * The first requester keeps its `pending` entry so progress and errors route the
+ * way they always did; the rest ride along here. Each gets the payload stamped
+ * with **its own** `clientId`, because that id is what resolves the waiter on
+ * the other end.
+ */
+let snapshotFlight: { reqId: number; joined: Array<{ ws: WebSocket; clientId?: number }> } | null =
+  null;
+
+/**
+ * Close out the flight `reqId` belongs to and hand back who was riding on it.
+ *
+ * **Every path that ends a walk must call this**, success or failure. A flight
+ * left standing after a walk that errored would collect joiners forever and
+ * never answer any of them — every later request would queue behind a walk that
+ * is no longer running, which is a worse failure than the one that started it.
+ */
+function takeFlight(reqId: number): Array<{ ws: WebSocket; clientId?: number }> {
+  if (snapshotFlight?.reqId !== reqId) return [];
+  const { joined } = snapshotFlight;
+  snapshotFlight = null;
+  return joined;
+}
+
 // --- http -------------------------------------------------------------
 
 const MIME: Record<string, string> = {
@@ -447,7 +479,14 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
   switch (m.type) {
     case 'snapshot': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      Max.outlet('snapshot', track(ws, m));
+      // A walk is already running. Wait for it instead of starting a second.
+      if (snapshotFlight) {
+        snapshotFlight.joined.push({ ws, clientId: m.id });
+        return;
+      }
+      const reqId = track(ws, m);
+      snapshotFlight = { reqId, joined: [] };
+      Max.outlet('snapshot', reqId);
       break;
     }
     case 'apply': {
@@ -758,6 +797,7 @@ Max.addHandler('set_info_done', async (dictName: string) => {
 Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
+  const flight = takeFlight(reqId);
   const t0 = Date.now();
   const data: BSV.Snapshot = await Max.getDict(dictName);
   const hostMs = Date.now() - t0;
@@ -770,11 +810,25 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   const event: BSV.Event = { type: 'snapshot', id: req?.clientId, dictMs, hostMs, data };
   if (req?.ws) send(req.ws, event);
   else broadcast(event);
+  // Everyone who asked while this was running. Each needs the payload under its
+  // own request id — that id is what resolves the waiter on the other end, so
+  // one shared event object would answer exactly one of them.
+  for (const j of flight) send(j.ws, { type: 'snapshot', id: j.clientId, dictMs, hostMs, data });
+  if (flight.length > 0) {
+    Max.post(`snapshot: one walk answered ${flight.length + 1} clients`);
+  }
 });
 
 Max.addHandler('snapshot_progress', (reqId: number, done: number, total: number) => {
   const req = pending.get(reqId);
   send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
+  // Joiners are waiting on the same walk, so they get the same bar. Without
+  // this they sit on a modal with no progress until the payload lands.
+  if (snapshotFlight?.reqId === reqId) {
+    for (const j of snapshotFlight.joined) {
+      send(j.ws, { type: 'progress', id: j.clientId, done, total });
+    }
+  }
 });
 
 Max.addHandler('apply_progress', (reqId: number, done: number, total: number) => {
@@ -840,10 +894,16 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
       (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
   );
   send(req?.ws, { type: 'moved', id: req?.clientId, lomMs: ms, ...r });
-  // Structural, so every other client's scene indexes just became wrong. This
-  // is the one change where a stale grid is actively dangerous rather than
-  // merely out of date — a click lands on a different scene than it looks like.
-  broadcast({ type: 'changed', kind: 'moved' });
+  // Structural, so every client's scene indexes just became wrong. This is the
+  // one change where a stale grid is actively dangerous rather than merely out
+  // of date — a click lands on a different scene than it looks like.
+  //
+  // `structure`, not `moved`: the client re-walks on `structure` and only logs
+  // `moved`, so the old kind announced the danger to a handler that did nothing
+  // about it. What actually recovered other clients was the observer burst
+  // during the move — which had them walking a set that was halfway rearranged.
+  // That burst is muted in `lom.ts` now, and this is the one event in its place.
+  broadcast({ type: 'changed', kind: 'structure' });
 });
 
 Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
@@ -932,6 +992,10 @@ Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
   // With no id, no waiter is rejected; the client just logs it.
   if (req?.ws) send(req.ws, event);
   else broadcast(event);
+  // A failed walk has to fail for everyone riding on it too, or they wait out
+  // their request timeout on a walk that is already over — and the flight would
+  // never clear, stranding every request after it as well.
+  for (const j of takeFlight(reqId)) send(j.ws, { type: 'error', id: j.clientId, message });
 });
 
 Max.addHandler('pong', () => {});

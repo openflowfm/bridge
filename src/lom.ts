@@ -95,8 +95,20 @@ var masterMeterLeft = 0;
 var masterMeterRight = 0;
 var metersWatching = false;
 var job: ApplyJob | null = null;
-/** Suppress the per-scene observer burst while add_scenes emits one terminal structural event. */
-var addingScenes = false;
+/**
+ * A structural job of our own is running — `add_scenes` or `move`.
+ *
+ * Both create and delete scenes, and each `create_scene` / `delete_scene` trips
+ * the `live_set scenes` observer. Left unmuted that is one `changed structure`
+ * per scene touched, and every one of those sends **every connected client** off
+ * on a full ~950ms walk — of a set that is halfway through being rearranged.
+ * Reading a set mid-move is worse than reading it late.
+ *
+ * So the burst is muted and Node emits exactly one structural event after the
+ * terminal result. The index-addressed state is still dropped on every callback;
+ * it's only the outward message that waits.
+ */
+var structuralJob = false;
 
 // --- helpers ----------------------------------------------------------
 
@@ -767,7 +779,7 @@ function add_scenes(reqId: number, dictName: string): void {
     let created = 0;
     let configured = 0;
     let failed = 0;
-    addingScenes = true;
+    structuralJob = true;
     try {
       for (let i = 0; i < count; i++) {
         const s = atIndex + i;
@@ -806,8 +818,8 @@ function add_scenes(reqId: number, dictName: string): void {
       // Live may deliver the scenes observer callbacks just after create_scene
       // returns. Keep the burst muted briefly; Node emits one structural event
       // after this function's terminal result.
-      addStructureTask.cancel();
-      addStructureTask.schedule(100);
+      structureSettleTask.cancel();
+      structureSettleTask.schedule(100);
     }
 
     const result: BSV.ScenesAddedResult = {
@@ -825,8 +837,8 @@ function add_scenes(reqId: number, dictName: string): void {
   }
 }
 
-var addStructureTask = new Task(function () {
-  addingScenes = false;
+var structureSettleTask = new Task(function () {
+  structuralJob = false;
 });
 
 function applyStep(): void {
@@ -1044,6 +1056,13 @@ function move(reqId: number, dictName: string): void {
       post('bsv move: begin_undo_step unavailable — ' + describe(e) + '\n');
     }
 
+    // A reorder is a build-then-delete pass, so it trips the scenes observer
+    // once per scene created and once per scene deleted. Mute the burst for the
+    // duration; `finishMove` releases it and Node emits the one event that
+    // matters. Set before the first `create_scene`, not after.
+    structuralJob = true;
+    structureSettleTask.cancel();
+
     moveJob = {
       reqId: reqId,
       plan: { create: create, steps: steps, remove: remove },
@@ -1058,6 +1077,11 @@ function move(reqId: number, dictName: string): void {
     moveTask.repeat();
   } catch (e) {
     moveJob = null;
+    // The mute is set just above, so a throw between there and `repeat()` would
+    // leave it on for the rest of the session — and a stuck mute means no client
+    // is ever told the set restructured again. Silent, and permanent.
+    structuralJob = false;
+    structureSettleTask.cancel();
     fail(reqId, e);
   }
 }
@@ -1162,6 +1186,11 @@ function finishMove(): void {
     undoStep: j.undoStep,
   };
   moveJob = null;
+  // Same trailing-callback allowance as add_scenes: Live may deliver the last
+  // scenes-observer callbacks just after the final delete returns, so the mute
+  // outlives the job by a beat rather than ending with it.
+  structureSettleTask.cancel();
+  structureSettleTask.schedule(100);
   publish(RESULT_DICT, result);
   outlet(0, 'move_done', j.reqId, RESULT_DICT, ms);
 
@@ -2141,7 +2170,7 @@ function onStructureChange(): void {
   // add_scenes creates a fixed run synchronously. Its Node-side completion
   // broadcasts one structural change after all eight rows are configured;
   // emitting once per create would launch eight overlapping full snapshots.
-  if (addingScenes) return;
+  if (structuralJob) return;
   outlet(0, 'changed', 'structure');
 }
 
@@ -2516,8 +2545,8 @@ function notifydeleted(): void {
   diagDetach();
   applyTask.cancel();
   moveTask.cancel();
-  addStructureTask.cancel();
-  addingScenes = false;
+  structureSettleTask.cancel();
+  structuralJob = false;
   // An undo step left open would swallow everything the user does next into our
   // half-finished move. Closing it is the one bit of cleanup here that touches
   // Live rather than just releasing our own handles.

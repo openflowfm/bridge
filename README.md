@@ -288,13 +288,29 @@ so a client sending `on` twice doesn't need two `off`s to release.
 2. **`apply` rejects instead of queueing.** `if (job) return fail(reqId, 'apply already
    in progress')`. Fine for one client; for two, the second just gets an error and has
    to retry. The chunked `Task` already provides the yield points a FIFO queue needs.
-3. **`snapshot` doesn't coalesce, and following Live made this reachable.** There's no
-   guard at all, so N clients asking at once means N full LOM walks serialized on Live's
-   main thread — and the walk is the expensive part. It used to take N people pressing a
-   button at the same moment; now a single structural change broadcasts
-   `changed structure` and **every connected client re-walks at once**, which is ~950ms
-   each on a real set. Single-flight plus a cache keyed by `rev` is the fix, and `rev` is
-   now a real sequence rather than a timestamp, so the cache key works.
+3. ~~**`snapshot` doesn't coalesce.**~~ **Fixed — `snapshot` is single-flight.** A request
+   arriving while a walk is running joins it rather than starting a second, and the one
+   payload is sent to each joiner stamped with **its own** request id, because that id is
+   what resolves the waiter at the other end. Progress fans out to joiners too, so they
+   see a moving bar rather than a still modal.
+
+   It had no guard at all, which was survivable while it took N people pressing a button
+   at the same moment — and stopped being so once the app followed Live, because one
+   structural change broadcasts `changed structure` and every connected client answers by
+   re-walking, at ~950ms each, serialized on Live's main thread.
+
+   **Every path that ends a walk must clear the flight**, `snapshot_done` and `err` alike.
+   A flight left standing after a walk that errored collects joiners forever and answers
+   none of them, and every later request queues behind a walk that is no longer running —
+   a worse failure than the one that started it. `takeFlight(reqId)` is the single place
+   that closes one out.
+
+   A short reuse window on top of this was considered and dropped. It would have to live
+   in `bridge.ts`, which deliberately imports nothing from the repo so it can emit to a
+   flat file outside its own `rootDir` — so the rule could not go in `core/` where it
+   would have tests. Single-flight already absorbs the storm it was aimed at, and serving
+   a set from memory trades that for the risk of serving one that changed with no event
+   to say so. Not a good trade for what was left.
 
    Related and narrower: **`bsv_delta` is a fixed dict name like the rest**, and a delta
    is pushed rather than requested, so two flushes 100ms apart could in principle have
@@ -307,6 +323,29 @@ but that is now the *structural* path only, where a re-walk is the honest answer
 every index changed meaning. Content changes travel as `delta`, which carries its scope
 and its `rev`, and that is what makes following Live cheap rather than merely correct.
 See *Following Live* below.
+
+### A structural job of ours mutes the burst it causes
+
+`add_scenes` and `move` both create and delete scenes, and **every one of those trips the
+`live_set scenes` observer**. Unmuted that is one `changed structure` per scene touched,
+each of which sends every connected client on a full walk — of a set that is halfway
+through being rearranged. Reading a set mid-move is worse than reading it late.
+
+So `structuralJob` mutes the outward message for the duration and Node emits exactly one
+structural event after the terminal result. The index-addressed state — the id cache, the
+dirty set, the cursor's previous position — is still dropped on every callback; it is only
+the message that waits. The mute outlives the job by 100ms, because Live may deliver the
+last callbacks just after the final `create_scene` / `delete_scene` returns.
+
+**A stuck mute is silent and permanent**, so every path out of `move` releases it,
+including the catch that runs when the throw lands between setting it and scheduling the
+task.
+
+`move_done` broadcasts `changed structure`, **not `changed moved`**. The client re-walks on
+`structure` and only logs `moved`, so the old kind announced the danger to a handler that
+did nothing about it — what actually recovered other clients was the burst, mid-move. The
+UI's `moveScenes` no longer asks for its own walk either; the one broadcast drives the
+re-read for the client that moved and everyone else, the way `addScenes` already worked.
 
 ## LOM gotchas worth knowing before you touch `lom.ts`
 
