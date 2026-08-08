@@ -770,6 +770,17 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       Max.outlet('set_fold', m.t, m.folded ? 1 : 0);
       break;
+    // The Song Index has already scrolled its own grid. Tell Live to select
+    // the same exact scene; Song.View centers the selected row in Session View.
+    case 'selectScene': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const scene = Number(m.s);
+      if (!Number.isInteger(scene) || scene < 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid scene index' });
+      }
+      Max.outlet('select_scene', scene);
+      break;
+    }
     case 'watchPlay':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'play', m.on);

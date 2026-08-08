@@ -147,6 +147,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `palette <reqId>` | developer-only sweep of Live's color palette |
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
+| `select_scene <scene>` | select an exact scene and reveal it in Live's Session View |
 | `set_transport <encodedPatch>` | set tempo, metronome, launch quantization or current scale controls as one patch |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove the track and master output-meter observers |
@@ -177,6 +178,12 @@ a verb — `clip`, `scene`, `song`, `stopTrack`, `stopClips`, `stopSong`. One ha
 rather than one per verb, and specifically **not** a global called `stop`: `stop` means
 something to Max in other contexts, and a top-level global with that name is a trap
 waiting to be stepped on.
+
+`select_scene` assigns `Song.View.selected_scene` using the target scene's runtime object
+id. Live 12.4.3 centers that scene in Session View as part of selecting it. This is an
+exact jump rather than repeated `Application.View.scroll_view` calls, so it has no
+dependency on the current row, viewport size or a control surface's unpublished session
+ring.
 
 `status <n>` also travels node → lom's direction but is routed off by `[route status]`
 before reaching `v8`; it only drives the device's Status line. `n` is the number of
@@ -829,12 +836,13 @@ shipped UI — the same standing as `palette`.
 ```sh
 npm run dev:diag -- sel
 npm run dev:diag -- watch 1     # then drag a clip in Live
+npm run dev:diag -- scroll 1    # one Session-view step down; -1 goes up
+npm run dev:diag -- selectscene 42  # select scene 42 directly; zero-based
 ```
 
 **The answers land in the Max window, not on the wire**, which is why this message has
-no reply event and nothing in `TERMINAL`. Every question it settles is about what Live
-does *while you drag something in it*, so the readout has to be somewhere you can watch
-without leaving Live.
+no reply event and nothing in `TERMINAL`. These probes settle behavior visible only with
+Live open, so the readout has to be somewhere you can watch without leaving Live.
 
 | what | question it settles |
 |---|---|
@@ -844,6 +852,17 @@ without leaving Live.
 | `watch 0\|1` | does moving a clip in Live move the cursor — at the source *and* the target? |
 | `scan <track>` | what one track's occupancy rescan costs |
 | `attach <n>` / `detach` | what N slot observers cost to install, and whether they slow *Live* down |
+| `scroll <signed steps>` | does one `Application.View.scroll_view` call move Session by exactly one scene row? Positive is down; negative is up |
+| `selectscene <index>` | does assigning an exact `Song.View.selected_scene` also reveal and center that scene? The index is zero-based |
+
+`scroll` established that one call moves the selected scene exactly one row and centers
+it in Session View. A synchronous loop of calls produced only one move, so the probe now
+schedules multiple calls 50ms apart to test whether Live's deferred UI work was
+coalescing them. The LOM still exposes no current offset, visible range or result saying
+whether the view moved. That leaves two candidates for absolute scrolling: assign the
+target directly through `selected_scene`, or send the required number of scheduled
+relative calls. `selectscene` tests the direct path. Its readback can prove the scene
+became selected; whether Live also centers it is visible only in Live itself.
 
 Three of these exist to settle whether the set can be kept in sync by watching Live's
 **selection** rather than every clip slot. The reasoning: there is no aggregate "a clip

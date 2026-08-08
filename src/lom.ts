@@ -16,7 +16,7 @@
 //      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
-//      set_fold <track> <0|1> | set_transport <encodedPatch>
+//      select_scene <scene> | set_fold <track> <0|1> | set_transport <encodedPatch>
 //      watch_play <0|1> | watch_meters <0|1> | watch_transport <0|1>
 //      watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
@@ -56,6 +56,12 @@ const PALETTE_MAX = 200;
  * leaves room to go past one and still not wedge Live on a typo.
  */
 const DIAG_ATTACH_MAX = 8000;
+
+/** Runaway guard for an accidentally enormous scheduled scroll probe. */
+const DIAG_SCROLL_MAX = 2000;
+
+/** Keep consecutive view commands in distinct Live UI turns. */
+const DIAG_SCROLL_INTERVAL_MS = 50;
 
 interface ApplyJob {
   reqId: number;
@@ -1626,6 +1632,44 @@ function playback(verb: string, i: number, j: number): void {
   }
 }
 
+// --- Session selection ------------------------------------------------
+// Select one exact scene and let Live reveal it in Session View. The LOM's
+// `selected_scene` takes a Scene object, not an index, so resolve the runtime id
+// first. Measured in Live 12.4.3: assigning it centers the scene visually.
+
+function setSelectedScene(index: number): number {
+  const sceneIndex = Number(index);
+  const sceneCount = at('live_set').getcount('scenes');
+  if (
+    !isFinite(sceneIndex) ||
+    Math.floor(sceneIndex) !== sceneIndex ||
+    sceneIndex < 0 ||
+    sceneIndex >= sceneCount
+  ) {
+    throw new Error(
+      'scene index ' + index + ' is outside 0–' + Math.max(0, sceneCount - 1),
+    );
+  }
+
+  const scene = at('live_set scenes ' + sceneIndex);
+  if (!exists(scene)) throw new Error('scene ' + sceneIndex + ' did not resolve');
+  const sceneId = Number(scene.id);
+
+  // at() is one reusable cursor: capture the id before pointing it back at
+  // Song.View to set the object-valued child.
+  at('live_set view').set('selected_scene', 'id', sceneId);
+  return sceneId;
+}
+
+function select_scene(index: number): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    setSelectedScene(index);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
 // --- folding ----------------------------------------------------------
 // Hide or reveal a group track's members, in Live itself.
 //
@@ -2782,13 +2826,14 @@ function clearObservers(): void {
 // `palette`, and for the same reason: these settle questions about what Live
 // actually does that no amount of reading the docs will answer.
 //
-// **Answers go to the Max window, not over the wire.** Every question here is
-// about what happens *while you drag something in Live*, so the readout has to
-// be somewhere you can watch without leaving Live.
+// **Answers go to the Max window, not over the wire.** These questions concern
+// behavior visible only with Live open, so the readout has to be somewhere you
+// can watch without leaving Live.
 //
-// Every probe is a read. Live's binary carries the error string "Changes
-// cannot be triggered by notifications", so a write from inside an observer
-// callback throws — `diagWatch` deliberately never writes.
+// Observer-driven probes only read. Live's binary carries the error string
+// "Changes cannot be triggered by notifications", so a write from inside an
+// observer callback throws — `diagWatch` deliberately never writes. The view
+// probes write only from an explicit CLI-triggered message.
 
 /** Selection observers from `diag watch`. */
 var diagObservers: LiveAPI[] = [];
@@ -2796,6 +2841,15 @@ var diagObservers: LiveAPI[] = [];
 var diagAttached: LiveAPI[] = [];
 /** Last cursor position reported, so the watch log shows moves not repeats. */
 var diagLastSel = '';
+/** Remaining calls in the scheduled `diag scroll` probe. */
+var diagScrollRemaining = 0;
+/** Application.View direction: 0 = up, 1 = down. */
+var diagScrollDirection = 0;
+/** Original signed count, retained for the completion log. */
+var diagScrollSigned = 0;
+/** Exact selection requested by `diag selectscene`, for deferred readback. */
+var diagSelectedSceneId = 0;
+var diagSelectedSceneIndex = -1;
 
 /**
  * Does `goto('id N')` resolve?
@@ -3084,6 +3138,97 @@ function diagDetach(): void {
   post('bsv diag detach: released ' + n + ' observers in ' + (Date.now() - t0) + 'ms\n');
 }
 
+/**
+ * Does one `Application.View.scroll_view` call move Session by one scene row?
+ *
+ * A synchronous loop of calls produced one UI move in Live, so this probe
+ * schedules one call per Task tick to test whether deferral was the reason.
+ * Positive steps are down; negative steps are up. Put Live in Session View and
+ * watch it while running this probe.
+ */
+function diagScroll(steps: number): void {
+  const signed = Math.trunc(Number(steps) || 0);
+  if (!signed) throw new Error('scroll needs non-zero signed steps');
+  if (Math.abs(signed) > DIAG_SCROLL_MAX) {
+    throw new Error('scroll is limited to ' + DIAG_SCROLL_MAX + ' steps per probe');
+  }
+
+  const view = at('live_app view');
+  if (!exists(view)) throw new Error('live_app view did not resolve');
+
+  diagScrollTask.cancel();
+  diagScrollSigned = signed;
+  diagScrollRemaining = Math.abs(signed);
+  diagScrollDirection = signed > 0 ? 1 : 0;
+  diagScrollTask.repeat();
+  post(
+    'bsv diag scroll: queued ' + Math.abs(signed) + ' Session ' +
+      (signed > 0 ? 'down' : 'up') + ' call(s), ' + DIAG_SCROLL_INTERVAL_MS +
+      'ms apart\n',
+  );
+}
+
+function diagScrollStep(): void {
+  if (diagScrollRemaining <= 0) {
+    diagScrollTask.cancel();
+    return;
+  }
+  try {
+    // The named view keeps the test specific to Session rather than whichever
+    // document view currently has focus.
+    at('live_app view').call('scroll_view', diagScrollDirection, 'Session', 0);
+    diagScrollRemaining--;
+    if (diagScrollRemaining === 0) {
+      diagScrollTask.cancel();
+      post(
+        'bsv diag scroll: completed ' + Math.abs(diagScrollSigned) + ' Session ' +
+          (diagScrollSigned > 0 ? 'down' : 'up') + ' call(s)\n',
+      );
+    }
+  } catch (e) {
+    diagScrollTask.cancel();
+    diagScrollRemaining = 0;
+    post('bsv diag scroll: ' + describe(e) + '\n');
+  }
+}
+
+var diagScrollTask = new Task(diagScrollStep);
+diagScrollTask.interval = DIAG_SCROLL_INTERVAL_MS;
+
+/**
+ * Can `Song.View.selected_scene` address and reveal a scene in one operation?
+ *
+ * The property takes a Scene object, so the CLI's zero-based index is resolved
+ * to its runtime id before setting it. The readback proves selection only; the
+ * visual reveal still has to be watched in Live.
+ */
+function diagSelectScene(index: number): void {
+  const sceneIndex = Number(index);
+  diagScrollTask.cancel();
+  diagScrollRemaining = 0;
+  const sceneId = setSelectedScene(sceneIndex);
+  diagSelectedSceneId = sceneId;
+  diagSelectedSceneIndex = sceneIndex;
+  diagSelectSceneTask.cancel();
+  diagSelectSceneTask.schedule(DIAG_SCROLL_INTERVAL_MS);
+  post(
+    'bsv diag selectscene: requested scene ' + sceneIndex + ' id ' + sceneId + '\n',
+  );
+}
+
+var diagSelectSceneTask = new Task(function () {
+  try {
+    const selectedId = gid(at('live_set view'), 'selected_scene');
+    post(
+      'bsv diag selectscene: scene ' + diagSelectedSceneIndex + ' requested id ' +
+        diagSelectedSceneId + ', read back id ' + selectedId +
+        (selectedId === diagSelectedSceneId ? ' — SELECTED' : ' — DID NOT SELECT') + '\n',
+    );
+  } catch (e) {
+    post('bsv diag selectscene readback: ' + describe(e) + '\n');
+  }
+});
+
 function diag(what: string, arg: number): void {
   if (!deviceReady) {
     post('bsv diag: device not ready\n');
@@ -3098,10 +3243,13 @@ function diag(what: string, arg: number): void {
     else if (w === 'scan') diagScan(arg);
     else if (w === 'attach') diagAttach(arg);
     else if (w === 'detach') diagDetach();
+    else if (w === 'scroll') diagScroll(arg);
+    else if (w === 'selectscene') diagSelectScene(arg);
     else {
       post(
         'bsv diag: unknown "' + w + '". Try: ids | slot | sel | watch 0|1 | ' +
-          'scan <track> | attach <n> | detach\n',
+          'scan <track> | attach <n> | detach | scroll <signed steps> | ' +
+          'selectscene <index>\n',
       );
     }
   } catch (e) {
@@ -3121,6 +3269,8 @@ function notifydeleted(): void {
   clearSelObservers();
   clearDiagObservers();
   diagDetach();
+  diagScrollTask.cancel();
+  diagSelectSceneTask.cancel();
   applyTask.cancel();
   moveTask.cancel();
   structureSettleTask.cancel();
