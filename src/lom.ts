@@ -555,6 +555,10 @@ function snapshot(reqId: number): void {
     phase(80, 18, occupied.length, occupied.length);
     const tClips = Date.now();
 
+    // Free here — the walk has just read every clip in the set — and it is what
+    // lets a scoped re-read afterwards tell "nothing changed" from "changed".
+    seedTrackDigests(trackCount, clips);
+
     const ms = tClips - t0;
     const payload: BSV.Snapshot = {
       // Shares the sequence with deltas, so a client can tell a delta that
@@ -877,9 +881,13 @@ function finishJob(): void {
     // scene-only write look like it did nothing at all.
     total: j.ops.length + j.sceneOps.length,
   };
-  job = null;
   publish(RESULT_DICT, result);
   outlet(0, 'apply_done', j.reqId, RESULT_DICT, ms);
+  // Cleared **after** the publish, not before. `job` is the guard that keeps a
+  // second writer and a delta flush out while this one is running, and clearing
+  // it first reopened that window across the two calls above — long enough for a
+  // flush to compute a delta against a set whose result hadn't been staged yet.
+  job = null;
 }
 
 var applyTask = new Task(applyStep);
@@ -1565,10 +1573,22 @@ function playback(verb: string, i: number, j: number): void {
         break;
       }
       case 'scene': {
-        // Note: Live also *selects* the scene as a side effect of firing it.
         const sc = at('live_set scenes ' + i);
         if (!exists(sc)) return;
-        sc.call('fire');
+        // Live *selects* the scene as a side effect of firing it, which used to
+        // be a curiosity and is now a cost: moving the cursor tears down and
+        // rebuilds the cursor observers and re-reads a track, on every launch —
+        // during a show. `fire(force_legato, can_select_scene_on_launch)` is in
+        // 12.4.3's own docstring table and `0` for the second suppresses it.
+        //
+        // Unverified through Max's `call()`, so the one-argument form stays as
+        // the fallback. Firing the scene is what matters; not moving the cursor
+        // is an optimisation, and it must not be able to cost a launch.
+        try {
+          sc.call('fire', 0, 0);
+        } catch (e) {
+          sc.call('fire');
+        }
         break;
       }
       case 'song':
@@ -1944,15 +1964,37 @@ function clearMeterObservers(): void {
 // clip fires twice — at the source on grab, at the destination on drop. That is
 // what makes `selPrevTrack` the source of a move.
 //
-// **What this does not catch**: edits that move nothing. Deleting, renaming or
-// recoloring a clip in place leaves the cursor where it is, so no callback
-// fires. Those need a full re-read, which is what the client's `changed`
-// handling and its own refresh are for.
+// **Edits that move nothing** used to be the hole here — deleting, renaming or
+// recoloring a clip in place leaves the cursor where it is, so nothing fired.
+// But the cursor is already ON the thing being edited, because you have to
+// select something in Live to edit it. So watch that one object's properties
+// too: `has_clip` on the slot under the cursor, and the contained clip's `name`
+// and `color_index`. Three more observers, and they move with the cursor, so the
+// count is the same on a 4-track set and an 848-scene one.
+//
+// **They are attached from the Task, never from a callback.** Constructing a
+// LiveAPI can call back synchronously before the observed property reports (see
+// the note on `meterValue`), so attaching inside a notification risks re-entering
+// the handler you are standing in — and the clip may not resolve in the same tick
+// `has_clip` reports 1 anyway. The rebuild is unconditional rather than gated on
+// "did the cursor move", precisely because the clip under a stationary cursor can
+// come and go.
+//
+// What remains uncovered is what no observer can reach: `Clip.length` and
+// `Track.fold_state` have no `observe` at all, and another M4L device or a remote
+// script announces nothing. The client's staleness backstop is for those.
 
 /** How long to let the cursor settle before re-reading. */
 const SEL_DEBOUNCE_MS = 100;
 
 var selObservers: LiveAPI[] = [];
+/**
+ * Observers on the object under the cursor — the slot, and its clip if there is
+ * one. Rebuilt on every flush, torn down with the cursor observers.
+ */
+var cursorObservers: LiveAPI[] = [];
+/** Where `cursorObservers` are currently pointed, so a rebuild can skip a no-op. */
+var cursorAt = '';
 /** Last cursor seen, as raw ids — comparing these needs no index resolution. */
 var selTrackId = 0;
 var selSceneId = 0;
@@ -1962,6 +2004,8 @@ var selPrevTrack = -1;
 var selDirty: { [t: string]: boolean } = {};
 /** LOM id -> track index. Rebuilt whenever the set's structure changes. */
 var trackIndexById: { [id: string]: number } | null = null;
+/** LOM id -> scene index, on the same terms. Only the cursor observers need it. */
+var sceneIndexById: { [id: string]: number } | null = null;
 /**
  * Monotonic revision of everything published, snapshots and deltas alike.
  *
@@ -2024,6 +2068,155 @@ function readTrackClips(t: number, sceneCount: number, out: BSV.Clip[]): void {
   }
 }
 
+/**
+ * The clip under the cursor changed without the cursor moving — a rename, a
+ * recolor, a delete, or a clip appearing where there wasn't one.
+ *
+ * Marks the cursor's own track and goes through the same debounce and re-read as
+ * a selection change. It deliberately learns nothing from *which* property fired:
+ * the re-read says what the track holds now, which is the same answer whichever
+ * of the three it was, and inference is the thing this design keeps out.
+ */
+function onCursorEdit(): void {
+  if (!cursorObservers.length) return;
+  try {
+    const t = trackIndexOf(selTrackId);
+    if (t < 0) return;
+    selDirty[String(t)] = true;
+    selTask.cancel();
+    selTask.schedule(SEL_DEBOUNCE_MS);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+/**
+ * Point the cursor observers at wherever the cursor is now.
+ *
+ * **Only ever called from `selTask`.** Attaching inside a notification callback
+ * risks re-entering it — constructing a LiveAPI can fire its callback
+ * synchronously, which `meterValue` records — and a clip that has just appeared
+ * may not resolve in the tick `has_clip` reported it.
+ *
+ * A slot with no clip gets one observer, not three: there is no Clip object to
+ * attach to. `has_clip` is what brings the other two back when one arrives.
+ */
+function rebuildCursorObservers(): void {
+  const t = trackIndexOf(selTrackId);
+  const s = sceneIndexOf(selSceneId);
+  const where = t + ':' + s;
+  // The common case by far — a flush caused by an edit, not by the cursor moving.
+  if (where === cursorAt && cursorObservers.length) return;
+  clearCursorObservers();
+  if (t < 0 || s < 0) return;
+  try {
+    const slotPath = 'live_set tracks ' + t + ' clip_slots ' + s;
+    const slot = new LiveAPI(onCursorEdit, slotPath);
+    if (!exists(slot)) return;
+    slot.property = 'has_clip';
+    cursorObservers = [slot];
+    if (gbool(slot, 'has_clip')) {
+      const name = new LiveAPI(onCursorEdit, slotPath + ' clip');
+      if (exists(name)) {
+        name.property = 'name';
+        const color = new LiveAPI(onCursorEdit, slotPath + ' clip');
+        color.property = 'color_index';
+        cursorObservers = [slot, name, color];
+      }
+    }
+    cursorAt = where;
+  } catch (e) {
+    // Never fatal to the flush: the delta this was called alongside is still
+    // worth publishing, and losing the cursor observers only costs coverage
+    // until the next flush rebuilds them.
+    post('bsv cursor observers: ' + describe(e) + '\n');
+  }
+}
+
+function clearCursorObservers(): void {
+  for (let i = 0; i < cursorObservers.length; i++) {
+    try {
+      cursorObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  cursorObservers = [];
+  cursorAt = '';
+}
+
+/**
+ * The cursor's scene as an index, through a cache of its own.
+ *
+ * The scene axis never needed resolving before — a re-read scoped to whole
+ * tracks doesn't care which scene the cursor is in. The slot observer does, and
+ * it needs it on **every cursor move**, so this cannot be a walk: a set is far
+ * more likely to have hundreds of scenes than hundreds of tracks, and the track
+ * walk alone already measured 11ms. Same cache discipline as `trackIndexById`,
+ * dropped by the same structural change, for the same reason.
+ */
+function sceneIndexOf(id: number): number {
+  if (!id) return -1;
+  if (!sceneIndexById) {
+    const map: { [id: string]: number } = {};
+    const count = at('live_set').getcount('scenes');
+    for (let s = 0; s < count; s++) map[String(at('live_set scenes ' + s).id)] = s;
+    sceneIndexById = map;
+  }
+  const found = sceneIndexById[String(id)];
+  return found === undefined ? -1 : found;
+}
+
+/**
+ * What we last told clients each track holds.
+ *
+ * A re-read that finds nothing new must publish **nothing** — not an empty
+ * delta, and above all not a `nextRev()`. `rev` is a single global shared by
+ * every client, so a bump nobody needed is a chance for some *other* client's
+ * next delta to fail `canApplyDelta` and answer with a full ~950ms walk. Before
+ * this, every click the user made in Live bumped it: a click re-reads a track,
+ * finds it identical, and published that non-event anyway.
+ *
+ * Keyed by track index, so a structural change drops it with the rest.
+ */
+var trackDigest: { [t: string]: string } = {};
+
+/** Everything about a clip a delta can carry and a client can see change. */
+function clipDigest(c: BSV.Clip): string {
+  return c.s + '|' + c.name + '|' + c.colorIndex + '|' + c.length;
+}
+
+/** Seeded from a full walk, which has already read every clip. One pass. */
+function seedTrackDigests(trackCount: number, clips: BSV.Clip[]): void {
+  const acc: { [t: string]: string[] } = {};
+  for (let t = 0; t < trackCount; t++) acc[String(t)] = [];
+  for (let i = 0; i < clips.length; i++) {
+    const k = String(clips[i].t);
+    if (!acc[k]) acc[k] = [];
+    acc[k].push(clipDigest(clips[i]));
+  }
+  trackDigest = {};
+  for (const k in acc) {
+    if (Object.prototype.hasOwnProperty.call(acc, k)) trackDigest[k] = acc[k].join(';');
+  }
+}
+
+/**
+ * One track's digest out of a re-read.
+ *
+ * `readTrackClips` appends in scene order and `flushSelection` walks tracks in
+ * ascending order, so a track's clips are contiguous and sorted — but this
+ * filters rather than assuming that, because the assumption is invisible if it
+ * ever stops holding and the cost is a scan of a list that is already in hand.
+ */
+function digestOfTrack(t: number, clips: BSV.Clip[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < clips.length; i++) {
+    if (clips[i].t === t) parts.push(clipDigest(clips[i]));
+  }
+  return parts.join(';');
+}
+
 function onSelectionChange(): void {
   if (!selObservers.length) return;
   try {
@@ -2060,10 +2253,19 @@ function flushSelection(): void {
     // Our own write is mid-flight. Its result is reconciled by the client from
     // the batch it sent, and a delta computed against a half-written set would
     // race that. Come back rather than dropping the dirty tracks.
-    if (job || moveJob) {
+    //
+    // `clipJob` belongs here as much as the other two and was missing: a clip
+    // drag is reconciled client-side by `applyClipMove` from the plan it sent,
+    // and a delta landing mid-drag races exactly that.
+    if (job || moveJob || clipJob) {
       selTask.schedule(SEL_DEBOUNCE_MS);
       return;
     }
+
+    // Wherever the cursor ended up is where the next in-place edit will happen.
+    // Done here rather than in the callback, and before the early return below,
+    // so a flush that publishes nothing still leaves the observers pointed right.
+    rebuildCursorObservers();
 
     const tracks: number[] = [];
     for (const k in selDirty) {
@@ -2096,6 +2298,25 @@ function flushSelection(): void {
       readTrackClips(t, sceneCount, clips);
     }
     if (!scanned.length) return;
+
+    // Nothing any client could see is different, so say nothing. Publishing an
+    // identical delta would be harmless on its own; bumping `rev` for it is not,
+    // because that sequence is shared and a client whose next delta doesn't line
+    // up answers with a full walk.
+    let moved = false;
+    const fresh: { [t: string]: string } = {};
+    for (let i = 0; i < scanned.length; i++) {
+      const t = scanned[i];
+      const d = digestOfTrack(t, clips);
+      fresh[String(t)] = d;
+      // An unknown track counts as changed: never having described it is not the
+      // same as having described it as this.
+      if (trackDigest[String(t)] !== d) moved = true;
+    }
+    if (!moved) return;
+    for (const k in fresh) {
+      if (Object.prototype.hasOwnProperty.call(fresh, k)) trackDigest[k] = fresh[k];
+    }
 
     const prevRev = rev;
     const payload: BSV.SnapshotDelta = {
@@ -2133,6 +2354,11 @@ function watch_selection(on: number): void {
     selTrackId = gid(view, 'selected_track');
     selSceneId = gid(view, 'selected_scene');
     selPrevTrack = trackIndexOf(selTrackId);
+    // Cover wherever the cursor already is, rather than waiting for it to move.
+    // A rename of the clip that happened to be selected when the browser
+    // connected is exactly the edit this is here to catch. Safe to attach
+    // directly: this is a message handler, not an observer callback.
+    rebuildCursorObservers();
   } catch (e) {
     fail(-1, e);
   }
@@ -2148,6 +2374,7 @@ function clearSelObservers(): void {
     }
   }
   selObservers = [];
+  clearCursorObservers();
   selDirty = {};
   selPrevTrack = -1;
   selTrackId = 0;
@@ -2160,13 +2387,24 @@ function clearSelObservers(): void {
 
 function onStructureChange(): void {
   // Every index now means something different, so anything addressed by one is
-  // stale: the id cache, the dirty set, and the cursor's previous position.
+  // stale: both id caches, the dirty set, and the cursor's previous position.
   // Clients re-walk on `changed`, which is the only honest answer to a set that
   // just renumbered itself.
   trackIndexById = null;
+  sceneIndexById = null;
+  // Keyed by track index, so every entry now describes a different track. A
+  // surviving digest would make a genuinely-changed track look unchanged and
+  // suppress the delta for it.
+  trackDigest = {};
   selDirty = {};
   selPrevTrack = -1;
   selTask.cancel();
+  // The cursor observers are path-addressed, and a path silently re-points when
+  // a scene is inserted above it — `live_set tracks 3 clip_slots 40` is a
+  // different slot than it was a moment ago. An observer left attached would go
+  // on reporting, about the wrong slot, and nothing would ever say so. Drop
+  // them; the next flush rebuilds against the indexes that now apply.
+  clearCursorObservers();
   // add_scenes creates a fixed run synchronously. Its Node-side completion
   // broadcasts one structural change after all eight rows are configured;
   // emitting once per create would launch eight overlapping full snapshots.

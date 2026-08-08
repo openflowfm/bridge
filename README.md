@@ -670,24 +670,70 @@ whole design rests on, and it's the one `diag watch` was built to check.
 
 | | |
 |---|---|
-| observers | 2, regardless of set size |
+| observers | 2 for the cursor + up to 3 on what it sits on, regardless of set size |
 | per selection change | 2 `get`s to read the cursor ids |
 | per re-read | ~11ms a track on a 64-scene set |
 | full walk, for comparison | ~950ms |
 
-The id → index resolution is cached (`trackIndexById`) and dropped on any structural
-change. Resolving it by walking measured **11ms**, which is nothing once and a great deal
-on every click the user makes in Live. The scene index is never resolved at all, because
-the re-read is scoped to whole tracks — which also means a multi-clip or cross-scene drag
-needs no extra machinery.
+Both id → index resolutions are cached (`trackIndexById`, `sceneIndexById`) and dropped on
+any structural change. Resolving the track half by walking measured **11ms**, which is
+nothing once and a great deal on every click the user makes in Live. The scene half is
+newer and needed for the same reason: the re-read is scoped to whole tracks and never
+wanted a scene index, but the slot observer below is addressed by one — and a set is far
+likelier to have hundreds of scenes than hundreds of tracks.
 
-### What it does not catch
+### Edits that move nothing — the cursor sits on them
 
-**Edits that move nothing.** Deleting, renaming or recoloring a clip in place leaves the
-cursor where it is, so no callback fires and no delta is sent. Those are covered by the
-client re-walking when the window regains focus, which is the moment that costs nothing
-to spend a walk on. A rename is the one that stings, because in this project the name
-*is* the mapping.
+Deleting, renaming or recoloring a clip **in place** leaves the cursor where it is, so the
+two cursor observers never fire. That used to be the hole, and the client covered it by
+re-walking every time the window regained focus.
+
+But the cursor is already *on* the thing being edited, because you have to select
+something in Live to edit it. So watch that one object too: `has_clip` on the slot under
+the cursor, plus the contained clip's `name` and `color_index`. **Three observers, and
+they move with the cursor**, so the count is the same on a four-track sketch and an
+848-scene set. A fire marks the cursor's own track and goes through the same debounce,
+re-read and delta as a selection change — it learns nothing from *which* property fired,
+because the re-read answers the same thing whichever it was, and inference is what this
+design keeps out.
+
+**They are attached from the `Task`, never from a callback.** Constructing a `LiveAPI` can
+call back synchronously before the observed property reports — recorded on `meterValue` —
+so attaching inside a notification risks re-entering the handler you are standing in, and
+a clip that has just appeared may not resolve in the tick `has_clip` reported it. The
+rebuild is unconditional rather than gated on "did the cursor move", precisely because the
+clip under a *stationary* cursor is the one that comes and goes.
+
+A slot with no clip carries one observer, not three; there is no Clip object to attach to,
+and `has_clip` is what brings the other two back when one arrives.
+
+### What it still does not catch
+
+`Clip.length` and `Track.fold_state` have **no `observe` at all** — a loop length changed
+in Live, or a group folded there, is invisible to every observer this file can install.
+Nor is there any way to hear about another M4L device or a remote script. Those are what
+the client's staleness backstop is for, and why it wasn't deleted along with the
+focus-triggered walk.
+
+### An unchanged re-read publishes nothing
+
+A re-read that finds a track exactly as last described must publish **nothing** — not an
+empty delta, and above all not a `nextRev()`. `rev` is a single global shared by every
+client, so a bump nobody needed is a chance for some *other* client's next delta to fail
+`canApplyDelta` and answer with a full walk.
+
+Before `trackDigest`, **every click the user made in Live bumped it**: a click moves the
+cursor, the flush re-reads a track, finds it identical, and published that non-event
+anyway. The digest is seeded free inside `snapshot()`, which has just read every clip in
+the set, and it is keyed by track index — so it is dropped by the same structural change
+that drops the id caches, because a surviving entry would make a genuinely changed track
+look unchanged.
+
+Our own writes are deliberately *not* exempted. An `apply` leaves the digest stale, so the
+next flush re-reads and publishes — one extra ~11ms read per write, and the only
+verification this project has ever had that a write landed as reported. Suppressing it
+would mean matching op addresses against the re-read, which is inference of exactly the
+kind that hides the failure `lom.ts` specialises in: the write that silently did nothing.
 
 Also uncovered: anything that changes the set without touching Live's selection — another
 M4L device, a remote script, and possibly undo.
@@ -702,12 +748,19 @@ M4L device, a remote script, and possibly undo.
   it has tests. An upsert by `(t, s)` keeps a clip the user deleted, because a deleted
   clip has no incoming entry to overwrite it — and a clip moved *out* of a slot is a
   deletion at the source. See [`../core/README.md`](../core/README.md).
-- **A write in flight defers the flush.** `apply` results are reconciled by the client
-  from the batch it sent; a delta computed against a half-written set would race that.
-  Our own writes don't move Live's selection, so this is belt-and-braces rather than the
-  common path.
-- **A structural change drops everything index-addressed** — the id cache, the dirty set,
-  the cursor's previous position — and clients re-walk on `changed structure`.
+- **A write in flight defers the flush** — `job`, `moveJob` **and `clipJob`**. Each is
+  reconciled by the client from the batch or plan it sent, and a delta computed against a
+  half-written set races that. `clipJob` was missing, and a clip drag is precisely the
+  case where it bites: the client is patching via `applyClipMove` from its own plan while
+  the delta describes a grid halfway through the copy pass. `finishJob` also clears `job`
+  *after* publishing rather than before, which used to reopen the guard early.
+  Our own writes still don't move Live's selection — but the cursor observers fire on
+  them, so this is now the common path rather than belt-and-braces.
+- **A structural change drops everything index-addressed** — both id caches, the digests,
+  the dirty set, the cursor's previous position, and the cursor observers themselves. That
+  last one matters most: they are path-addressed, and a path silently re-points when a
+  scene is inserted above it, so an observer left attached goes on reporting about the
+  wrong slot and nothing ever says so. Clients re-walk on `changed structure`.
 - **A track that no longer resolves is omitted, not reported empty.** Claiming it is
   empty would delete its clips from the client's copy.
 
