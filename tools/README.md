@@ -119,15 +119,19 @@ alongside the `.amxd` so you can open the same patch in Max to debug.
 [live.thisdevice] ─> [init(  ─────────────> [s ---bsv-to-lom]
 [node.script] out0 ──────────────────────-> [s ---bsv-to-lom]
 
-[r ---bsv-to-lom] ─> [route serving device_state_get device_state_set]
-                       ├─ serving ─────> status text
-                       ├─ state get/set > [pattr bsv-state]
+[r ---bsv-to-lom] ─> [route status device_state_get device_state_set]
+                       ├─ status ──────> [sel -1 0 1] ─┬─ set "Waiting for Live"
+                       │                               ├─ set "No connections"
+                       │                               ├─ set "1 connection"
+                       │                               └─ [sprintf set %ld connections(
+                       ├─ state get/set > [pattr bsv-state]         └─> status text
                        └─ rest ────────> [deferlow] ─> [v8 lom.js]
 [pattr bsv-state] ─> [prepend device_state] ─> [s ---bsv-to-node]
 [v8 lom.js] ────────────────────────────────────────> [s ---bsv-to-node]
 
-[r ---bsv-to-node] ─┬─> [node.script] in0
-                    └─> [route ready] ──> status text
+[r ---bsv-to-node] ─> [node.script] in0
+
+[live.text] ─> [; max launchbrowser …(                   two of these: app, GitHub
 
 [plugin~] ─> [plugout~]                                  audio passthrough
 ```
@@ -142,6 +146,13 @@ Notes that matter if you edit this:
   loaded.
 - **The route peels off device state as well as status.** State travels directly
   between Node and the parameter-enabled pattr; it is not part of the Live Object Model.
+- **The Status line is one integer on the wire, spelled here.** Node sends the number
+  of connected clients — or `-1` while the LOM handshake is still outstanding — and the
+  patch turns it into words. Keeping every string a user reads in the file that draws
+  them is half the reason; the other half is that a bare integer has no quoting to get
+  wrong, where a symbol with a space in it does. `select` gets the two counts that don't
+  pluralize and `sprintf` gets the rest; note `sel -1 0 1` has **one** inlet, because
+  `select` only grows a second one when it has a single argument to set through it.
 - **`pattr bsv-state` is a Blob parameter registered in the patcher's `parameters`
   map.** Both pieces are required for Live to store the base64url-encoded JSON in the
   `.als`. It is marked Stored Only so it cannot be automated.
@@ -150,6 +161,10 @@ Notes that matter if you edit this:
 - **Presentation view is the only thing Live shows.** `openinpresentation: 1`, and each
   visible box needs `presentation: 1` plus `presentation_rect`. Everything else is
   hidden.
+- **The face is 244 × 169.** Live fixes device height at 169px — every factory Max
+  device it ships is laid out in exactly that box — so anything positioned below it is
+  simply not drawn, with no warning. The patcher `rect` is saved at the device size for
+  the same reason Ableton's are: opening the `.maxpat` then shows you what Live shows.
 - **`live.text` needs `mode: 0`** (Button). The default is `1` (Toggle), which would
   make the launch button a stateful thing that reports 1 and 0 on alternate clicks.
 - **In Button mode `live.text` bangs; it does not send `1`.** Max's own reference:
@@ -158,7 +173,39 @@ Notes that matter if you edit this:
   wired through a `sel 1`, which a bang never matches, so clicking it did nothing at
   all — no error anywhere, because nothing was wrong, it just never fired. It also
   has **two** outlets whatever `numoutlets` claims; the right one carries the label.
-- The launch button sends `; max launchbrowser http://127.0.0.1:17800`.
+- The buttons send `; max launchbrowser <url>` — the app, and the GitHub project page.
+
+### Making it look like a stock device
+
+Ableton's factory Max devices are unprotected in the Factory Packs (`Step Arp`,
+`SQ Sequencer`, `Rhythmic Steps`), so `node tools/amxd.ts unpack` on one of those is the
+reference for anything visual. What they do that a hand-built patch doesn't:
+
+- **Colors are bound to Live's theme by name, not frozen.** A color attribute is saved
+  as a literal *plus* an expression:
+  `"saved_attribute_attributes": { "textcolor": { "expression": "themecolor.live_lcd_title" } }`.
+  Live redraws from the expression when the user's theme changes; the literal is only a
+  cached fallback. The full list of names is in
+  `Max.app/Contents/Resources/C74/interfaces/maxcolors.json` — the 72 ids starting
+  `live_`.
+- **Text on a display panel cannot be a `live.comment`.** `live.comment` draws in the
+  *surface* text color, which is black in Live's light theme, while `live_lcd_bg` stays
+  dark in both. Ableton uses a plain `comment` bound to the `live_lcd_*` family for
+  anything over a display, and `live.comment` only for text sitting on the surface.
+  Getting this backwards looks fine until someone switches theme.
+- **Plain `comment` needs the font set explicitly** — `"fontname": "Ableton Sans Medium"`,
+  `fontsize` 9.5 for labels. It's the patcher font otherwise, which is what makes a
+  hand-built device read as a Max patch. `live.*` objects already draw in Live's font.
+  Both stock Max and the Max inside Live ship the family, so the `.maxpat` looks right
+  open on its own too.
+- **Labels are Title Case**, not caps and not lowercase: `Status`, `Address`, `Octaves`,
+  `Key Retrig.`.
+- **Don't repeat the device's name inside it.** Live already draws it in the title bar.
+- **`live.line` is the separator** and `panel` is the display background — `background: 1`
+  so it stays behind the text, `rounded: 4`, and the fill expression goes on
+  `bgfillcolor` while the cached literal sits on `bgcolor`.
+- **Every control carries an `annotation`**, which is what Live's Info View reads out on
+  hover. A device that leaves that panel blank announces that it isn't a stock one.
 
 ### Verifying a patcher change
 

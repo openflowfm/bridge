@@ -27,7 +27,7 @@
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      song_position <bar> <beat> <sixteenth>
-//      meter_levels <track0> <level0> <track1> <level1> …
+//      meter_levels <masterLevel> <track0> <level0> <track1> <level1> …
 //      pong
 
 autowatch = 1;
@@ -89,6 +89,10 @@ var meterLevels: number[] = [];
 /** Latest momentary channel values; combined into meterLevels with max(L, R). */
 var meterLeft: number[] = [];
 var meterRight: number[] = [];
+/** The master track is not part of Song.tracks, so its meter state is separate. */
+var masterMeterLevel = 0;
+var masterMeterLeft = 0;
+var masterMeterRight = 0;
 var metersWatching = false;
 var job: ApplyJob | null = null;
 /** Suppress the per-scene observer burst while add_scenes emits one terminal structural event. */
@@ -1736,7 +1740,7 @@ function clearPlayObservers(): void {
 // Live exposes no momentary property. The stereo properties cost more Live GUI
 // work, which is why these observers exist only while the meter UI is open.
 
-/** Roughly one frame at 30 Hz. Every frame carries the whole current set. */
+/** Roughly one frame at 30 Hz. Every frame carries all tracks plus Master. */
 var METER_INTERVAL_MS = 33;
 
 function meterValue(args: unknown[], property: string): number | null {
@@ -1753,14 +1757,18 @@ function meterValue(args: unknown[], property: string): number | null {
   return isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
 }
 
-function queueMeterLevel(t: number, level: number): void {
+function queueMeterLevel(t: number | null, level: number): void {
   const next = Math.max(0, Math.min(1, level));
+  if (t === null) {
+    masterMeterLevel = next;
+    return;
+  }
   if (meterLevels[t] === next) return;
   meterLevels[t] = next;
 }
 
 function onMeterChange(
-  t: number,
+  t: number | null,
   channel: 'left' | 'right' | 'mono',
   property: string,
   args: unknown[],
@@ -1772,27 +1780,34 @@ function onMeterChange(
     queueMeterLevel(t, level);
     return;
   }
+  if (t === null) {
+    if (channel === 'left') masterMeterLeft = level;
+    else masterMeterRight = level;
+    queueMeterLevel(null, Math.max(masterMeterLeft, masterMeterRight));
+    return;
+  }
   if (channel === 'left') meterLeft[t] = level;
   else meterRight[t] = level;
   queueMeterLevel(t, Math.max(meterLeft[t] ?? 0, meterRight[t] ?? 0));
 }
 
 function addMeterObserver(
-  t: number,
+  t: number | null,
+  path: string,
   property: 'output_meter_left' | 'output_meter_right' | 'output_meter_level',
   channel: 'left' | 'right' | 'mono',
 ): void {
   const observer = new LiveAPI(
     function (args: unknown[]) { onMeterChange(t, channel, property, args); },
-    'live_set tracks ' + t,
+    path,
   );
   observer.property = property;
   meterObservers.push(observer);
 }
 
 function sendMeterLevels(): void {
-  if (!metersWatching || !meterLevels.length) return;
-  const atoms: unknown[] = [];
+  if (!metersWatching) return;
+  const atoms: unknown[] = [masterMeterLevel];
   for (let t = 0; t < meterLevels.length; t++) {
     atoms.push(t, meterLevels[t] === undefined ? 0 : meterLevels[t]);
   }
@@ -1816,11 +1831,37 @@ function watch_meters(on: number): void {
       queueMeterLevel(t, 0);
       const track = at('live_set tracks ' + t);
       if (gbool(track, 'has_audio_output')) {
-        addMeterObserver(t, 'output_meter_left', 'left');
-        addMeterObserver(t, 'output_meter_right', 'right');
+        addMeterObserver(t, 'live_set tracks ' + t, 'output_meter_left', 'left');
+        addMeterObserver(t, 'live_set tracks ' + t, 'output_meter_right', 'right');
       } else {
-        addMeterObserver(t, 'output_meter_level', 'mono');
+        addMeterObserver(t, 'live_set tracks ' + t, 'output_meter_level', 'mono');
       }
+    }
+    // Master is a Track, but it lives at Song.master_track rather than in
+    // Song.tracks. Keep it in this same watcher and frame so the toggle owns
+    // one complete mixer view. Isolate this addition from the already-working
+    // track path: if the actual Max runtime rejects a documented master atom
+    // shape, report it and leave this meter silent without losing every track.
+    queueMeterLevel(null, 0);
+    const masterObserverStart = meterObservers.length;
+    try {
+      const master = at('live_set master_track');
+      if (gbool(master, 'has_audio_output')) {
+        addMeterObserver(null, 'live_set master_track', 'output_meter_left', 'left');
+        addMeterObserver(null, 'live_set master_track', 'output_meter_right', 'right');
+      } else {
+        addMeterObserver(null, 'live_set master_track', 'output_meter_level', 'mono');
+      }
+    } catch (e) {
+      for (let i = masterObserverStart; i < meterObservers.length; i++) {
+        try {
+          meterObservers[i].property = '';
+        } catch {
+          /* object may already be gone */
+        }
+      }
+      meterObservers.length = masterObserverStart;
+      fail(-1, 'master meter unavailable: ' + describe(e));
     }
     sendMeterLevels();
     meterTask.repeat();
@@ -1838,6 +1879,9 @@ function clearMeterObservers(): void {
   meterLevels = [];
   meterLeft = [];
   meterRight = [];
+  masterMeterLevel = 0;
+  masterMeterLeft = 0;
+  masterMeterRight = 0;
   for (let i = 0; i < meterObservers.length; i++) {
     try {
       meterObservers[i].property = '';

@@ -65,14 +65,20 @@ scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a fr
 1. Drop `SessionBridge.amxd` onto any track. It's an audio effect with a
    `plugin~ → plugout~` passthrough, so it's inert on the signal path — the Master
    track is a fine home.
-2. Wait for the status line to read `connected to Live`, then click **Open Session
-   Manager**.
+2. Wait for the status to read `No connections`, then click **Open Session Manager** —
+   it should go to `1 connection` as the browser attaches.
 
 | status | means |
 |---|---|
-| `starting…` | patcher loaded, Node hasn't booted |
-| `server up` | Node is listening, LOM handshake hasn't completed |
-| `connected to Live` | both halves talking |
+| `Starting…` | patcher loaded, Node hasn't booted |
+| `Waiting for Live` | Node is listening, LOM handshake hasn't completed |
+| `No connections` | serving, nothing attached — the resting state |
+| `1 connection` / `3 connections` | that many clients are on the socket |
+
+The count is deliberately the headline: whether the device reached Live is true within a
+frame of it loading and says nothing, whereas whether a browser is attached — and how
+many tabs are quietly fighting over the same set — is the thing a glance at the rack
+can't otherwise tell you.
 
 Stuck on either of the first two? **Options ▸ Max ▸ Open Max Window** — that's where
 every error and every timing line lands.
@@ -142,7 +148,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
-| `watch_meters <0\|1>` | install / remove the per-track output-meter observers |
+| `watch_meters <0\|1>` | install / remove the track and master output-meter observers |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
 | `ping` | |
 
@@ -159,7 +165,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `changed <kind>` | observer fired |
 | `delta <dict>` | a partial re-read, pushed after a change in Live |
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
-| `meter_levels <track> <level> …` | complete current track/output-level frame |
+| `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `err <reqId> <msg>` | |
 
@@ -169,8 +175,10 @@ rather than one per verb, and specifically **not** a global called `stop`: `stop
 something to Max in other contexts, and a top-level global with that name is a trap
 waiting to be stepped on.
 
-`serving` also travels node → lom's direction but is routed off by `[route serving]`
-before reaching `v8`; it only drives the device's status line.
+`status <n>` also travels node → lom's direction but is routed off by `[route status]`
+before reaching `v8`; it only drives the device's Status line. `n` is the number of
+connected clients, or `-1` while the LOM handshake is outstanding — the patcher turns
+the number into words, so no string ever has to survive the crossing.
 
 ### Realtime numeric pushes use atoms, not Dicts
 
@@ -183,8 +191,8 @@ before Node had finished reading the previous one.
 Both payloads are plain numbers with no punctuation anywhere in them, which is precisely
 the case atoms handle safely. Meter observers update an in-device array independently;
 roughly every 33ms, the entire array crosses as one coherent frame containing every
-track's latest value. There is no queue of historical meter callbacks to drain. Clip
-names never are.
+track's and the master track's latest values. There is no queue of historical meter
+callbacks to drain. Clip names never are.
 
 Arrangement position is a separate three-integer `song_position` push. It comes from
 Live's `Song.get_current_beats_song_time`, so meter changes and Live's own bar numbering
@@ -262,12 +270,12 @@ client that closed its tab never sent `off` at all, holding the watch open forev
 re-arms from that record when the LOM reports ready again after a device reload.
 
 **`on` is always forwarded and only `off` is edge-triggered**, which looks like a bug and
-isn't. `watch_play` and `watch_meters` install an observer per *track*, so a client
-re-sends `on` to rebuild them when a snapshot finds a different track count; suppressing
-that because another client already held the watch would leave the observers addressing a
-set that no longer exists. Forwarding it costs nothing, because every `watch_*` handler in
-`lom.ts` clears before it installs. Sets rather than counters, so a client sending `on`
-twice doesn't need two `off`s to release.
+isn't. `watch_play` and `watch_meters` install observers per *track* (and meters also on
+Master), so a client re-sends `on` to rebuild them when a snapshot finds a different track
+count; suppressing that because another client already held the watch would leave the
+observers addressing a set that no longer exists. Forwarding it costs nothing, because
+every `watch_*` handler in `lom.ts` clears before it installs. Sets rather than counters,
+so a client sending `on` twice doesn't need two `off`s to release.
 
 **Not yet guaranteed.** Three things to fix before a second *kind* of client exists:
 

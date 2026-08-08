@@ -316,8 +316,32 @@ function broadcast(event: BSV.Event): void {
   for (const ws of wss.clients) if (ws.readyState === 1) ws.send(s);
 }
 
+/**
+ * Drive the device's Status line.
+ *
+ * It reads the number of connected clients, because that is the only part of
+ * the device's state a glance at the rack can't already tell you — whether a
+ * browser is attached at all, and whether you left three tabs open fighting
+ * over the same set. "Connected to Live" was true from the moment the device
+ * landed on a track, so it said nothing.
+ *
+ * `-1` is the one state that isn't a count: the LOM handshake hasn't completed.
+ * That normally resolves within a frame of the server binding, so it stays on
+ * screen only when something is actually wrong. The patcher turns the number
+ * into words — see `tools/build-device.ts`.
+ */
+function showConnections(): void {
+  let open = 0;
+  // readyState rather than wss.clients.size: a socket mid-close still counts as
+  // a client to `ws` for a moment, and a face that reads one connection with
+  // nothing attached is worse than one that lags by a tick.
+  for (const ws of wss.clients) if (ws.readyState === 1) open++;
+  Max.outlet('status', lomReady ? open : -1);
+}
+
 wss.on('connection', (ws: WebSocket) => {
   Max.post(`client connected (${wss.clients.size} total)`);
+  showConnections();
   send(ws, { type: 'status', lomReady });
   if (deviceState) send(ws, { type: 'deviceState', state: deviceState });
 
@@ -342,6 +366,7 @@ wss.on('connection', (ws: WebSocket) => {
     // its watches would otherwise be held open forever by a socket that is gone.
     releaseWatches(ws);
     Max.post(`client disconnected (${wss.clients.size} left)`);
+    showConnections();
   });
 });
 
@@ -361,11 +386,11 @@ function track(ws: WebSocket, m: BSV.Request): number {
 //
 // **`on` is always forwarded; only `off` is edge-triggered**, and that asymmetry
 // is deliberate rather than an oversight. `watch_play` and `watch_meters`
-// install an observer per *track*, so a client re-sends `on` to rebuild them
-// when a snapshot reports a different track count — suppressing that because
-// someone else already held the watch would leave the observers pointed at a
-// set that no longer exists. Forwarding it costs nothing: every `watch_*`
-// handler in `lom.ts` clears before it installs.
+// install observers per *track* (and meters also on Master), so a client
+// re-sends `on` to rebuild them when a snapshot reports a different track
+// count — suppressing that because someone else already held the watch would
+// leave the observers pointed at a set that no longer exists. Forwarding it
+// costs nothing: every `watch_*` handler in `lom.ts` clears before it installs.
 //
 // Sets of sockets rather than integer counters, so a client sending `on` twice
 // doesn't need two `off`s to release, and a dropped socket releases exactly what
@@ -700,6 +725,8 @@ Max.addHandler('ready', () => {
   lomReady = true;
   Max.post('LOM ready');
   broadcast({ type: 'status', lomReady: true });
+  showConnections(); // off the -1 holding state and onto a real count
+
   // A reloaded device has empty observer lists but our record of who wants what
   // survived, so put back whatever clients were already holding.
   rearmWatches();
@@ -861,17 +888,19 @@ Max.addHandler('play_state', (...args: number[]) => {
   broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
 });
 
-// One coherent frame of track/level pairs. lom.ts updates the values from
-// independent observers, then sends every track's latest value together.
+// One coherent frame: master first, then track/level pairs. lom.ts updates the
+// values from independent observers and sends every latest value together.
 Max.addHandler('meter_levels', (...args: number[]) => {
-  const meters: BSV.TrackMeterLevel[] = [];
-  for (let i = 0; i + 1 < args.length; i += 2) {
+  const master = Number(args[0]);
+  if (!Number.isFinite(master)) return;
+  const tracks: BSV.TrackMeterLevel[] = [];
+  for (let i = 1; i + 1 < args.length; i += 2) {
     const t = Number(args[i]);
     const level = Number(args[i + 1]);
     if (!Number.isFinite(t) || !Number.isFinite(level)) continue;
-    meters.push({ t, level });
+    tracks.push({ t, level });
   }
-  if (meters.length) broadcast({ type: 'meterLevels', meters });
+  broadcast({ type: 'meterLevels', frame: { master, tracks } });
 });
 
 // Kept separate from play_state: current_song_time changes continuously, and
@@ -952,7 +981,7 @@ wss.on('error', onServerError);
 
 server.listen(PORT, HOST, () => {
   Max.post(`Session Bridge listening on http://${HOST}:${PORT}`);
-  Max.outlet('serving'); // drives the device's status line; routed off before lom
+  showConnections(); // drives the device's Status line; routed off before lom
   Max.outlet('device_state_get'); // restored pattr -> device_state handler above
   Max.outlet('hello'); // whichever side is late drives the handshake
 });
