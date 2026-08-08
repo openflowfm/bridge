@@ -160,6 +160,23 @@ function decodeDeviceState(encoded: unknown): BSV.DeviceState | null {
   }
 }
 
+/** JSON made safe for one Max symbol: no spaces, commas, semicolons or quotes. */
+function encodeMaxAtom(value: unknown): string {
+  return encodeURIComponent(JSON.stringify(value)).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+function decodeMaxAtom(value: unknown): unknown {
+  if (typeof value !== 'string' || value === '') return null;
+  try {
+    return JSON.parse(decodeURIComponent(value));
+  } catch {
+    return null;
+  }
+}
+
 let deviceState: BSV.DeviceState | null = null;
 let deviceStateEncoded = '';
 let needsLegacyState = false;
@@ -433,6 +450,7 @@ const WATCH_MESSAGE = {
   selection: 'watch_selection',
   play: 'watch_play',
   meters: 'watch_meters',
+  transport: 'watch_transport',
 } as const;
 
 type WatchKind = keyof typeof WATCH_MESSAGE;
@@ -442,6 +460,7 @@ const watchers: Record<WatchKind, Set<WebSocket>> = {
   selection: new Set(),
   play: new Set(),
   meters: new Set(),
+  transport: new Set(),
 };
 
 function setWatch(ws: WebSocket, kind: WatchKind, on: boolean): void {
@@ -690,6 +709,61 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       else Max.outlet('playback', 'stopSong', 0, 0);
       break;
     }
+    case 'setTransport': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const source = m.patch;
+      if (!source || typeof source !== 'object') {
+        return send(ws, { type: 'error', id: m.id, message: 'transport patch is missing' });
+      }
+      const patch: BSV.TransportPatch = {};
+      if (source.tempo !== undefined) {
+        const tempo = Number(source.tempo);
+        if (!Number.isFinite(tempo) || tempo < 20 || tempo > 999) {
+          return send(ws, { type: 'error', id: m.id, message: 'tempo must be 20–999 BPM' });
+        }
+        patch.tempo = tempo;
+      }
+      if (source.metronome !== undefined) {
+        if (typeof source.metronome !== 'boolean') {
+          return send(ws, { type: 'error', id: m.id, message: 'metronome must be boolean' });
+        }
+        patch.metronome = source.metronome;
+      }
+      if (source.clipTriggerQuantization !== undefined) {
+        const quantization = Number(source.clipTriggerQuantization);
+        if (!Number.isInteger(quantization) || quantization < 0 || quantization > 13) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid global quantization' });
+        }
+        patch.clipTriggerQuantization = quantization;
+      }
+      if (source.rootNote !== undefined) {
+        const root = Number(source.rootNote);
+        if (!Number.isInteger(root) || root < 0 || root > 11) {
+          return send(ws, { type: 'error', id: m.id, message: 'root note must be 0–11' });
+        }
+        patch.rootNote = root;
+      }
+      if (source.scaleMode !== undefined) {
+        if (typeof source.scaleMode !== 'boolean') {
+          return send(ws, { type: 'error', id: m.id, message: 'scale mode must be boolean' });
+        }
+        patch.scaleMode = source.scaleMode;
+      }
+      if (source.scaleName !== undefined) {
+        const name = String(source.scaleName).trim();
+        if (!name || name.length > 100) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid scale name' });
+        }
+        patch.scaleName = name;
+      }
+      if (Object.keys(patch).length === 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'transport patch is empty' });
+      }
+      // Fire-and-forget like playback. The observer pushes the value Live read
+      // back, which is more useful than acknowledging that a set() was called.
+      Max.outlet('set_transport', encodeMaxAtom(patch));
+      break;
+    }
     // Also fire-and-forget, and for the same reason as playback: the client
     // folded its own columns before sending. See `setFold` in the protocol.
     case 'setFold':
@@ -703,6 +777,10 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'watchMeters':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'meters', m.on);
+      break;
+    case 'watchTransport':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      setWatch(ws, 'transport', m.on);
       break;
     case 'watchSelection':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
@@ -977,6 +1055,28 @@ Max.addHandler(
     });
   },
 );
+
+Max.addHandler('transport_state', (...atoms: unknown[]) => {
+  const value = decodeMaxAtom(atoms.map(String).join(''));
+  if (!value || typeof value !== 'object') {
+    Max.post('transport_state: malformed payload from lom');
+    return;
+  }
+  const state = value as Partial<BSV.TransportState>;
+  if (
+    !Number.isFinite(state.tempo) || state.tempo! < 20 || state.tempo! > 999 ||
+    typeof state.metronome !== 'boolean' ||
+    !Number.isInteger(state.clipTriggerQuantization) ||
+    state.clipTriggerQuantization! < 0 || state.clipTriggerQuantization! > 13 ||
+    !Number.isInteger(state.rootNote) || state.rootNote! < 0 || state.rootNote! > 11 ||
+    typeof state.scaleName !== 'string' ||
+    typeof state.scaleMode !== 'boolean'
+  ) {
+    Max.post('transport_state: invalid fields from lom');
+    return;
+  }
+  broadcast({ type: 'transportState', state: state as BSV.TransportState });
+});
 
 Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
   const req = pending.get(reqId);

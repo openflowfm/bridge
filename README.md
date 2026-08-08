@@ -147,8 +147,10 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `palette <reqId>` | developer-only sweep of Live's color palette |
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
+| `set_transport <encodedPatch>` | set tempo, metronome, launch quantization or current scale controls as one patch |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove the track and master output-meter observers |
+| `watch_transport <0\|1>` | install / remove the six fixed control-bar observers |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
 | `ping` | |
 
@@ -167,6 +169,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
+| `transport_state <encodedState>` | complete tempo, metronome, launch-quantization and scale state |
 | `err <reqId> <msg>` | |
 
 Two wire messages (`launch` and `stop`) collapse onto the single `playback` message with
@@ -198,6 +201,21 @@ Arrangement position is a separate three-integer `song_position` push. It comes 
 Live's `Song.get_current_beats_song_time`, so meter changes and Live's own bar numbering
 stay authoritative. `current_song_time` may notify more often than the header can show;
 `lom.ts` drops repeated ticks and crosses to Node only when bar, beat or sixteenth changes.
+
+`transport_state` has one string (`scale_name`) mixed with five numbers/booleans, so it is
+JSON percent-encoded into one punctuation-safe Max atom. That avoids both a racing global
+Dict and the atom splitting that would turn `Phrygian Dominant` into two arguments. Six
+fixed `Song` observers feed one coalesced full-state report; tempo is rounded to the two
+decimals the header can render and reports are limited to one per 50ms while automation
+is moving it. `set_transport` uses the same encoding in the other direction and accepts a
+partial patch, keeping one operation for related control-bar settings rather than one
+message type per property.
+
+Live calls the root, scale name and Scale Mode fields its Current Scale controls. Despite
+their `Song` location in the LOM, they are **not a rewrite of every clip in the Set**: the
+Control Bar reflects the current/selected clips, and writes apply to those selections (or
+become the setting for subsequently created clips when none is selected). The header says
+“current scale” for that reason.
 
 ### Large payloads go through Dicts, never message atoms
 
@@ -263,9 +281,10 @@ replies route to the client that asked. Terminal replies (`snapshot`, `applied`,
 Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-client.
 
 **Watches are refcounted**, which they had to become the moment `useBridge` started
-following Live. Every watch is one global observer list in `lom.ts`, so a client sending
-`watch_play 0` on unmount used to stop play state for every other client too — and a
-client that closed its tab never sent `off` at all, holding the watch open forever.
+following Live. Every watch is one global observer list in `lom.ts`, including the fixed
+control-bar list, so a client sending `watch_play 0` on unmount used to stop play state for
+every other client too — and a client that closed its tab never sent `off` at all, holding
+the watch open forever.
 `bridge.ts` keeps a `Set` of sockets per watch kind, releases them on socket close, and
 re-arms from that record when the LOM reports ready again after a device reload.
 
@@ -903,3 +922,10 @@ anything. The name write landing while the color doesn't is the signature to loo
 `tempo_enabled` ordering is wrong, `Scene.tempo` reads back -1 and the write looks like
 it never happened. The check that costs nothing is to fire a scene after setting it — the
 song tempo should follow.
+
+**The new control-bar observer and writes are also unverified in Live.** All six members
+are documented `get, set, observe` on `Song`, and the bridge reports Live's readback rather
+than trusting the attempted patch. Still, `lom.ts` has no automated host coverage. Check
+tempo, metronome, clip-trigger quantization, root note, scale name and Scale Mode against
+Live's own Control Bar with the device loaded; a missing `transport_state` or an unchanged
+readback is the visible, harmless failure mode.

@@ -16,7 +16,8 @@
 //      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
-//      set_fold <track> <0|1> | watch_play <0|1> | watch_meters <0|1>
+//      set_fold <track> <0|1> | set_transport <encodedPatch>
+//      watch_play <0|1> | watch_meters <0|1> | watch_transport <0|1>
 //      watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
@@ -27,6 +28,7 @@
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      song_position <bar> <beat> <sixteenth>
+//      transport_state <encodedState>
 //      meter_levels <masterLevel> <track0> <level0> <track1> <level1> …
 //      pong
 
@@ -78,12 +80,16 @@ var cursorApi: LiveAPI | null = null;
 var observers: LiveAPI[] = [];
 var playObservers: LiveAPI[] = [];
 var meterObservers: LiveAPI[] = [];
+var transportObservers: LiveAPI[] = [];
 /** A burst of play-state callbacks is pending a single coalesced report. */
 var playDirty = false;
 /** Song time has changed and a position report is pending. */
 var positionDirty = false;
 /** Last displayed position, so sub-sixteenth callbacks stay local. */
 var lastPositionKey = '';
+/** Control-bar changes are coalesced and duplicate full states stay in v8. */
+var transportDirty = false;
+var lastTransportKey = '';
 /** Last value seen per track, used to suppress duplicate callbacks. */
 var meterLevels: number[] = [];
 /** Latest momentary channel values; combined into meterLevels with max(L, R). */
@@ -143,6 +149,21 @@ function gnum(a: LiveAPI, prop: string): number {
 
 function gbool(a: LiveAPI, prop: string): boolean {
   return gnum(a, prop) === 1;
+}
+
+/** JSON encoded into the punctuation-safe subset Max carries as one atom. */
+function encodeMaxAtom(value: unknown): string {
+  return encodeURIComponent(JSON.stringify(value)).replace(/[!'()*]/g, function (c) {
+    return '%' + c.charCodeAt(0).toString(16).toUpperCase();
+  });
+}
+
+function decodeMaxAtom(value: unknown): unknown {
+  try {
+    return JSON.parse(decodeURIComponent(String(value || '')));
+  } catch (e) {
+    return null;
+  }
 }
 
 /**
@@ -1629,6 +1650,156 @@ function set_fold(t: number, folded: number): void {
   }
 }
 
+// --- control bar ------------------------------------------------------
+// Tempo, metronome, global clip-launch quantization and Live's current Scale
+// controls. Six fixed observers for the whole set, reported as one state so a
+// change made in Live and a change made here take the same path back to the UI.
+//
+// The encoded JSON is one Max-safe atom. Scale names contain spaces and Max
+// message punctuation is syntax, so sending the raw string would eventually
+// turn one valid name into several arguments.
+
+function readTransportState(): BSV.TransportState {
+  const set = at('live_set');
+  return {
+    // Two decimals are all the header renders. Rounding here also keeps tempo
+    // automation from publishing changes the user cannot see.
+    tempo: Math.round(gnum(set, 'tempo') * 100) / 100,
+    metronome: gbool(set, 'metronome'),
+    clipTriggerQuantization: gnum(set, 'clip_trigger_quantization'),
+    rootNote: gnum(set, 'root_note'),
+    scaleName: gstr(set, 'scale_name'),
+    scaleMode: gbool(set, 'scale_mode'),
+  };
+}
+
+function sendTransportState(): void {
+  try {
+    const state = readTransportState();
+    const key = JSON.stringify(state);
+    if (key === lastTransportKey) return;
+    lastTransportKey = key;
+    outlet(0, 'transport_state', encodeMaxAtom(state));
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function onTransportChange(): void {
+  if (transportDirty) return;
+  transportDirty = true;
+  // Tempo automation can notify far faster than a two-decimal header needs.
+  transportTask.schedule(50);
+}
+
+var transportTask = new Task(function () {
+  transportDirty = false;
+  sendTransportState();
+});
+
+function set_transport(encoded: unknown): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  const value = decodeMaxAtom(encoded);
+  if (!value || typeof value !== 'object') return fail(-1, 'malformed transport patch');
+  const patch = value as BSV.TransportPatch;
+  const has = Object.prototype.hasOwnProperty;
+  const tempo = has.call(patch, 'tempo') ? Number(patch.tempo) : undefined;
+  const quantization = has.call(patch, 'clipTriggerQuantization')
+    ? Number(patch.clipTriggerQuantization)
+    : undefined;
+  const root = has.call(patch, 'rootNote') ? Number(patch.rootNote) : undefined;
+  const name = has.call(patch, 'scaleName') ? String(patch.scaleName || '').trim() : undefined;
+
+  // Validate the entire patch before the first set. The Node side already does
+  // this, but a malformed direct Max message must not land its early fields and
+  // fail halfway through the rest.
+  if (tempo !== undefined && (!isFinite(tempo) || tempo < 20 || tempo > 999)) {
+    return fail(-1, 'tempo must be 20–999 BPM');
+  }
+  if (has.call(patch, 'metronome') && typeof patch.metronome !== 'boolean') {
+    return fail(-1, 'metronome must be boolean');
+  }
+  if (
+    quantization !== undefined &&
+    (!isFinite(quantization) ||
+      Math.floor(quantization) !== quantization ||
+      quantization < 0 ||
+      quantization > 13)
+  ) {
+    return fail(-1, 'invalid global quantization');
+  }
+  if (
+    root !== undefined &&
+    (!isFinite(root) || Math.floor(root) !== root || root < 0 || root > 11)
+  ) {
+    return fail(-1, 'root note must be 0–11');
+  }
+  if (name !== undefined && (!name || name.length > 100)) {
+    return fail(-1, 'invalid scale name');
+  }
+  if (has.call(patch, 'scaleMode') && typeof patch.scaleMode !== 'boolean') {
+    return fail(-1, 'scale mode must be boolean');
+  }
+
+  try {
+    const set = at('live_set');
+    if (tempo !== undefined) set.set('tempo', tempo);
+    if (has.call(patch, 'metronome')) {
+      set.set('metronome', patch.metronome ? 1 : 0);
+    }
+    if (quantization !== undefined) set.set('clip_trigger_quantization', quantization);
+    if (root !== undefined) set.set('root_note', root);
+    if (name !== undefined) set.set('scale_name', name);
+    if (has.call(patch, 'scaleMode')) {
+      set.set('scale_mode', patch.scaleMode ? 1 : 0);
+    }
+    // An unchanged write may not notify. Read back anyway: the state Live
+    // accepted, not the attempted patch, is the UI's acknowledgement.
+    onTransportChange();
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function watch_transport(on: number): void {
+  clearTransportObservers();
+  if (Number(on) !== 1) return;
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    const properties = [
+      'tempo',
+      'metronome',
+      'clip_trigger_quantization',
+      'root_note',
+      'scale_name',
+      'scale_mode',
+    ];
+    for (let i = 0; i < properties.length; i++) {
+      const observer = new LiveAPI(onTransportChange, 'live_set');
+      observer.property = properties[i];
+      transportObservers.push(observer);
+    }
+    sendTransportState();
+  } catch (e) {
+    clearTransportObservers();
+    fail(-1, e);
+  }
+}
+
+function clearTransportObservers(): void {
+  transportTask.cancel();
+  transportDirty = false;
+  lastTransportKey = '';
+  for (let i = 0; i < transportObservers.length; i++) {
+    try {
+      transportObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  transportObservers = [];
+}
+
 // --- play state -------------------------------------------------------
 // Which slot is playing and which is blinking, per track.
 //
@@ -2946,6 +3117,7 @@ function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
   clearMeterObservers();
+  clearTransportObservers();
   clearSelObservers();
   clearDiagObservers();
   diagDetach();
