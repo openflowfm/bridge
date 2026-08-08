@@ -926,7 +926,7 @@ Max.addHandler('delta', async (dictName: string) => {
     const data: BSV.SnapshotDelta = await Max.getDict(dictName);
     Max.post(
       `delta: ${data.clips.length} clip(s) across track(s) ` +
-        `${data.tracks.join(', ')} in ${data.ms}ms (rev ${data.prevRev} -> ${data.rev})`,
+        `${data.clipScope.join(', ')} in ${data.ms}ms (rev ${data.prevRev} -> ${data.rev})`,
     );
     broadcast({ type: 'delta', data });
   } catch (e) {

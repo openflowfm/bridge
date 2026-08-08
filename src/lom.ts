@@ -435,16 +435,7 @@ function snapshot(reqId: number): void {
 
     const scenes: BSV.Scene[] = [];
     for (let s = 0; s < sceneCount; s++) {
-      const a = at('live_set scenes ' + s);
-      scenes.push({
-        i: s,
-        name: gstr(a, 'name'),
-        color: gnum(a, 'color'),
-        // -1 when the scene has no color; slot 0 is a real color.
-        colorIndex: gnumOr(a, 'color_index', -1),
-        isEmpty: gbool(a, 'is_empty'),
-        tempo: gnum(a, 'tempo'),
-      });
+      scenes.push(readSceneRow(s)!);
       phase(10, 10, s + 1, sceneCount);
     }
 
@@ -557,7 +548,7 @@ function snapshot(reqId: number): void {
 
     // Free here — the walk has just read every clip in the set — and it is what
     // lets a scoped re-read afterwards tell "nothing changed" from "changed".
-    seedTrackDigests(trackCount, clips);
+    seedDigests(trackCount, clips, scenes, tracks);
 
     const ms = tClips - t0;
     const payload: BSV.Snapshot = {
@@ -2000,8 +1991,11 @@ var selTrackId = 0;
 var selSceneId = 0;
 /** Track index the cursor was in before its current position — a move's source. */
 var selPrevTrack = -1;
-/** Track indexes awaiting a re-read, used as a set. */
+/** Track indexes whose clips await a re-read, used as a set. */
 var selDirty: { [t: string]: boolean } = {};
+/** Scene and track *rows* awaiting a re-read — names, colors, tempo. */
+var sceneDirty: { [s: string]: boolean } = {};
+var trackRowDirty: { [t: string]: boolean } = {};
 /** LOM id -> track index. Rebuilt whenever the set's structure changes. */
 var trackIndexById: { [id: string]: number } | null = null;
 /** LOM id -> scene index, on the same terms. Only the cursor observers need it. */
@@ -2038,6 +2032,59 @@ function trackIndexOf(id: number): number {
   }
   const found = trackIndexById[String(id)];
   return found === undefined ? -1 : found;
+}
+
+/**
+ * One scene row, exactly as a snapshot describes it.
+ *
+ * Shared by the walk and by a scoped re-read so there is **one** definition of
+ * what a scene row is. Two would drift, and the symptom would be a grid that
+ * disagrees with itself depending on which path last wrote a row.
+ *
+ * Null when the scene doesn't resolve — deleted under us, which the structure
+ * observer is already telling everyone about.
+ */
+function readSceneRow(s: number): BSV.Scene | null {
+  const a = at('live_set scenes ' + s);
+  if (!exists(a)) return null;
+  return {
+    i: s,
+    name: gstr(a, 'name'),
+    color: gnum(a, 'color'),
+    // -1 when the scene has no color; slot 0 is a real color.
+    colorIndex: gnumOr(a, 'color_index', -1),
+    isEmpty: gbool(a, 'is_empty'),
+    tempo: gnum(a, 'tempo'),
+  };
+}
+
+/**
+ * One track row, on the same terms.
+ *
+ * `groupIndex` resolves through `trackIndexOf` rather than the walk's own
+ * two-pass map. That's sound here for the reason the two-pass map exists at all:
+ * it only matters that every id be resolvable, and grouping cannot change
+ * without adding or removing a track — which is structural, drops the cache, and
+ * sends every client for a full walk anyway.
+ */
+function readTrackRow(t: number): BSV.Track | null {
+  const a = at('live_set tracks ' + t);
+  if (!exists(a)) return null;
+  const isGroup = gbool(a, 'is_foldable');
+  const isGrouped = gbool(a, 'is_grouped');
+  return {
+    i: t,
+    name: gstr(a, 'name'),
+    color: gnum(a, 'color'),
+    colorIndex: gnum(a, 'color_index'),
+    isMidi: gbool(a, 'has_midi_input'),
+    isGroup: isGroup,
+    isGrouped: isGrouped,
+    groupIndex: isGrouped ? trackIndexOf(gid(a, 'group_track')) : -1,
+    // fold_state is documented as only available when is_foldable, so don't ask
+    // for it on a track that isn't a group.
+    isFolded: isGroup ? gbool(a, 'fold_state') : false,
+  };
 }
 
 /**
@@ -2091,6 +2138,49 @@ function onCursorEdit(): void {
 }
 
 /**
+ * The scene under the cursor was renamed, recolored or retempoed.
+ *
+ * **The one that matters most in this project**, because a scene name is not a
+ * label on the mapping — it *is* the mapping, and everything downstream is
+ * re-derived from it. A rename in Live used to be invisible until something
+ * spent a full walk finding out.
+ */
+function onCursorSceneEdit(): void {
+  if (!cursorObservers.length) return;
+  try {
+    const s = sceneIndexOf(selSceneId);
+    if (s < 0) return;
+    sceneDirty[String(s)] = true;
+    selTask.cancel();
+    selTask.schedule(SEL_DEBOUNCE_MS);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+/** The track under the cursor was renamed or recolored. */
+function onCursorTrackEdit(): void {
+  if (!cursorObservers.length) return;
+  try {
+    const t = trackIndexOf(selTrackId);
+    if (t < 0) return;
+    trackRowDirty[String(t)] = true;
+    selTask.cancel();
+    selTask.schedule(SEL_DEBOUNCE_MS);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+/** Attach one observer, or say why not. Never throws into a rebuild. */
+function observeAt(path: string, property: string, cb: () => void): LiveAPI | null {
+  const a = new LiveAPI(cb, path);
+  if (!exists(a)) return null;
+  a.property = property;
+  return a;
+}
+
+/**
  * Point the cursor observers at wherever the cursor is now.
  *
  * **Only ever called from `selTask`.** Attaching inside a notification callback
@@ -2110,20 +2200,40 @@ function rebuildCursorObservers(): void {
   clearCursorObservers();
   if (t < 0 || s < 0) return;
   try {
+    const next: LiveAPI[] = [];
+    const add = (a: LiveAPI | null) => {
+      if (a) next.push(a);
+    };
     const slotPath = 'live_set tracks ' + t + ' clip_slots ' + s;
-    const slot = new LiveAPI(onCursorEdit, slotPath);
-    if (!exists(slot)) return;
-    slot.property = 'has_clip';
-    cursorObservers = [slot];
-    if (gbool(slot, 'has_clip')) {
-      const name = new LiveAPI(onCursorEdit, slotPath + ' clip');
-      if (exists(name)) {
-        name.property = 'name';
-        const color = new LiveAPI(onCursorEdit, slotPath + ' clip');
-        color.property = 'color_index';
-        cursorObservers = [slot, name, color];
+
+    // A group track has no clip slots of its own, so this resolves to nothing —
+    // check before probing rather than letting `get` post an error per rebuild.
+    const slot = at(slotPath);
+    if (exists(slot)) {
+      add(observeAt(slotPath, 'has_clip', onCursorEdit));
+      if (gbool(slot, 'has_clip')) {
+        add(observeAt(slotPath + ' clip', 'name', onCursorEdit));
+        add(observeAt(slotPath + ' clip', 'color_index', onCursorEdit));
       }
     }
+
+    // **`color`, not `color_index`.** Live's own docstring says a scene's
+    // color_index "can be None for no color", and LOM.md records that the page
+    // calls it writable when it is not — so it is the member this project has
+    // already been wrong about once. `color` is always an int and moves with it,
+    // so a recolor fires either way and this asks nothing of a nullable.
+    //
+    // No `tempo_enabled` observer: disabling a scene tempo makes `tempo` read
+    // -1 and enabling it makes it read a value, so the `tempo` observer already
+    // fires for both. A second one would cost an observer to learn nothing.
+    add(observeAt('live_set scenes ' + s, 'name', onCursorSceneEdit));
+    add(observeAt('live_set scenes ' + s, 'color', onCursorSceneEdit));
+    add(observeAt('live_set scenes ' + s, 'tempo', onCursorSceneEdit));
+
+    add(observeAt('live_set tracks ' + t, 'name', onCursorTrackEdit));
+    add(observeAt('live_set tracks ' + t, 'color', onCursorTrackEdit));
+
+    cursorObservers = next;
     cursorAt = where;
   } catch (e) {
     // Never fatal to the flush: the delta this was called alongside is still
@@ -2179,15 +2289,29 @@ function sceneIndexOf(id: number): number {
  *
  * Keyed by track index, so a structural change drops it with the rest.
  */
-var trackDigest: { [t: string]: string } = {};
+var digests: { [k: string]: string } = {};
 
 /** Everything about a clip a delta can carry and a client can see change. */
 function clipDigest(c: BSV.Clip): string {
   return c.s + '|' + c.name + '|' + c.colorIndex + '|' + c.length;
 }
 
-/** Seeded from a full walk, which has already read every clip. One pass. */
-function seedTrackDigests(trackCount: number, clips: BSV.Clip[]): void {
+/** The same for a scene row, and for a track row. */
+function sceneDigest(s: BSV.Scene): string {
+  return s.name + '|' + s.colorIndex + '|' + s.color + '|' + s.tempo + '|' + s.isEmpty;
+}
+
+function trackRowDigest(t: BSV.Track): string {
+  return t.name + '|' + t.colorIndex + '|' + t.color + '|' + t.isFolded;
+}
+
+/** Seeded from a full walk, which has already read all three. One pass each. */
+function seedDigests(
+  trackCount: number,
+  clips: BSV.Clip[],
+  scenes: BSV.Scene[],
+  tracks: BSV.Track[],
+): void {
   const acc: { [t: string]: string[] } = {};
   for (let t = 0; t < trackCount; t++) acc[String(t)] = [];
   for (let i = 0; i < clips.length; i++) {
@@ -2195,10 +2319,24 @@ function seedTrackDigests(trackCount: number, clips: BSV.Clip[]): void {
     if (!acc[k]) acc[k] = [];
     acc[k].push(clipDigest(clips[i]));
   }
-  trackDigest = {};
+  digests = {};
   for (const k in acc) {
-    if (Object.prototype.hasOwnProperty.call(acc, k)) trackDigest[k] = acc[k].join(';');
+    if (Object.prototype.hasOwnProperty.call(acc, k)) digests['c' + k] = acc[k].join(';');
   }
+  for (let i = 0; i < scenes.length; i++) digests['s' + scenes[i].i] = sceneDigest(scenes[i]);
+  for (let i = 0; i < tracks.length; i++) digests['t' + tracks[i].i] = trackRowDigest(tracks[i]);
+}
+
+/** The dirty sets, as sorted indexes. */
+function indexesOf(set: { [k: string]: boolean }): number[] {
+  const out: number[] = [];
+  for (const k in set) {
+    if (Object.prototype.hasOwnProperty.call(set, k)) out.push(Number(k));
+  }
+  out.sort(function (a, b) {
+    return a - b;
+  });
+  return out;
 }
 
 /**
@@ -2267,15 +2405,13 @@ function flushSelection(): void {
     // so a flush that publishes nothing still leaves the observers pointed right.
     rebuildCursorObservers();
 
-    const tracks: number[] = [];
-    for (const k in selDirty) {
-      if (Object.prototype.hasOwnProperty.call(selDirty, k)) tracks.push(Number(k));
-    }
+    const tracks = indexesOf(selDirty);
+    const dirtyScenes = indexesOf(sceneDirty);
+    const dirtyRows = indexesOf(trackRowDirty);
     selDirty = {};
-    if (!tracks.length) return;
-    tracks.sort(function (a, b) {
-      return a - b;
-    });
+    sceneDirty = {};
+    trackRowDirty = {};
+    if (!tracks.length && !dirtyScenes.length && !dirtyRows.length) return;
 
     const t0 = Date.now();
     const sceneCount = at('live_set').getcount('scenes');
@@ -2297,35 +2433,63 @@ function flushSelection(): void {
       scanned.push(t);
       readTrackClips(t, sceneCount, clips);
     }
-    if (!scanned.length) return;
+
+    // Rows. A row that no longer resolves is dropped rather than reported, on
+    // the same grounds as a vanished track: the structure observer has already
+    // sent everyone for a walk, and describing a scene that isn't there would
+    // outlive that walk in some client's copy.
+    const sceneRows: BSV.Scene[] = [];
+    for (let i = 0; i < dirtyScenes.length; i++) {
+      const row = readSceneRow(dirtyScenes[i]);
+      if (row) sceneRows.push(row);
+    }
+    const trackRows: BSV.Track[] = [];
+    for (let i = 0; i < dirtyRows.length; i++) {
+      const row = readTrackRow(dirtyRows[i]);
+      if (row) trackRows.push(row);
+    }
 
     // Nothing any client could see is different, so say nothing. Publishing an
     // identical delta would be harmless on its own; bumping `rev` for it is not,
     // because that sequence is shared and a client whose next delta doesn't line
     // up answers with a full walk.
     let moved = false;
-    const fresh: { [t: string]: string } = {};
+    const fresh: { [k: string]: string } = {};
     for (let i = 0; i < scanned.length; i++) {
       const t = scanned[i];
       const d = digestOfTrack(t, clips);
-      fresh[String(t)] = d;
+      fresh['c' + t] = d;
       // An unknown track counts as changed: never having described it is not the
       // same as having described it as this.
-      if (trackDigest[String(t)] !== d) moved = true;
+      if (digests['c' + t] !== d) moved = true;
+    }
+    for (let i = 0; i < sceneRows.length; i++) {
+      const d = sceneDigest(sceneRows[i]);
+      fresh['s' + sceneRows[i].i] = d;
+      if (digests['s' + sceneRows[i].i] !== d) moved = true;
+    }
+    for (let i = 0; i < trackRows.length; i++) {
+      const d = trackRowDigest(trackRows[i]);
+      fresh['t' + trackRows[i].i] = d;
+      if (digests['t' + trackRows[i].i] !== d) moved = true;
     }
     if (!moved) return;
     for (const k in fresh) {
-      if (Object.prototype.hasOwnProperty.call(fresh, k)) trackDigest[k] = fresh[k];
+      if (Object.prototype.hasOwnProperty.call(fresh, k)) digests[k] = fresh[k];
     }
 
     const prevRev = rev;
     const payload: BSV.SnapshotDelta = {
       rev: nextRev(),
       prevRev: prevRev,
-      tracks: scanned,
+      clipScope: scanned,
       clips: clips,
       ms: Date.now() - t0,
     };
+    // Absent rather than empty, so a delta that is only about clips stays
+    // exactly the message it has always been.
+    if (sceneRows.length) payload.sceneRows = sceneRows;
+    if (trackRows.length) payload.trackRows = trackRows;
     publish(DELTA_DICT, payload);
     outlet(0, 'delta', DELTA_DICT);
   } catch (e) {
@@ -2376,6 +2540,8 @@ function clearSelObservers(): void {
   selObservers = [];
   clearCursorObservers();
   selDirty = {};
+  sceneDirty = {};
+  trackRowDirty = {};
   selPrevTrack = -1;
   selTrackId = 0;
   selSceneId = 0;
@@ -2395,8 +2561,10 @@ function onStructureChange(): void {
   // Keyed by track index, so every entry now describes a different track. A
   // surviving digest would make a genuinely-changed track look unchanged and
   // suppress the delta for it.
-  trackDigest = {};
+  digests = {};
   selDirty = {};
+  sceneDirty = {};
+  trackRowDirty = {};
   selPrevTrack = -1;
   selTask.cancel();
   // The cursor observers are path-addressed, and a path silently re-points when

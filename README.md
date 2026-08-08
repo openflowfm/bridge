@@ -707,6 +707,44 @@ clip under a *stationary* cursor is the one that comes and goes.
 A slot with no clip carries one observer, not three; there is no Clip object to attach to,
 and `has_clip` is what brings the other two back when one arrives.
 
+The same argument covers the **scene and track** the cursor sits on — `Scene.name`,
+`Scene.color`, `Scene.tempo`, `Track.name`, `Track.color`. A scene rename is the one that
+matters most in this project, because a scene name is not a label on the mapping, it *is*
+the mapping, and everything downstream is re-derived from it.
+
+Two choices in there worth keeping:
+
+- **`color`, not `color_index`.** Live's own docstring says a scene's `color_index` "can
+  be None for no color", and `LOM.md` records the page calling it writable when it isn't —
+  it is the member this project has already been wrong about once. `color` is always an
+  int and moves with it, so a recolor fires either way and nothing is asked of a nullable.
+- **No `tempo_enabled` observer.** Disabling a scene tempo makes `tempo` read -1 and
+  enabling it makes it read a value, so the `tempo` observer already fires for both.
+
+A group track resolves to no clip slot at all, so the slot probe is guarded by `exists`
+rather than letting `get` post an error on every rebuild.
+
+### The delta carries rows now, and they merge the other way round
+
+`SnapshotDelta.tracks` is **`clipScope`** — which columns had their clips re-read — because
+`trackRows` beside it means something else entirely: what the columns are called. Rows
+travel as `sceneRows`, `trackRows` and `tempo`, absent rather than empty so a delta that is
+only about clips stays exactly the message it always was. One flush, one `rev` bump, one
+merge, however many of the three are dirty.
+
+**Rows upsert by index; clips replace by scope.** `mergeRows` in `core/` has the argument:
+a clip can *vanish* from a track — moved out of a slot, it is a deletion at the source, and
+an upsert has no entry with which to represent one. A scene at index 5 cannot vanish that
+way. Either it exists, or the set restructured, and a restructure renumbers everything and
+sends every client for a full walk regardless.
+
+`readSceneRow` and `readTrackRow` are shared by the walk and the scoped re-read, so there
+is one definition of what a row is. Two would drift, and the symptom would be a grid
+disagreeing with itself depending on which path last wrote a row. `readTrackRow` resolves
+`groupIndex` through `trackIndexOf` rather than the walk's two-pass map, which is sound for
+the reason the two-pass map exists at all: grouping cannot change without adding or
+removing a track, and that is structural.
+
 ### What it still does not catch
 
 `Clip.length` and `Track.fold_state` have **no `observe` at all** — a loop length changed
