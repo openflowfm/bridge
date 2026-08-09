@@ -867,6 +867,65 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('set_transport', encodeMaxAtom(patch));
       break;
     }
+    case 'setMixer': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const sourceTarget = m.target;
+      let target: BSV.MixerTarget;
+      if (sourceTarget?.kind === 'master') {
+        target = { kind: 'master' };
+      } else if (sourceTarget?.kind === 'track') {
+        const t = Number(sourceTarget.t);
+        if (!Number.isInteger(t) || t < 0) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid mixer track' });
+        }
+        target = { kind: 'track', t };
+      } else {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid mixer target' });
+      }
+
+      const source = m.patch;
+      if (!source || typeof source !== 'object') {
+        return send(ws, { type: 'error', id: m.id, message: 'mixer patch is missing' });
+      }
+      const patch: BSV.MixerPatch = {};
+      for (const field of ['active', 'solo', 'armed'] as const) {
+        if (source[field] === undefined) continue;
+        if (typeof source[field] !== 'boolean') {
+          return send(ws, {
+            type: 'error',
+            id: m.id,
+            message: `${field} must be boolean`,
+          });
+        }
+        patch[field] = source[field];
+      }
+      if (source.volume !== undefined) {
+        const volume = Number(source.volume);
+        // Track and Master volume parameters report 0–1 in Live. lom.ts also
+        // checks the parameter's actual min/max before touching it.
+        if (!Number.isFinite(volume) || volume < 0 || volume > 1) {
+          return send(ws, { type: 'error', id: m.id, message: 'volume must be 0–1' });
+        }
+        patch.volume = volume;
+      }
+      if (Object.keys(patch).length === 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'mixer patch is empty' });
+      }
+      if (
+        target.kind === 'master' &&
+        (patch.active !== undefined || patch.solo !== undefined || patch.armed !== undefined)
+      ) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: 'Master exposes volume only',
+        });
+      }
+      // One patch per strip operation. The observer readback is the
+      // acknowledgement, including Live's accepted volume value.
+      Max.outlet('set_mixer', encodeMaxAtom({ target, patch }));
+      break;
+    }
     // Also fire-and-forget, and for the same reason as playback: the client
     // folded its own columns before sending. See `setFold` in the protocol.
     case 'setFold':
@@ -1180,6 +1239,67 @@ Max.addHandler('meter_levels', (...args: number[]) => {
     tracks.push({ t, level });
   }
   broadcast({ type: 'meterLevels', frame: { master, tracks } });
+});
+
+function mixerVolume(value: unknown): BSV.MixerVolumeState | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return undefined;
+  const volume = value as Partial<BSV.MixerVolumeState>;
+  if (
+    !Number.isFinite(volume.value) ||
+    !Number.isFinite(volume.min) ||
+    !Number.isFinite(volume.max) ||
+    volume.min! > volume.max! ||
+    volume.value! < volume.min! ||
+    volume.value! > volume.max! ||
+    typeof volume.enabled !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return volume as BSV.MixerVolumeState;
+}
+
+// Mixer controls change far less often than levels, but volume automation can
+// still move continuously. lom.ts coalesces callbacks and sends one complete,
+// punctuation-safe state so independent property observers cannot tear a strip.
+Max.addHandler('mixer_state', (...atoms: unknown[]) => {
+  const value = decodeMaxAtom(atoms.map(String).join(''));
+  if (!value || typeof value !== 'object') {
+    Max.post('mixer_state: malformed payload from lom');
+    return;
+  }
+  const source = value as Partial<BSV.MixerState>;
+  const masterVolume = mixerVolume(source.masterVolume);
+  if (masterVolume === undefined || !Array.isArray(source.tracks)) {
+    Max.post('mixer_state: invalid top-level fields from lom');
+    return;
+  }
+  const tracks: BSV.MixerTrackState[] = [];
+  for (const raw of source.tracks) {
+    if (!raw || typeof raw !== 'object') return;
+    const track = raw as Partial<BSV.MixerTrackState>;
+    const volume = mixerVolume(track.volume);
+    if (
+      !Number.isInteger(track.t) || track.t! < 0 ||
+      typeof track.active !== 'boolean' ||
+      typeof track.solo !== 'boolean' ||
+      typeof track.armed !== 'boolean' ||
+      typeof track.canArm !== 'boolean' ||
+      volume === undefined
+    ) {
+      Max.post('mixer_state: invalid track fields from lom');
+      return;
+    }
+    tracks.push({
+      t: track.t!,
+      active: track.active,
+      solo: track.solo,
+      armed: track.armed,
+      canArm: track.canArm,
+      volume,
+    });
+  }
+  broadcast({ type: 'mixerState', state: { masterVolume, tracks } });
 });
 
 // Kept separate from play_state: current_song_time changes continuously, and

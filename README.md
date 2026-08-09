@@ -131,9 +131,12 @@ always been done here, not a constraint left over from `rootDir`.
 
 Compiling `lom.ts` into this folder *improves* the dev loop for that half:
 `autowatch = 1` watches the emitted `lom.js`, so `[v8]` only reloads on a successful
-compile. `bridge.ts`'s dev loop gets the same property from `tools/dev-bridge.ts`'s
-esbuild watcher — `node.script @watch 1` reloads only when it writes a new
-`bridge/bridge.js`, which only happens after a build that didn't error.
+compile. A successful reload resets all of `lom.js`'s globals without reloading the Max
+device, so the patcher holds an initialization latch outside the script: `lom.js` emits
+a private `boot` from `loadbang`, and the patcher replays `init` only if
+`live.thisdevice` has already completed. `bridge.ts`'s dev loop gets the same
+successful-build-only property from `tools/dev-bridge.ts`'s esbuild watcher —
+`node.script @watch 1` reloads only when it writes a new `bridge/bridge.js`.
 
 ## Message protocol between the halves
 
@@ -158,8 +161,9 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `select_scene <scene>` | select an exact scene and reveal it in Live's Session View |
 | `set_transport <encodedPatch>` | set tempo, metronome, launch quantization or current scale controls as one patch |
+| `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm and/or volume on one mixer strip |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
-| `watch_meters <0\|1>` | install / remove the track and master output-meter observers |
+| `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_transport <0\|1>` | install / remove the six fixed control-bar observers |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
 | `ping` | |
@@ -178,6 +182,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `delta <dict>` | a partial re-read, pushed after a change in Live |
 | `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
+| `mixer_state <encodedState>` | complete cached mixer-control state |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `transport_state <encodedState>` | complete tempo, metronome, launch-quantization and scale state |
 | `err <reqId> <msg>` | |
@@ -226,6 +231,13 @@ decimals the header can render and reports are limited to one per 50ms while aut
 is moving it. `set_transport` uses the same encoding in the other direction and accepts a
 partial patch, keeping one operation for related control-bar settings rather than one
 message type per property.
+
+`mixer_state` also uses a punctuation-safe encoded JSON atom because its nested state has
+nullable volume parameters. Volume automation is coalesced to one push per display frame.
+The property observers update the cached strip they belong to instead of re-reading all
+tracks, so automation cannot turn into a continuous LOM walk. `set_mixer` carries one
+patch for one strip in the other direction and reads that strip back even when an
+unchanged write produces no observer callback.
 
 Live calls the root, scale name and Scale Mode fields its Current Scale controls. Despite
 their `Song` location in the LOM, they are **not a rewrite of every clip in the Set**: the
@@ -411,20 +423,19 @@ behaves the way its name suggests.
   deliberately settle nothing — they round-trip identically either way, so probing on one
   would cache a coin flip.
 - **`goto('id N')` does not resolve.** Measured against a real set: every one of 24 tracks
-  fell back, Max posted `v8liveapi: get: no valid object set` per attempt, and
+  failed, Max posted `v8liveapi: get: no valid object set` per attempt, and
   `get('clip')` on the unresolved cursor answered `1` rather than an `['id', n]` pair. This
-  settles the open question the slot-scan fallback was written to answer — it was the
+  settles the open question the slot-scan probe was written to answer — it was the
   addressing, not the atom shape. `[js]`'s `jsliveapi` maps `goto` to **`path_goto`**,
   which is a hint about why: it takes a path, and `id N` isn't one. The id-addressed fast
-  path is therefore dead weight today; the fallback is what runs, and the slot scan costs
-  ~758ms of a ~946ms walk. Setting `.id` may be the real route, but `max.d.ts` declares it
-  readonly and that is **unverified**.
+  path was therefore removed from snapshots; canonical path addressing is what runs, and
+  the slot scan costs ~758ms of a ~946ms walk. `diag ids` retains the explicit probe for
+  rechecking a future Max build. Setting `.id` may be the real route, but `max.d.ts`
+  declares it readonly and that is **unverified**.
 - **A property Live documents as nullable can be read but not written.** `Scene.color_index`
   and `Track.color_index` are both "Can be None for no color", and writing either answers
   `v8liveapi: set: unsupported property type`. `Clip.color_index` has no such note and
   writes fine. Write `color` (RGB) for scenes and tracks. See *Palette derivation*.
-- **`get('clip')` beats `get('has_clip')`.** It answers occupancy *and* yields the
-  clip's id, replacing the probe plus a second path resolution. `0` means empty.
 - **Reuse one `LiveAPI` cursor with `goto()`** rather than constructing new ones. But
   beware: `at()` returns *the same object* every time, so you can't hold two cursors
   from it at once. `palette()` constructs its own for exactly this reason.
@@ -466,7 +477,7 @@ behaves the way its name suggests.
   already have. See `core/src/groupSlot.ts`.
 - **A property Live documents as optional needs its own "absent" value.** A scene's
   `color_index` "Can be None for no color", and `gnum` would report that as palette
-  slot 0 — a real color. `gnumOr` exists for this; see also `gref` for object refs.
+  slot 0 — a real color. `gnumOr` exists for this.
 - **There is no Session View layout in the LOM** — no column widths, no row heights,
   nothing about how the grid is drawn. `Track.View` is `selected_device`,
   `device_insert_mode`, `is_collapsed` (documented as the *arranger*, not the session)
@@ -909,20 +920,12 @@ scale differently:
 
 The scan dominates on a large set, which is what the id-addressing above targets.
 
-**The fallback is outcome-based, and it has to be.** It first keyed off the id list
-coming back in an unrecognised shape — which missed the failure that actually
-happened: the ids arrived fine, but nothing they addressed could be read, so all 4416
-slots of a real set reported empty and the snapshot claimed zero clips. `gid()` answers
-`0` both for an empty clip slot and for a cursor that never resolved, and that collapse
-is what made a broken fast path indistinguishable from an empty set.
-
-So `gref()` keeps the two apart (`-1` = unreadable, `0` = empty, `n` = clip id), and any
-track whose id scan fails to read is rescanned with path addressing plus `has_clip` —
-the path this project has actually watched work. When that happens `lom.js` posts the
-count and a dump of the offending atoms to the Max window, which is what identifies
-*which* assumption broke: whether `goto('id N')` resolves at all, or whether a clip slot
-answers `get('clip')` as an `['id', n]` pair. Both are unverified, and both fail the
-same silent way.
+**Snapshots use canonical path addressing plus `has_clip`.** An earlier id-addressed
+fast path was guarded by an outcome-based fallback, but `goto('id N')` is known not to
+resolve under this v8 LiveAPI build. It therefore emitted one `get: no valid object set`
+per non-group track on every walk before doing the canonical path scan anyway. The dead
+probe was removed; `diag ids` is the explicit, developer-only place to re-test id
+addressing after a Max upgrade.
 
 ## Testing
 

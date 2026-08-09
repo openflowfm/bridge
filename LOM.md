@@ -231,7 +231,7 @@ Answered questions, recorded so they stay answered.
 | `Groove` | `live_set groove_pool grooves N` | 6 | 0 | 0 |
 | `Device` | `live_set tracks N devices M` | 2 | 9 | 1 |
 | `Device.View` | `live_set tracks N devices M view` | 0 | 1 | 0 |
-| `DeviceParameter` | `live_set tracks N devices M parameters L` | 0 | 11 | 3 |
+| [`DeviceParameter`](#deviceparameter) | `live_set tracks N devices M parameters L` | 0 | 11 | 3 |
 | `RackDevice` | — | 5 | 7 | 8 |
 | `RackDevice.View` | — | 2 | 2 | 0 |
 | `DrumPad` | `live_set tracks N devices M drum_pads L` | 1 | 4 | 1 |
@@ -246,7 +246,7 @@ Answered questions, recorded so they stay answered.
 | `CompressorDevice` | — | 0 | 4 | 0 |
 | `PluginDevice` | — | 0 | 2 | 0 |
 | `MaxDevice` | — | 0 | 4 | 3 |
-| `MixerDevice` | `live_set tracks N mixer_device` | 9 | 2 | 0 |
+| [`MixerDevice`](#mixerdevice) | `live_set tracks N mixer_device` | 9 | 2 | 0 |
 | `Eq8Device` | — | 0 | 3 | 0 |
 | `Eq8Device.View` | — | 0 | 1 | 0 |
 | `DriftDevice` | — | 0 | 29 | 0 |
@@ -262,8 +262,9 @@ Answered questions, recorded so they stay answered.
 | `ControlSurface` | `control_surfaces N` | 0 | 0 | 9 |
 | `this_device` | `live_set tracks N devices M` | 0 | 0 | 0 |
 
-Device classes are listed for completeness only — `lom.ts` never reaches one, and
-their members are one `strings` away if that ever changes.
+Most device classes are listed for completeness only. `lom.ts` reaches the documented
+MixerDevice → DeviceParameter volume path; that exact subset is expanded below. Members
+of every other device class remain one `strings` away if that ever changes.
 
 ---
 
@@ -507,6 +508,36 @@ Canonical path: `live_set tracks N view`
 | function | notes |
 |---|---|
 | `select_instrument` | Returns: bool 0 = there are no devices to select Selects track's instrument or first device, makes it visible and focuses on it. |
+
+## MixerDevice
+
+The per-track mixer. Better Session View currently reaches only `volume`; activator state
+uses the equivalent inverse of `Track.mute`, while Solo and Arm use their direct Track
+properties above.
+
+Canonical path: `live_set tracks N mixer_device`
+
+### Children used here
+
+| child | type | access | notes |
+|---|---|---|---|
+| `track_activator` | DeviceParameter | get | Exposed by Live, but `lom.ts` uses observable `Track.mute` for this switch. |
+| `volume` | DeviceParameter | get | Track volume fader. Master uses `live_set master_track mixer_device volume`. |
+
+## DeviceParameter
+
+The writable and automatable parameter object behind the volume fader. The canonical
+device parameter path is `live_set tracks N devices M parameters L`; mixer parameters are
+also reachable as children of MixerDevice, including the volume paths above.
+
+### Properties used here
+
+| property | type | access | notes |
+|---|---|---|---|
+| `value` | float | get, set, observe | Internal value between `min` and `max`; track and Master volume report 0–1. Linear to Live's GUI fader, not to displayed dB. |
+| `min` | float | get | Lowest allowed internal value. |
+| `max` | float | get | Highest allowed internal value. |
+| `is_enabled` | bool | get | 0 when automation, a mapping, remote control or Live prevents direct edits. |
 
 ## ClipSlot
 
@@ -753,4 +784,3 @@ Canonical path: `live_app`
 | `get_minor_version` | Returns: the 1 in Live 9.1.2. |
 | `get_version_string` | Returns: the text 9.1.2 in Live 9.1.2. |
 | `press_current_dialog_button` | Parameter: index Press the button with the given index in the current dialog box. |
-

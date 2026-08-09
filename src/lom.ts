@@ -17,6 +17,7 @@
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
 //      select_scene <scene> | set_fold <track> <0|1> | set_transport <encodedPatch>
+//      set_mixer <encodedTargetAndPatch>
 //      watch_play <0|1> | watch_meters <0|1> | watch_transport <0|1>
 //      watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
@@ -30,6 +31,7 @@
 //      song_position <bar> <beat> <sixteenth>
 //      transport_state <encodedState>
 //      meter_levels <masterLevel> <track0> <level0> <track1> <level1> …
+//      mixer_state <encodedState>
 //      pong
 
 autowatch = 1;
@@ -86,6 +88,8 @@ var cursorApi: LiveAPI | null = null;
 var observers: LiveAPI[] = [];
 var playObservers: LiveAPI[] = [];
 var meterObservers: LiveAPI[] = [];
+/** Activator, Solo, Arm and volume observers, alive only with the mixer panel. */
+var mixerObservers: LiveAPI[] = [];
 var transportObservers: LiveAPI[] = [];
 /** A burst of play-state callbacks is pending a single coalesced report. */
 var playDirty = false;
@@ -106,6 +110,10 @@ var masterMeterLevel = 0;
 var masterMeterLeft = 0;
 var masterMeterRight = 0;
 var metersWatching = false;
+/** Latest coherent control state; observer callbacks update this cache in place. */
+var mixerState: BSV.MixerState | null = null;
+var mixerDirty = false;
+var lastMixerKey = '';
 var job: ApplyJob | null = null;
 /**
  * A structural job of our own is running — `add_scenes` or `move`.
@@ -123,6 +131,16 @@ var job: ApplyJob | null = null;
 var structuralJob = false;
 
 // --- helpers ----------------------------------------------------------
+
+/**
+ * The script can be recompiled while the containing device stays loaded.
+ * `deviceReady` then resets even though `live.thisdevice` will not emit its
+ * automatic initialization bang again. The patcher consumes this private
+ * signal and replays `init` only after its own initialization latch is set.
+ */
+function loadbang(): void {
+  outlet(0, 'boot');
+}
 
 function cursor(): LiveAPI {
   if (!cursorApi) cursorApi = new LiveAPI(function () {}, 'live_set');
@@ -208,23 +226,6 @@ function gids(a: LiveAPI, prop: string): number[] {
 function gid(a: LiveAPI, prop: string): number {
   const ids = gids(a, prop);
   return ids.length ? ids[0] : 0;
-}
-
-/**
- * Single-object property, keeping "empty" and "unreadable" apart.
- *
- * `gid` answers 0 both for a clip slot that is genuinely empty and for a cursor
- * that never resolved, and that collapse is exactly how a set full of clips
- * once reported zero of them. Returns the id, `0` for a slot that resolved and
- * holds nothing, or `-1` when the reply wasn't an `['id', n]` pair at all.
- *
- * Mirrored as `parseObjectRef` in core/src/lomAtoms.ts, where it has tests.
- */
-function gref(a: LiveAPI, prop: string): number {
-  const v = a.get(prop);
-  if (!Array.isArray(v) || v.length < 2 || v[0] !== 'id') return -1;
-  const n = Number(v[1]);
-  return isFinite(n) ? n : -1;
 }
 
 /**
@@ -473,68 +474,21 @@ function snapshot(reqId: number): void {
     // is mostly empty slots, while the property reads only touch clips that
     // exist — timing them separately is what tells us which one to attack.
     //
-    // The scan addresses slots by id rather than by path string: resolving
-    // 'live_set tracks 3 clip_slots 412' means parsing and walking that path
-    // every time, whereas one get('clip_slots') per track hands back every id
-    // up front and 'id N' resolves directly. Reading `clip` then answers
-    // occupancy AND yields the clip's id, replacing a has_clip probe plus a
-    // second (longer) path resolution for the clip itself.
-    const occupied: Array<[number, number, number]> = []; // track, scene, clipId
+    // This deliberately uses canonical paths. `goto('id N')` does not resolve
+    // under this v8 LiveAPI build; probing it once per track only emits
+    // `get: no valid object set` before falling back to this same scan.
+    const occupied: Array<[number, number]> = []; // track, scene
     let slotsScanned = 0;
-    let tracksViaPath = 0;
-    let probe = '';
     const slotTrackCount = tracks.reduce((n, track) => n + (track.isGroup ? 0 : 1), 0);
     let slotTracksDone = 0;
     for (let t = 0; t < trackCount; t++) {
       if (tracks[t].isGroup) continue; // group tracks have no real clip slots
-
-      const slotIds = gids(at('live_set tracks ' + t), 'clip_slots');
-
-      // The fast path. Its correctness rests on two things we cannot check
-      // without Live open — that 'id N' resolves through goto(), and that a
-      // clip slot answers get('clip') as an ['id', n] pair — and when either
-      // is wrong EVERY slot reads as empty rather than erroring. So the
-      // fallback can't key off the id list being empty (it isn't); it has to
-      // key off the scan failing to read, which is what gref reports.
-      let usedIds = false;
-      if (slotIds.length > 0) {
-        const found: Array<[number, number, number]> = [];
-        usedIds = true;
-        for (let s = 0; s < slotIds.length; s++) {
-          const clipId = gref(at('id ' + slotIds[s]), 'clip');
-          if (clipId < 0) {
-            // Nothing this pass produced for this track is trustworthy.
-            if (!probe) {
-              probe =
-                'track ' + t + ' slot id ' + slotIds[s] + ' clip atoms: ' +
-                JSON.stringify(at('id ' + slotIds[s]).get('clip'));
-            }
-            usedIds = false;
-            break;
-          }
-          if (clipId > 0) found.push([t, s, clipId]);
-        }
-        if (usedIds) {
-          slotsScanned += slotIds.length;
-          for (let i = 0; i < found.length; i++) occupied.push(found[i]);
-        }
-      }
-      if (usedIds) {
-        slotTracksDone++;
-        phase(20, 60, slotTracksDone, slotTrackCount);
-        continue;
-      }
-
-      // Path addressing plus has_clip. Slower, and the whole reason the id
-      // scan exists — but it's the one this project has actually watched work
-      // against a real set, so it's what we fall back to.
-      tracksViaPath++;
       for (let s = 0; s < sceneCount; s++) {
         slotsScanned++;
         const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
         if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
         const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
-        if (exists(c)) occupied.push([t, s, Number(c.id)]);
+        if (exists(c)) occupied.push([t, s]);
       }
       slotTracksDone++;
       phase(20, 60, slotTracksDone, slotTrackCount);
@@ -542,23 +496,11 @@ function snapshot(reqId: number): void {
     phase(20, 60, slotTrackCount, slotTrackCount);
     const tSlots = Date.now();
 
-    if (tracksViaPath > 0) {
-      // Visible, not silent: the snapshot is correct but the fast path is off.
-      // The atom dump is what tells us which assumption is wrong.
-      post(
-        'bsv: id-addressed slot scan did not resolve — ' + tracksViaPath +
-          ' track(s) rescanned by path. ' + probe + '\n',
-      );
-    }
-
     const clips: BSV.Clip[] = [];
     for (let i = 0; i < occupied.length; i++) {
       const t = occupied[i][0];
       const s = occupied[i][1];
-      // Same 'id N' dependency as the scan above, so the same self-healing:
-      // if the id doesn't resolve, reach the clip by the path we know works.
-      let c = at('id ' + occupied[i][2]);
-      if (!exists(c)) c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
+      const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
       if (!exists(c)) continue;
       clips.push({
         t: t,
@@ -1990,6 +1932,268 @@ function clearPlayObservers(): void {
   playObservers = [];
 }
 
+// --- mixer controls ---------------------------------------------------
+// The meter panel is also the mixer panel. While it is open, Track.mute,
+// Track.solo, Track.arm and MixerDevice.volume are observed and reported as
+// one coherent state. The observers update a cache from their callback atoms;
+// volume automation therefore costs one small push, not a full LOM walk at
+// every automation tick.
+
+function readMixerVolume(path: string): BSV.MixerVolumeState | null {
+  try {
+    const volume = at(path);
+    if (!exists(volume)) return null;
+    const min = gnumOr(volume, 'min', 0);
+    const max = gnumOr(volume, 'max', 1);
+    const value = gnumOr(volume, 'value', min);
+    if (!isFinite(min) || !isFinite(max) || !isFinite(value) || min > max) return null;
+    return {
+      value: Math.max(min, Math.min(max, value)),
+      min: min,
+      max: max,
+      enabled: gbool(volume, 'is_enabled'),
+    };
+  } catch (e) {
+    post('bsv mixer volume unavailable at ' + path + ': ' + describe(e) + '\n');
+    return null;
+  }
+}
+
+function readMixerTrack(t: number): BSV.MixerTrackState | null {
+  const path = 'live_set tracks ' + t;
+  const track = at(path);
+  if (!exists(track)) return null;
+  const canArm = gbool(track, 'can_be_armed');
+  // Read every Track property before readMixerVolume moves the shared cursor.
+  const state: BSV.MixerTrackState = {
+    t: t,
+    active: !gbool(track, 'mute'),
+    solo: gbool(track, 'solo'),
+    armed: canArm ? gbool(track, 'arm') : false,
+    canArm: canArm,
+    volume: null,
+  };
+  state.volume = readMixerVolume(path + ' mixer_device volume');
+  return state;
+}
+
+function readMixerState(): BSV.MixerState {
+  const count = at('live_set').getcount('tracks');
+  const tracks: BSV.MixerTrackState[] = [];
+  for (let t = 0; t < count; t++) {
+    const state = readMixerTrack(t);
+    if (state) tracks.push(state);
+  }
+  return {
+    masterVolume: readMixerVolume('live_set master_track mixer_device volume'),
+    tracks: tracks,
+  };
+}
+
+/** Numeric observer callback: `[property, value]` or the bare `[value]` form. */
+function mixerValue(args: unknown[], property: string): number | null {
+  let raw: unknown;
+  if (args.length >= 2 && String(args[0]) === property) raw = args[1];
+  else if (args.length === 1) raw = args[0];
+  else return null;
+  const value = Number(raw);
+  return isFinite(value) ? value : null;
+}
+
+function queueMixerState(): void {
+  if (mixerDirty) return;
+  mixerDirty = true;
+  // One frame is quick enough for a fader and bounds automated-volume chatter.
+  mixerTask.schedule(METER_INTERVAL_MS);
+}
+
+function onMixerTrackChange(
+  t: number,
+  field: 'active' | 'solo' | 'armed' | 'volume',
+  property: string,
+  args: unknown[],
+): void {
+  if (!metersWatching || !mixerState) return;
+  const value = mixerValue(args, property);
+  if (value === null) return;
+  const track = mixerState.tracks[t];
+  if (!track || track.t !== t) return;
+  if (field === 'volume') {
+    if (!track.volume) return;
+    const next = Math.max(track.volume.min, Math.min(track.volume.max, value));
+    if (track.volume.value === next) return;
+    track.volume.value = next;
+  } else {
+    const next = field === 'active' ? value !== 1 : value === 1;
+    if (track[field] === next) return;
+    track[field] = next;
+  }
+  queueMixerState();
+}
+
+function onMasterVolumeChange(args: unknown[]): void {
+  if (!metersWatching || !mixerState || !mixerState.masterVolume) return;
+  const value = mixerValue(args, 'value');
+  if (value === null) return;
+  const volume = mixerState.masterVolume;
+  const next = Math.max(volume.min, Math.min(volume.max, value));
+  if (volume.value === next) return;
+  volume.value = next;
+  queueMixerState();
+}
+
+function addMixerTrackObserver(
+  t: number,
+  field: 'active' | 'solo' | 'armed' | 'volume',
+  path: string,
+  property: string,
+): void {
+  const observer = new LiveAPI(
+    function (args: unknown[]) { onMixerTrackChange(t, field, property, args); },
+    path,
+  );
+  observer.property = property;
+  mixerObservers.push(observer);
+}
+
+function sendMixerState(): void {
+  if (!metersWatching || !mixerState) return;
+  const key = JSON.stringify(mixerState);
+  if (key === lastMixerKey) return;
+  lastMixerKey = key;
+  outlet(0, 'mixer_state', encodeMaxAtom(mixerState));
+}
+
+var mixerTask = new Task(function () {
+  mixerDirty = false;
+  sendMixerState();
+});
+
+function startMixerObservers(trackCount: number): void {
+  mixerState = readMixerState();
+  for (let t = 0; t < trackCount; t++) {
+    const state = mixerState.tracks[t];
+    if (!state || state.t !== t) continue;
+    const path = 'live_set tracks ' + t;
+    addMixerTrackObserver(t, 'active', path, 'mute');
+    addMixerTrackObserver(t, 'solo', path, 'solo');
+    if (state.canArm) addMixerTrackObserver(t, 'armed', path, 'arm');
+    if (state.volume) {
+      addMixerTrackObserver(t, 'volume', path + ' mixer_device volume', 'value');
+    }
+  }
+  if (mixerState.masterVolume) {
+    const master = new LiveAPI(
+      onMasterVolumeChange,
+      'live_set master_track mixer_device volume',
+    );
+    master.property = 'value';
+    mixerObservers.push(master);
+  }
+  sendMixerState();
+}
+
+function refreshMixerTarget(target: BSV.MixerTarget): void {
+  if (!mixerState) return;
+  if (target.kind === 'master') {
+    mixerState.masterVolume = readMixerVolume('live_set master_track mixer_device volume');
+  } else {
+    const state = readMixerTrack(target.t);
+    if (state) mixerState.tracks[target.t] = state;
+  }
+  queueMixerState();
+}
+
+function set_mixer(encoded: unknown): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  const value = decodeMaxAtom(encoded);
+  if (!value || typeof value !== 'object') return fail(-1, 'malformed mixer write');
+  const source = value as { target?: BSV.MixerTarget; patch?: BSV.MixerPatch };
+  const target = source.target;
+  const patch = source.patch;
+  const has = Object.prototype.hasOwnProperty;
+  if (!target || (target.kind !== 'track' && target.kind !== 'master')) {
+    return fail(-1, 'invalid mixer target');
+  }
+  if (!patch || typeof patch !== 'object') return fail(-1, 'mixer patch is missing');
+  if (has.call(patch, 'active') && typeof patch.active !== 'boolean') {
+    return fail(-1, 'active must be boolean');
+  }
+  if (has.call(patch, 'solo') && typeof patch.solo !== 'boolean') {
+    return fail(-1, 'solo must be boolean');
+  }
+  if (has.call(patch, 'armed') && typeof patch.armed !== 'boolean') {
+    return fail(-1, 'armed must be boolean');
+  }
+  const volume = has.call(patch, 'volume') ? Number(patch.volume) : undefined;
+  if (volume !== undefined && (!isFinite(volume) || volume < 0 || volume > 1)) {
+    return fail(-1, 'volume must be 0–1');
+  }
+  const hasTrackField =
+    has.call(patch, 'active') || has.call(patch, 'solo') || has.call(patch, 'armed');
+  if (!hasTrackField && volume === undefined) return fail(-1, 'mixer patch is empty');
+  if (target.kind === 'master' && hasTrackField) {
+    return fail(-1, 'Master exposes volume only');
+  }
+
+  try {
+    const base = target.kind === 'master' ? 'live_set master_track' : 'live_set tracks ' + target.t;
+    let track: LiveAPI | null = null;
+    if (target.kind === 'track') {
+      const count = at('live_set').getcount('tracks');
+      if (
+        !isFinite(target.t) || Math.floor(target.t) !== target.t ||
+        target.t < 0 || target.t >= count
+      ) {
+        return fail(-1, 'invalid mixer track');
+      }
+      track = at(base);
+      if (!exists(track)) return fail(-1, 'mixer track did not resolve');
+      if (has.call(patch, 'armed') && !gbool(track, 'can_be_armed')) {
+        return fail(-1, 'track ' + target.t + ' cannot be armed');
+      }
+    }
+
+    let volumeState: BSV.MixerVolumeState | null = null;
+    if (volume !== undefined) {
+      volumeState = readMixerVolume(base + ' mixer_device volume');
+      if (!volumeState) return fail(-1, 'mixer volume did not resolve');
+      if (!volumeState.enabled) return fail(-1, 'mixer volume is not enabled');
+      if (volume < volumeState.min || volume > volumeState.max) {
+        return fail(-1, 'volume is outside the parameter range');
+      }
+    }
+
+    // Every field is valid before the first write, so a malformed patch cannot
+    // land its early fields and fail halfway through the strip.
+    if (target.kind === 'track') {
+      if (has.call(patch, 'active')) at(base).set('mute', patch.active ? 0 : 1);
+      if (has.call(patch, 'solo')) at(base).set('solo', patch.solo ? 1 : 0);
+      if (has.call(patch, 'armed')) at(base).set('arm', patch.armed ? 1 : 0);
+    }
+    if (volume !== undefined) at(base + ' mixer_device volume').set('value', volume);
+    // An unchanged write may not notify. Read back the one target regardless.
+    refreshMixerTarget(target);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function clearMixerObservers(): void {
+  mixerTask.cancel();
+  mixerDirty = false;
+  lastMixerKey = '';
+  mixerState = null;
+  for (let i = 0; i < mixerObservers.length; i++) {
+    try {
+      mixerObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  mixerObservers = [];
+}
+
 // --- output meters ----------------------------------------------------
 // Audio-output tracks use Live's momentary left/right peaks, combined to the
 // louder channel. `output_meter_level` has a one-second hold and visibly lags a
@@ -2120,6 +2324,15 @@ function watch_meters(on: number): void {
       meterObservers.length = masterObserverStart;
       fail(-1, 'master meter unavailable: ' + describe(e));
     }
+    // Controls are a sibling stream to levels, but share the panel's lifetime.
+    // Isolate them so one undocumented runtime atom shape cannot cost the
+    // already-working output meters.
+    try {
+      startMixerObservers(trackCount);
+    } catch (e) {
+      clearMixerObservers();
+      fail(-1, 'mixer controls unavailable: ' + describe(e));
+    }
     sendMeterLevels();
     meterTask.repeat();
   } catch (e) {
@@ -2133,6 +2346,7 @@ function clearMeterObservers(): void {
   // being torn down must not schedule one last batch after watching is off.
   metersWatching = false;
   meterTask.cancel();
+  clearMixerObservers();
   meterLevels = [];
   meterLeft = [];
   meterRight = [];

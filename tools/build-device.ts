@@ -249,7 +249,15 @@ comment('Session Bridge — Live Object Model over WebSocket', [20, 14, 420, 20]
 });
 
 const thisdevice = obj('live.thisdevice', [20, 58, 110, 22], 1, 3);
-const initMsg = msg('init', [20, 90, 40, 22]);
+// `lom.js` can autowatch-reload without the device reloading. Remember outside
+// the script whether live.thisdevice has completed once, then let lom.js's
+// private `boot` signal replay init only when that is safe. `t b b` fires
+// right-to-left: set the latch first, then send the initial init.
+const initTrigger = obj('t b b', [20, 90, 48, 22], 1, 2);
+const initMsg = msg('init', [20, 122, 40, 22]);
+const markInitialized = msg('1', [76, 122, 30, 22]);
+const initialized = obj('i 0', [700, 286, 36, 22], 2, 1);
+const selectInitialized = obj('sel 1', [746, 286, 44, 22], 1, 2);
 
 const rToNode = obj('r ---bsv-to-node', [20, 130, 130, 22], 0, 1);
 const nodeScript = obj('node.script bridge.js @autostart 1 @watch 1', [20, 164, 300, 22], 1, 2);
@@ -264,7 +272,9 @@ const routeStatus = obj(
 );
 const deferlow = obj('deferlow', [440, 124, 70, 22], 1, 1);
 const v8 = obj('v8 lom.js', [440, 156, 100, 22], 1, 1);
-const sToNode = obj('s ---bsv-to-node', [440, 190, 130, 22], 1, 0);
+// `boot` is patcher-private. Everything else continues to Node unchanged.
+const routeV8Boot = obj('route boot', [440, 190, 76, 22], 1, 2);
+const sToNode = obj('s ---bsv-to-node', [530, 190, 130, 22], 1, 0);
 
 // One opaque, versioned JSON blob encoded as a base64url symbol. Parameter
 // type 3 is Max for Live's Blob type; parameter_invisible makes it Stored Only,
@@ -336,7 +346,10 @@ comment('audio passthrough — device is inert on the signal path', [96, 316, 34
 });
 
 // --- wiring -----------------------------------------------------------
-connect(thisdevice, 0, initMsg, 0);
+connect(thisdevice, 0, initTrigger, 0);
+connect(initTrigger, 1, markInitialized, 0);
+connect(markInitialized, 0, initialized, 1);
+connect(initTrigger, 0, initMsg, 0);
 connect(initMsg, 0, sToLom, 0);
 connect(nodeScript, 0, sToLom, 0);
 connect(rToNode, 0, nodeScript, 0);
@@ -359,7 +372,11 @@ connect(msgOne, 0, status, 0);
 connect(fmtMany, 0, status, 0);
 
 connect(deferlow, 0, v8, 0);
-connect(v8, 0, sToNode, 0);
+connect(v8, 0, routeV8Boot, 0);
+connect(routeV8Boot, 0, initialized, 0);
+connect(initialized, 0, selectInitialized, 0);
+connect(selectInitialized, 0, initMsg, 0);
+connect(routeV8Boot, 1, sToNode, 0);
 connect(deviceState, 0, prependDeviceState, 0);
 connect(prependDeviceState, 0, sToNode, 0);
 
@@ -399,7 +416,9 @@ comment('Push song browser — see plan; unverified against real hardware', [20,
 });
 
 // Dispatches an incoming `push_shortname <i> <text>` (routed here from
-// routeStatus above) to pool position i's `parameter_shortname`.
+// routeStatus above) to pool position i's parameter short name. The saved
+// patcher metadata key is `parameter_shortname`, but Max's runtime parameter-
+// inspector message has a leading underscore: `_parameter_shortname`.
 const dispatchIndex = obj(
   `route ${Array.from({ length: POOL_SIZE }, (_, i) => i).join(' ')}`,
   [700, 536, 90, 22],
@@ -467,7 +486,7 @@ for (let i = 0; i < POOL_SIZE; i++) {
   connect(resetMsg, 0, numbox, 0);
 
   // Incoming: bridge.ts naming this position's song.
-  const prependShort = obj('prepend parameter_shortname', [700, y, 150, 22], 1, 1);
+  const prependShort = obj('prepend _parameter_shortname', [700, y, 150, 22], 1, 1);
   connect(dispatchIndex, i, prependShort, 0);
   connect(prependShort, 0, numbox, 0);
 }

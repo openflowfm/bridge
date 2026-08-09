@@ -116,7 +116,7 @@ alongside the `.amxd` so you can open the same patch in Max to debug.
 ### Patch topology
 
 ```
-[live.thisdevice] ─> [init(  ─────────────> [s ---bsv-to-lom]
+[live.thisdevice] ─> [initialized latch] ─> [init( ─> [s ---bsv-to-lom]
 [node.script] out0 ──────────────────────-> [s ---bsv-to-lom]
 
 [r ---bsv-to-lom] ─> [route status device_state_get device_state_set]
@@ -127,7 +127,8 @@ alongside the `.amxd` so you can open the same patch in Max to debug.
                        ├─ state get/set > [pattr bsv-state]         └─> status text
                        └─ rest ────────> [deferlow] ─> [v8 lom.js]
 [pattr bsv-state] ─> [prepend device_state] ─> [s ---bsv-to-node]
-[v8 lom.js] ────────────────────────────────────────> [s ---bsv-to-node]
+[v8 lom.js] ─> [route boot] ─┬─ rest ──────────────> [s ---bsv-to-node]
+                             └─ boot + initialized ─> [init(
 
 [r ---bsv-to-node] ─> [node.script] in0
 
@@ -144,6 +145,11 @@ Notes that matter if you edit this:
   stack.
 - **`live.thisdevice` fires `init`** — LiveAPI is unsafe before the device is fully
   loaded.
+- **The patcher remembers that initialization outside `lom.js`.** Autowatch recompiles
+  reset every script global, including `deviceReady`, without reloading the device or
+  retriggering `live.thisdevice`. On script load `lom.js` emits a private `boot`; once
+  the patcher latch says `live.thisdevice` has completed, that signal replays `init`.
+  Before the first completion the signal is ignored, preserving the LiveAPI safety gate.
 - **The route peels off device state as well as status.** State travels directly
   between Node and the parameter-enabled pattr; it is not part of the Live Object Model.
 - **The Status line is one integer on the wire, spelled here.** Node sends the number
