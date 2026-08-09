@@ -7,14 +7,13 @@ these execute straight from source.
 amxd.ts                      pack / unpack / inspect .amxd containers  (library + CLI)
 build-bridge.ts              bundles bridge.js — ws and the built UI inlined
 build-device.ts              generates the patcher and packs the device
-lom-reference.ts             regenerates bridge/LOM.md
-lom-reference.preamble.md    the hand-written half of bridge/LOM.md
+lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
 ```
 
 ```sh
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
-npm run build:lom           # writes bridge/LOM.md
+npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined files
@@ -31,11 +30,18 @@ no enums, no runtime `namespace`, no decorators.
 
 ## The LOM reference
 
-`lom-reference.ts` scrapes Cycling '74's LOM page into [`bridge/LOM.md`](../bridge/LOM.md),
-splicing in `lom-reference.preamble.md` above the generated tables. Run it after a Live
-upgrade. The download is cached in `node_modules/.cache/lom.html`; delete that to refetch.
+`lom-reference.ts` scrapes Cycling '74's LOM page into
+`node_modules/.cache/lom-scraped.md`. Run it after a Live upgrade, then diff it against
+[`bridge/LOM.md`](../bridge/LOM.md) and merge what changed. The download is cached in
+`node_modules/.cache/lom.html`; delete that to refetch.
 
-Two things about it are deliberate:
+**It does not write `bridge/LOM.md`, and must not be changed to.** That file was
+generated once and has been hand-maintained since — it carries the observer-write
+prohibition, the session-ring dead end and the mixer paths this app uses, none of which
+are on the page. Regenerating over it deleted 126 lines of that in a single command,
+which is why the output goes to a scratch path now and a human does the merge.
+
+Three things about it are deliberate:
 
 - **It parses the page's `liveapi_*` class names, not flattened text.** Once the tags
   are gone a function name and one of its parameter names are the same shape, and a
@@ -45,6 +51,12 @@ Two things about it are deliberate:
   functions it contains via those same class names, so the parser counts them and
   throws if the emitted total disagrees. A reference that silently drops members is
   worse than no reference, because you'd trust it.
+- **A description runs to the next structural boundary, not to the first `</p>`.**
+  Where a description continues into a bulleted list the page emits `…</p><ul><li>…` —
+  the list is a *sibling* that closes the paragraph — so bounding on `</p>` drops every
+  bullet. That silently cost `add_warp_marker` all three of its constraints, including
+  the `[5, 999]` BPM limit on the resulting segments. `<li>` renders as `• ` so the list
+  survives being flattened into a table cell.
 
 The page is pinned to **Live 12.1** and we run 12.4.3, so it is not the last word.
 `LOM.md` records what Live's own binary adds and contradicts; the recipe for checking a

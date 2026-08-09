@@ -1,7 +1,15 @@
 #!/usr/bin/env node
-// Regenerates bridge/LOM.md — the checked-in Live Object Model reference.
+// Scrapes Cycling '74's LOM page into a scratch file, to be diffed against the
+// checked-in bridge/LOM.md after a Live upgrade.
 //
-//   node --disable-warning=ExperimentalWarning tools/lom-reference.ts
+//   npm run dev:lom-scrape
+//
+// It does NOT write bridge/LOM.md, and must not be changed to. That file was
+// generator output once and stopped being it: it now carries findings that exist
+// in no source — that you cannot write to the LOM from inside an observer
+// callback, the session-ring dead end, the mixer paths this app actually uses —
+// which a regeneration would delete without saying so. This tool answers "what
+// did the upgrade change?"; a human merges the answer.
 //
 // Two sources, because neither is sufficient alone:
 //
@@ -25,7 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = path.join(root, 'bridge', 'LOM.md');
+const OUT = path.join(root, 'node_modules', '.cache', 'lom-scraped.md');
 const CACHE = path.join(root, 'node_modules', '.cache', 'lom.html');
 const URL_ = 'https://docs.cycling74.com/legacy/max8/vignettes/live_object_model';
 
@@ -58,6 +66,7 @@ async function source(): Promise<string> {
 const strip = (s: string): string =>
   s
     .replace(/<br\s*\/?>/g, '\n')
+    .replace(/<li[^>]*>/g, '\n• ')
     .replace(/<\/(p|div|li|h\d)>/g, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
@@ -94,14 +103,20 @@ function parse(raw: string): LomClass[] {
           name: one(new RegExp(`<h\\d[^>]*class="liveapi_${kind}_name"[^>]*>([\\s\\S]*?)</h\\d>`)),
           type: one(/<div class="type">([\s\S]*?)<\/div>/).replace(/^Type\s*/, ''),
           access: one(/<div class="access">([\s\S]*?)<\/div>/).replace(/^Access\s*/, ''),
-          desc: one(/<p class="description">([\s\S]*?)<\/p>/),
+          // NOT bounded by `</p>`. A description that continues into a bulleted
+          // list is serialised as `…</p><ul><li>…` — the list is a *sibling* that
+          // closes the paragraph, so stopping at the first `</p>` silently drops
+          // every bullet (this cost `add_warp_marker` its three constraints).
+          // The description is the last thing in a group, so run to the next
+          // structural boundary instead; no description contains a `<div>`.
+          desc: one(/<p class="description">([\s\S]*?)(?=<div class="|<h4|$)/),
         };
       }).filter((m) => m.name);
 
     const parsed: LomClass = {
       name,
       path: grab(/<h\d[^>]*class="path"[^>]*>([\s\S]*?)<\/h\d>/),
-      blurb: grab(/<p class="description">([\s\S]*?)<\/p>/),
+      blurb: grab(/<p class="description">([\s\S]*?)(?=<div class="|<h4|$)/),
       children: members('child'),
       properties: members('property'),
       functions: members('function'),
@@ -138,7 +153,10 @@ function render(objects: LomClass[]): string {
   const w = (s = '') => out.push(s);
   const by = (n: string) => objects.find((o) => o.name === n);
 
-  w(fs.readFileSync(path.join(root, 'tools', 'lom-reference.preamble.md'), 'utf8').trimEnd());
+  w('# Scraped LOM tables');
+  w();
+  w('Scratch output for diffing after a Live upgrade. The reference is');
+  w('[`bridge/LOM.md`](../../bridge/LOM.md), which is hand-maintained — merge changes there.');
   w();
 
   w('## Class index');
@@ -193,10 +211,14 @@ function render(objects: LomClass[]): string {
 }
 
 const objects = parse(await source());
+fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, render(objects));
 
 const n = (k: 'children' | 'properties' | 'functions') => objects.reduce((a, o) => a + o[k].length, 0);
+const rel = path.relative(root, OUT);
 console.log(
-  `bridge/LOM.md — ${objects.length} classes · ${n('children')} children · ` +
+  `${rel} — ${objects.length} classes · ${n('children')} children · ` +
   `${n('properties')} properties · ${n('functions')} functions`,
 );
+console.log(`\nbridge/LOM.md is hand-maintained and was not touched. Compare with:\n` +
+  `  git diff --no-index bridge/LOM.md ${rel}`);

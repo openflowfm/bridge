@@ -1,8 +1,13 @@
 # The Live Object Model
 
-Generated. Run `npm run build:lom` after a Live upgrade; edit
-[`tools/lom-reference.preamble.md`](../tools/lom-reference.preamble.md) for
-everything above the class index, and `tools/lom-reference.ts` for the tables.
+**Hand-maintained — edit this file directly.** It started as generator output and
+stopped being it: the notes below about undocumented members, the docs being wrong, and
+what the LOM lacks were all written here by hand, and exist in no other source.
+Regenerating over this file would delete them silently, so nothing regenerates it.
+
+After a Live upgrade, `npm run dev:lom-scrape` rescrapes Cycling '74's page to
+`node_modules/.cache/lom-scraped.md` and leaves this file alone; diff the two and merge
+what the upgrade changed. `git diff --no-index bridge/LOM.md node_modules/.cache/lom-scraped.md`
 
 A checked-in copy of the LOM, so that *"does Live expose X, and can we **write**
 it?"* is a lookup rather than an afternoon. Every expensive surprise this project has
@@ -647,7 +652,7 @@ Canonical path: `live_set tracks N clip_slots M clip`
 | function | notes |
 |---|---|
 | `add_new_notes` | Parameter: dictionary Key: "notes" [list of note specification dictionaries] Note specification dictionaries have the following keys: pitch: [int] the MIDI note number, 0...127, 60 is C3. start_time: [float] the note start time in beats of absolute clip time. duration: [float] the note length in beats. velocity (optional): [float] the note velocity, 0 ... 127 (100 by default). mute (optional): [bool] 1 = the note is deactivated (0 by default). probability (optional): [float] the chance that the note will be played: 1.0 = the note is always played 0.0 = the note is never played (1.0 by default). velocity_deviation (optional): [float] the range of velocity values at which the note can be played: 0.0 = no deviation; the note will always play at the velocity specified by the velocity property -127.0 to 127.0 = the note will be assigned a velocity value between velocity and velocity + velocity_deviation, inclusive; if the resulting range exceeds the limits of MIDI velocity (0 to 127), then it will be clamped within those limits (0.0 by default). release_velocity (optional): [float] the note release velocity (64 by default). Returns a list of note IDs of the added notes. For MIDI clips only. Available since Live 11.0. |
-| `add_warp_marker` | Only available for warped Audio Clips. Adds the specified warp marker, if possible. The warp marker is specified as a dict which can have a beat_time and a sample_time key, both associated with float values. The sample_time key may be omitted; in this case, Live will calculate the appropriate sample time to create a warp marker at the specified beat time without changing the Clip's playback timing, similar to what would happen if you were to double-click in the upper half of the Sample Display in Clip View. If sample_time is specified, certain limitations must be taken into account: |
+| `add_warp_marker` | Only available for warped Audio Clips. Adds the specified warp marker, if possible. The warp marker is specified as a dict which can have a beat_time and a sample_time key, both associated with float values. The sample_time key may be omitted; in this case, Live will calculate the appropriate sample time to create a warp marker at the specified beat time without changing the Clip's playback timing, similar to what would happen if you were to double-click in the upper half of the Sample Display in Clip View. If sample_time is specified, certain limitations must be taken into account: • The sample time must lie within the range [0, s], where s is the sample's length. The sample_length Clip property helps with this. • The sample time must lie between the left and right adjacents markers' respective sample times (this is a logical constraint). • Within these constraints, there are limitations on the resulting segments' BPM. The allowed BPM range is [5, 999]. |
 | `apply_note_modifications` | Parameter: dictionary Key: "notes" [list of note dictionaries] as returned from get_notes_extended. The list of note dictionaries passed to the function can be a subset of notes in the clip, but will be ignored if it contains any notes that are not present in the clip. For MIDI clips only. Available since Live 11.0. Replaces modifying notes with remove_notes followed by set_notes. |
 | `clear_all_envelopes` | Removes all automation in the clip. |
 | `clear_envelope` | Parameter: device_parameter [id] Removes the automation of the clip for the given parameter. |
