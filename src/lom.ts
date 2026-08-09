@@ -424,6 +424,7 @@ function snapshot(reqId: number): void {
     const set = at('live_set');
     const trackCount = set.getcount('tracks');
     const sceneCount = set.getcount('scenes');
+    const masterColor = readMasterColor();
 
     // group_track hands back the parent's LOM id, but everything downstream
     // addresses tracks by index, so keep an id -> index map to resolve them.
@@ -575,7 +576,7 @@ function snapshot(reqId: number): void {
 
     // Free here — the walk has just read every clip in the set — and it is what
     // lets a scoped re-read afterwards tell "nothing changed" from "changed".
-    seedDigests(trackCount, clips, scenes, tracks);
+    seedDigests(trackCount, clips, scenes, tracks, masterColor);
 
     const ms = tClips - t0;
     const payload: BSV.Snapshot = {
@@ -591,6 +592,7 @@ function snapshot(reqId: number): void {
         slotsScanned: slotsScanned,
       },
       tempo: gnum(at('live_set'), 'tempo'),
+      masterColor: masterColor,
       trackCount: trackCount,
       sceneCount: sceneCount,
       clipCount: clips.length,
@@ -2211,6 +2213,8 @@ var selDirty: { [t: string]: boolean } = {};
 /** Scene and track *rows* awaiting a re-read — names, colors, tempo. */
 var sceneDirty: { [s: string]: boolean } = {};
 var trackRowDirty: { [t: string]: boolean } = {};
+/** Master is outside Song.tracks, so its color has its own dirty bit. */
+var masterColorDirty = false;
 /** LOM id -> track index. Rebuilt whenever the set's structure changes. */
 var trackIndexById: { [id: string]: number } | null = null;
 /** LOM id -> scene index, on the same terms. Only the cursor observers need it. */
@@ -2303,6 +2307,26 @@ function readTrackRow(t: number): BSV.Track | null {
 }
 
 /**
+ * Live's Master color, isolated from the ordinary-track path.
+ *
+ * Master is documented as a Track at `Song.master_track`, with the same `color`
+ * property as ordinary tracks, but it is not part of `Song.tracks`. Returning
+ * null keeps a missing or runtime-rejected atom visible and harmless: the UI
+ * retains its neutral header instead of the entire snapshot failing.
+ */
+function readMasterColor(): number | null {
+  try {
+    const master = at('live_set master_track');
+    if (!exists(master)) return null;
+    const color = gnumOr(master, 'color', -1);
+    return color >= 0 ? color : null;
+  } catch (e) {
+    post('bsv master color unavailable: ' + describe(e) + '\n');
+    return null;
+  }
+}
+
+/**
  * Every clip in one track, read by path.
  *
  * Deliberately *not* the snapshot's id-addressed fast path. This reads one
@@ -2385,6 +2409,14 @@ function onCursorTrackEdit(): void {
   } catch (e) {
     fail(-1, e);
   }
+}
+
+/** Master was recolored in Live. It has no ordinary-track index to dirty. */
+function onMasterColorEdit(): void {
+  if (!selObservers.length) return;
+  masterColorDirty = true;
+  selTask.cancel();
+  selTask.schedule(SEL_DEBOUNCE_MS);
 }
 
 /** Attach one observer, or say why not. Never throws into a rebuild. */
@@ -2520,12 +2552,13 @@ function trackRowDigest(t: BSV.Track): string {
   return t.name + '|' + t.colorIndex + '|' + t.color + '|' + t.isFolded;
 }
 
-/** Seeded from a full walk, which has already read all three. One pass each. */
+/** Seeded from a full walk, which has already read all four sources. One pass each. */
 function seedDigests(
   trackCount: number,
   clips: BSV.Clip[],
   scenes: BSV.Scene[],
   tracks: BSV.Track[],
+  masterColor: number | null,
 ): void {
   const acc: { [t: string]: string[] } = {};
   for (let t = 0; t < trackCount; t++) acc[String(t)] = [];
@@ -2540,6 +2573,7 @@ function seedDigests(
   }
   for (let i = 0; i < scenes.length; i++) digests['s' + scenes[i].i] = sceneDigest(scenes[i]);
   for (let i = 0; i < tracks.length; i++) digests['t' + tracks[i].i] = trackRowDigest(tracks[i]);
+  digests.m = String(masterColor);
 }
 
 /** The dirty sets, as sorted indexes. */
@@ -2623,10 +2657,14 @@ function flushSelection(): void {
     const tracks = indexesOf(selDirty);
     const dirtyScenes = indexesOf(sceneDirty);
     const dirtyRows = indexesOf(trackRowDirty);
+    const dirtyMasterColor = masterColorDirty;
     selDirty = {};
     sceneDirty = {};
     trackRowDirty = {};
-    if (!tracks.length && !dirtyScenes.length && !dirtyRows.length) return;
+    masterColorDirty = false;
+    if (!tracks.length && !dirtyScenes.length && !dirtyRows.length && !dirtyMasterColor) {
+      return;
+    }
 
     const t0 = Date.now();
     const sceneCount = at('live_set').getcount('scenes');
@@ -2663,6 +2701,7 @@ function flushSelection(): void {
       const row = readTrackRow(dirtyRows[i]);
       if (row) trackRows.push(row);
     }
+    const masterColor = dirtyMasterColor ? readMasterColor() : undefined;
 
     // Nothing any client could see is different, so say nothing. Publishing an
     // identical delta would be harmless on its own; bumping `rev` for it is not,
@@ -2688,6 +2727,11 @@ function flushSelection(): void {
       fresh['t' + trackRows[i].i] = d;
       if (digests['t' + trackRows[i].i] !== d) moved = true;
     }
+    if (dirtyMasterColor) {
+      const d = String(masterColor);
+      fresh.m = d;
+      if (digests.m !== d) moved = true;
+    }
     if (!moved) return;
     for (const k in fresh) {
       if (Object.prototype.hasOwnProperty.call(fresh, k)) digests[k] = fresh[k];
@@ -2705,6 +2749,7 @@ function flushSelection(): void {
     // exactly the message it has always been.
     if (sceneRows.length) payload.sceneRows = sceneRows;
     if (trackRows.length) payload.trackRows = trackRows;
+    if (masterColor !== undefined) payload.masterColor = masterColor;
     publish(DELTA_DICT, payload);
     outlet(0, 'delta', DELTA_DICT);
   } catch (e) {
@@ -2723,6 +2768,20 @@ function watch_selection(on: number): void {
     const s = new LiveAPI(onSelectionChange, 'live_set view');
     s.property = 'selected_scene';
     selObservers = [t, s];
+
+    // Master is outside Song.tracks, so the cursor's ordinary-track observer
+    // cannot ever cover it. Keep this addition isolated: if the documented
+    // master path or atom shape fails in the embedded runtime, cursor following
+    // for every ordinary track still works.
+    try {
+      const master = new LiveAPI(onMasterColorEdit, 'live_set master_track');
+      if (exists(master)) {
+        master.property = 'color';
+        selObservers.push(master);
+      }
+    } catch (e) {
+      post('bsv master color observer unavailable: ' + describe(e) + '\n');
+    }
 
     // Seed from where the cursor is now rather than waiting to be told. An
     // observer on an object-valued property was not seen to fire on attach the
@@ -2757,6 +2816,7 @@ function clearSelObservers(): void {
   selDirty = {};
   sceneDirty = {};
   trackRowDirty = {};
+  masterColorDirty = false;
   selPrevTrack = -1;
   selTrackId = 0;
   selSceneId = 0;
@@ -2780,6 +2840,7 @@ function onStructureChange(): void {
   selDirty = {};
   sceneDirty = {};
   trackRowDirty = {};
+  masterColorDirty = false;
   selPrevTrack = -1;
   selTask.cancel();
   // The cursor observers are path-addressed, and a path silently re-points when

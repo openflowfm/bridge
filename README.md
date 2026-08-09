@@ -440,6 +440,12 @@ behaves the way its name suggests.
   `set_fold` checks `is_foldable` before writing it for the same reason. Folding is the
   one write here that isn't a set edit: it moves Live's own Session view, changes nothing
   about what plays, and deliberately isn't wrapped in an undo step.
+- **Master is a Track, but not one of `Song.tracks`.** Its RGB is read separately from
+  `live_set master_track color` into `Snapshot.masterColor`, and one fixed observer folds
+  later recolors into the ordinary snapshot delta. Both paths are isolated from the
+  established track walk: if the embedded runtime rejects the documented Master atom,
+  the field is `null`, the UI keeps its neutral Songs header, and ordinary track following
+  continues.
 - **A group track's clip slots are real slots.** They hold no clip, and
   `ClipSlot.fire()` on one fires every clip the group has in that scene — which is how
   the grid launches groups without a message of its own, since `playback clip` addresses
