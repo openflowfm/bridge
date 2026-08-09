@@ -14,6 +14,9 @@ import fs = require('node:fs');
 import os = require('node:os');
 import path = require('node:path');
 import { WebSocketServer, WebSocket } from 'ws';
+import { derive } from '../../core/src/derive';
+import { SCENE_PATTERNS } from '../../core/src/namePattern';
+import { canApplyDelta, mergeRows } from '../../core/src/snapshotDelta';
 
 const PORT = Number(process.env.BSV_PORT) || 17800;
 const HOST = '127.0.0.1';
@@ -231,7 +234,8 @@ function migrateLegacyDeviceState(): void {
 }
 
 interface Pending {
-  ws: WebSocket;
+  /** Absent for a request the bridge made of itself — see `trackInternal`. */
+  ws: WebSocket | undefined;
   type: BSV.RequestType;
   clientId?: number;
   started: number;
@@ -493,6 +497,90 @@ function rearmWatches(): void {
     if (watchers[kind].size > 0) Max.outlet(WATCH_MESSAGE[kind], 1);
   }
 }
+
+// --- Push song browser -------------------------------------------------
+//
+// Push's 8-encoder parameter strip shows any Live-visible parameter a
+// selected device defines, via `live.banks` — see the pool of hidden
+// parameters and the static bank definitions in `tools/build-device.ts`. The
+// song list has to be held here rather than only derived in the browser
+// (`useSongLayout`), because the point of the feature is jumping to a song
+// with no browser tab open at all.
+
+/** Two live.banks pages of eight positions each. Raise later; see the plan. */
+const POOL_SIZE = 16;
+
+/**
+ * A starting budget for a bank-strip label, not a verified one. Cycling '74's
+ * own generic `parameter_shortname` guidance is "5 to 7 characters" and isn't
+ * Push-3-specific — calibrate against real hardware before trusting this.
+ */
+const PUSH_LABEL_MAX = 7;
+
+interface PushSong {
+  name: string;
+  /** First scene carrying this song, ascending — what a jump lands on. */
+  scene: number;
+}
+
+let heldScenes: BSV.Scene[] = [];
+let heldRev = -1;
+let pushSongs: PushSong[] = [];
+
+/** Strip characters Max message syntax treats specially, then fit the budget. */
+function sanitizePushLabel(name: string): string {
+  const clean = name.replace(/[,;"]/g, '').replace(/\s+/g, ' ').trim();
+  return clean.length > PUSH_LABEL_MAX ? clean.slice(0, PUSH_LABEL_MAX) : clean;
+}
+
+/** Song `i` maps directly to bank position `i` — see `tools/build-device.ts`. */
+function refreshPushBankStrip(): void {
+  for (let i = 0; i < POOL_SIZE; i++) {
+    const song = pushSongs[i];
+    Max.outlet('push_shortname', i, song ? sanitizePushLabel(song.name) : '-');
+  }
+}
+
+/** Re-derive the song list from whatever scene rows are currently held. */
+function refreshPushSongs(scenes: readonly BSV.Scene[]): void {
+  pushSongs = derive(scenes, SCENE_PATTERNS)
+    .songs.map((s) => ({ name: s.name, scene: s.scenes[0] }))
+    .sort((a, b) => a.scene - b.scene)
+    .slice(0, POOL_SIZE);
+  refreshPushBankStrip();
+}
+
+/** Move Live's own Session View selection — the same op `selectScene` uses. */
+function selectSceneOnLive(scene: number): void {
+  Max.outlet('select_scene', scene);
+}
+
+/** A snapshot request with no client behind it — see `requestInternalSnapshot`. */
+function trackInternal(type: BSV.RequestType): number {
+  const reqId = nextReqId++;
+  pending.set(reqId, { ws: undefined, type, started: Date.now() });
+  return reqId;
+}
+
+/**
+ * Kick off a walk if nothing is already fetching one, so the Push song list
+ * populates even when no browser tab has ever connected. Coalesces onto an
+ * in-flight client-initiated walk the same way a second client's request
+ * would — `snapshot_done` recomputes the song list regardless of who asked.
+ */
+function requestInternalSnapshot(): void {
+  if (!lomReady || snapshotFlight) return;
+  const reqId = trackInternal('snapshot');
+  snapshotFlight = { reqId, joined: [] };
+  Max.outlet('snapshot', reqId);
+}
+
+// Routed around lom.ts, same as device_state_get/set — see tools/build-device.ts.
+Max.addHandler('push_pool', (i: number, value: number) => {
+  if (!value) return; // the patch resets itself to 0 after outletting this
+  const song = pushSongs[i];
+  if (song) selectSceneOnLive(song.scene);
+});
 
 async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
   switch (m.type) {
@@ -778,7 +866,7 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!Number.isInteger(scene) || scene < 0) {
         return send(ws, { type: 'error', id: m.id, message: 'invalid scene index' });
       }
-      Max.outlet('select_scene', scene);
+      selectSceneOnLive(scene);
       break;
     }
     case 'watchPlay':
@@ -860,6 +948,8 @@ Max.addHandler('ready', () => {
   rearmWatches();
   // Only needed when the pattr is empty and an old bsv.json may need importing.
   Max.outlet('set_info');
+  // Populates the Push song list even if no browser tab ever connects.
+  requestInternalSnapshot();
 });
 
 /**
@@ -890,6 +980,9 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   const t0 = Date.now();
   const data: BSV.Snapshot = await Max.getDict(dictName);
   const hostMs = Date.now() - t0;
+  heldScenes = data.scenes;
+  heldRev = data.rev;
+  refreshPushSongs(heldScenes);
   const t = data.timings;
   Max.post(
     `snapshot: ${data.clipCount} clips in ${data.ms}ms lom ` +
@@ -897,8 +990,12 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
       `+ ${dictMs}ms dict + ${hostMs}ms host`,
   );
   const event: BSV.Event = { type: 'snapshot', id: req?.clientId, dictMs, hostMs, data };
+  // `req` is always set (`pending` always held an entry) except on a stray or
+  // duplicate `snapshot_done`; a request this bridge made of itself (no `ws`,
+  // see `requestInternalSnapshot`) has already gotten what it needed above and
+  // broadcasting it again to every client would be a wasted duplicate.
   if (req?.ws) send(req.ws, event);
-  else broadcast(event);
+  else if (!req) broadcast(event);
   // Everyone who asked while this was running. Each needs the payload under its
   // own request id — that id is what resolves the waiter on the other end, so
   // one shared event object would answer exactly one of them.
@@ -947,6 +1044,7 @@ Max.addHandler('add_scenes_done', async (reqId: number, dictName: string, ms: nu
   // Every scene index at or below the insertion point changed. Other clients
   // must discard their snapshots before another click can address the old row.
   broadcast({ type: 'changed', kind: 'structure' });
+  requestInternalSnapshot();
 });
 
 Max.addHandler('move_progress', (reqId: number, done: number, total: number) => {
@@ -993,6 +1091,7 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
   // during the move — which had them walking a set that was halfway rearranged.
   // That burst is muted in `lom.ts` now, and this is the one event in its place.
   broadcast({ type: 'changed', kind: 'structure' });
+  requestInternalSnapshot();
 });
 
 Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
@@ -1017,6 +1116,22 @@ Max.addHandler('delta', async (dictName: string) => {
       `delta: ${data.clips.length} clip(s) across track(s) ` +
         `${data.clipScope.join(', ')} in ${data.ms}ms (rev ${data.prevRev} -> ${data.rev})`,
     );
+    // A rename is exactly this: `apply` broadcasts `changed: 'applied'`, not
+    // `'structure'`, so this delta is the only signal that scene names — and
+    // therefore the Push song list — may have changed. `rev` advances on
+    // every delta regardless of what it touched, so it's tracked whenever the
+    // check passes, not only on the deltas with scene rows to merge — else a
+    // clip-only delta between two scene-bearing ones would permanently strand
+    // `heldRev` one revision behind. A mismatch means a message was missed;
+    // the next full snapshot (`requestInternalSnapshot`'s triggers) recovers
+    // rather than merging against the wrong revision.
+    if (canApplyDelta(heldRev, data.prevRev)) {
+      heldRev = data.rev;
+      if (data.sceneRows) {
+        heldScenes = mergeRows(heldScenes, data.sceneRows);
+        refreshPushSongs(heldScenes);
+      }
+    }
     broadcast({ type: 'delta', data });
   } catch (e) {
     // A delta that can't be read is not worth failing a client over — the
@@ -1100,9 +1215,11 @@ Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
   const event: BSV.Event = { type: 'error', id: req?.clientId, message };
   // Untracked failures — a launch, a stop, an observer callback — have no
   // pending request to answer, and dropping them is how a silent bug hides.
-  // With no id, no waiter is rejected; the client just logs it.
+  // With no id, no waiter is rejected; the client just logs it. A request the
+  // bridge made of itself (no `ws`) has no one to tell either, but it isn't
+  // untracked, so it must not fall into the broadcast meant for that case.
   if (req?.ws) send(req.ws, event);
-  else broadcast(event);
+  else if (!req) broadcast(event);
   // A failed walk has to fail for everyone riding on it too, or they wait out
   // their request timeout on a walk that is already over — and the flight would
   // never clear, stranding every request after it as well.

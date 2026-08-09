@@ -5,9 +5,13 @@
     "moduleResolution": "Node",
     "moduleDetection": "auto",
     "types": ["node"],
-    "rootDir": "src",
-    "outDir": ".",
-    "sourceMap": false
+    "noEmit": true
   },
-  "files": ["src/bridge.ts", "types/max-api.d.ts", "../protocol/global.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "types/**/*.d.ts",
+    "../core/src/**/*.ts",
+    "../protocol/**/*.ts",
+    "../protocol/**/*.d.ts"
+  ]
 }

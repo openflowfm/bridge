@@ -257,10 +257,10 @@ const sToLom = obj('s ---bsv-to-lom', [20, 202, 120, 22], 1, 0);
 
 const rToLom = obj('r ---bsv-to-lom', [370, 58, 120, 22], 0, 1);
 const routeStatus = obj(
-  'route status device_state_get device_state_set',
+  'route status device_state_get device_state_set push_shortname',
   [370, 90, 300, 22],
   1,
-  4,
+  5,
 );
 const deferlow = obj('deferlow', [440, 124, 70, 22], 1, 1);
 const v8 = obj('v8 lom.js', [440, 156, 100, 22], 1, 1);
@@ -345,7 +345,9 @@ connect(rToLom, 0, routeStatus, 0);
 connect(routeStatus, 0, selCount, 0); // matched "status" -> the connection count
 connect(routeStatus, 1, deviceState, 0); // get -> bang -> current stored value
 connect(routeStatus, 2, deviceState, 0); // set -> new base64url symbol
-connect(routeStatus, 3, deferlow, 0); // everything else -> LOM
+// outlet 3 (push_shortname) is wired in the Push song browser section below,
+// where its destination is created; outlet 4 (everything else -> LOM) moved
+// down there too so both stay next to each other.
 
 connect(selCount, 0, msgWaiting, 0); // -1: LOM handshake outstanding
 connect(selCount, 1, msgNone, 0); //  0
@@ -370,6 +372,132 @@ connect(github, 0, msgGithub, 0);
 
 connect(pluginIn, 0, pluginOut, 0);
 connect(pluginIn, 1, pluginOut, 1);
+
+// ---------------------------------------------------------------------
+// Push song browser — a pool of hidden parameters live.banks can show on a
+// connected Push's 8-encoder strip, and the plumbing that connects them to
+// bridge.ts. Song *names* live entirely in bridge.ts and change with the
+// set; this patcher owns only the fixed structure below — POOL_SIZE
+// positions, wired once. See bridge/src/bridge.ts's "Push song browser"
+// section and the plan for how the halves fit together and what's still
+// unverified against real hardware — most load-bearingly, whether setting
+// `parameter_shortname` this way actually reaches Push's display without
+// reloading the device.
+//
+// Two banks of eight rather than one loop of arbitrary width: Push pages
+// between live.banks banks itself, and each page needs its own backing
+// parameters — see the plan. Raising POOL_SIZE is a constant change in both
+// this file and bridge.ts (kept as two literals, not a shared import — this
+// isn't wire protocol, it's internal to a channel that already bypasses it).
+// ---------------------------------------------------------------------
+
+const POOL_SIZE = 16;
+const BANK_SIZE = 8;
+
+comment('Push song browser — see plan; unverified against real hardware', [20, 536, 460, 20], {
+  fontsize: 10.0,
+});
+
+// Dispatches an incoming `push_shortname <i> <text>` (routed here from
+// routeStatus above) to pool position i's `parameter_shortname`.
+const dispatchIndex = obj(
+  `route ${Array.from({ length: POOL_SIZE }, (_, i) => i).join(' ')}`,
+  [700, 536, 90, 22],
+  1,
+  POOL_SIZE + 1,
+);
+connect(routeStatus, 3, dispatchIndex, 0); // push_shortname <i> <text>
+connect(routeStatus, 4, deferlow, 0); // everything else -> LOM
+
+const poolParams: Record<string, [string, string, number]> = {};
+
+for (let i = 0; i < POOL_SIZE; i++) {
+  const y = 560 + i * 26;
+  const longname = `bsv-push-${i}`;
+
+  // A real Live-visible parameter — that's what makes it addressable by
+  // live.banks (by name) and what makes Live route encoder turns to it. Range
+  // 0-1 rather than something wider: the goal is that the *first* detent of
+  // turning the encoder already reads as nonzero, not that the value means
+  // anything past that.
+  const numbox = box('live.numbox', null, [20, y, 50, 15], {
+    numinlets: 1,
+    numoutlets: 1,
+    outlettype: [''],
+    varname: longname,
+    saved_object_attributes: { parameter_enable: 1 },
+    saved_attribute_attributes: {
+      valueof: {
+        parameter_type: 1,
+        parameter_mmin: 0.0,
+        parameter_mmax: 1.0,
+        parameter_steps: 2,
+        parameter_initial_enable: 1,
+        parameter_initial: [0.0],
+        parameter_longname: longname,
+        // Overwritten at runtime by bridge.ts once songs are known — see the
+        // incoming `prependShort` wiring below. '-' is what an empty
+        // position (past the real song count) keeps showing.
+        parameter_shortname: '-',
+        parameter_annotation_name: `Push song ${i}`,
+        parameter_info:
+          "Set by bridge.ts as the set's songs change — not a value to set by hand.",
+        parameter_order: 1 + i,
+        parameter_linknames: 0,
+        parameter_modmode: 0,
+        parameter_defer: 0,
+        parameter_speedlim: 0.0,
+        parameter_unitstyle: 0,
+        parameter_units: '',
+      },
+    },
+  });
+  poolParams[numbox] = [longname, longname, 1 + i];
+
+  // Outgoing: any nonzero value — an encoder turn — is the jump signal.
+  // `set 0` resets the display without re-triggering the object's own
+  // outlet, which is what keeps this from re-firing itself in a loop.
+  const neq = obj('!= 0', [80, y, 36, 22], 1, 1);
+  const prependPool = obj(`prepend push_pool ${i}`, [126, y, 110, 22], 1, 1);
+  const resetMsg = msg('set 0', [246, y, 44, 22]);
+  connect(numbox, 0, neq, 0);
+  connect(neq, 0, prependPool, 0);
+  connect(prependPool, 0, sToNode, 0);
+  connect(neq, 0, resetMsg, 0);
+  connect(resetMsg, 0, numbox, 0);
+
+  // Incoming: bridge.ts naming this position's song.
+  const prependShort = obj('prepend parameter_shortname', [700, y, 150, 22], 1, 1);
+  connect(dispatchIndex, i, prependShort, 0);
+  connect(prependShort, 0, numbox, 0);
+}
+
+// Static and fired once at init — song *names* change constantly, but which
+// eight parameters occupy which bank never does, so there is nothing here
+// for bridge.ts to construct at runtime.
+comment('live.banks — two static pages, fired once at init', [
+  20,
+  560 + POOL_SIZE * 26 + 10,
+  300,
+  20,
+], { fontsize: 10.0 });
+const banksY = 560 + POOL_SIZE * 26 + 34;
+const banks = obj('live.banks', [20, banksY, 90, 22], 1, 1);
+const banksNewA = msg(
+  `new 0 "Songs A" ${Array.from({ length: BANK_SIZE }, (_, i) => `bsv-push-${i}`).join(' ')}`,
+  [130, banksY, 460, 22],
+);
+const banksNewB = msg(
+  `new 1 "Songs B" ${Array.from(
+    { length: BANK_SIZE },
+    (_, i) => `bsv-push-${BANK_SIZE + i}`,
+  ).join(' ')}`,
+  [130, banksY + 32, 460, 22],
+);
+connect(thisdevice, 0, banksNewA, 0);
+connect(thisdevice, 0, banksNewB, 0);
+connect(banksNewA, 0, banks, 0);
+connect(banksNewB, 0, banks, 0);
 
 // --- patcher ----------------------------------------------------------
 const patcher = {
@@ -419,6 +547,7 @@ const patcher = {
     // device, so there is nothing for the .als to save.
     parameters: {
       [deviceState]: ['bsv-state', 'bsv-state', 0],
+      ...poolParams,
     },
     dependency_cache: [],
     autosave: 0,
