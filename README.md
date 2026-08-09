@@ -118,13 +118,22 @@ This is the part that surprises people, and it's all forced by Max.
 **`bridge.ts` compiles to CommonJS**, because Node for Max injects `max-api` as a CJS
 module and runs the emitted file directly.
 
-Both emit into `bridge/` with `rootDir: "src"`. That's also why `bridge.ts` uses the
-global `BSV` namespace instead of importing `protocol/` — an import would pull a file
-outside `rootDir` and trip TS6059.
+`lom.ts` still emits into `bridge/` with `rootDir: "src"` — Max's `[v8]` loads
+`bridge/lom.js` directly, and it can never import anything regardless (see above).
+`bridge.ts` does not: it's bundled by esbuild instead — `tools/build-bridge.ts` for the
+shipped build, `tools/dev-bridge.ts` for the dev watch loop — specifically so it can
+import across the `core/` package boundary (the song list Push shows needs `derive()`).
+Bundling doesn't care where an import lives, which is what made that possible;
+`bridge/tsconfig.node.json` is typecheck-only now, and nothing asks `tsc` to emit
+`bridge.ts` at all. It still reads protocol types off the global `BSV` namespace rather
+than importing `protocol/` directly — nothing forces that anymore, it's just how it's
+always been done here, not a constraint left over from `rootDir`.
 
-Compiling into this folder *improves* the dev loop: `node.script @watch 1` and
-`autowatch = 1` watch the emitted `.js`, so a reload only fires on a successful
-compile.
+Compiling `lom.ts` into this folder *improves* the dev loop for that half:
+`autowatch = 1` watches the emitted `lom.js`, so `[v8]` only reloads on a successful
+compile. `bridge.ts`'s dev loop gets the same property from `tools/dev-bridge.ts`'s
+esbuild watcher — `node.script @watch 1` reloads only when it writes a new
+`bridge/bridge.js`, which only happens after a build that didn't error.
 
 ## Message protocol between the halves
 

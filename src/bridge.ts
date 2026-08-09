@@ -547,6 +547,13 @@ function refreshPushSongs(scenes: readonly BSV.Scene[]): void {
     .songs.map((s) => ({ name: s.name, scene: s.scenes[0] }))
     .sort((a, b) => a.scene - b.scene)
     .slice(0, POOL_SIZE);
+  // Confirms this half of the chain independent of Push hardware: if this
+  // never prints, the song list isn't the problem — the walk or the derive
+  // step is. See Options > Max > Open Max Window.
+  Max.post(
+    `push: ${pushSongs.length} song(s) on the bank strip` +
+      (pushSongs.length ? ` — ${pushSongs.map((s) => s.name).join(', ')}` : ''),
+  );
   refreshPushBankStrip();
 }
 
@@ -579,7 +586,15 @@ function requestInternalSnapshot(): void {
 Max.addHandler('push_pool', (i: number, value: number) => {
   if (!value) return; // the patch resets itself to 0 after outletting this
   const song = pushSongs[i];
-  if (song) selectSceneOnLive(song.scene);
+  // Confirms this half of the chain independent of whether the jump visibly
+  // did anything: if this never prints, the encoder press isn't reaching
+  // bridge.ts at all — the pool wiring or live.banks is the place to look.
+  if (song) {
+    Max.post(`push: position ${i} -> "${song.name}" (scene ${song.scene})`);
+    selectSceneOnLive(song.scene);
+  } else {
+    Max.post(`push: position ${i} fired with no song mapped there`);
+  }
 });
 
 async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
