@@ -579,7 +579,7 @@ nothing and the next snapshot reports the old value. Try it on a copy of a set f
 
 ## Device state
 
-Roles and the allowed-color subset live in one versioned JSON object. `bridge.ts`
+The default artist, roles and the allowed-color subset live in one versioned JSON object. `bridge.ts`
 encodes it as a base64url symbol and sends `device_state_set`; the generated patcher
 routes that around `lom.ts` into `pattr bsv-state`. The pattr is a Max for Live Blob
 parameter with `parameter_invisible: 1`, so it is Stored Only: Live writes it into the
@@ -590,9 +590,10 @@ may restore before `node.script` has installed its handlers, so relying on the i
 output would intermittently lose state. The patcher bangs pattr and sends the resulting
 symbol back as `device_state`.
 
-`saveRoles` and `saveAllowedColors` are granular messages even though the stored object
-is one blob. Two clients changing different fields cannot overwrite each other with
-stale whole-object copies; the bridge merges each change into its current state and
+`saveSetConfig` replaces the naming default and role definitions together because they
+are one form; `saveAllowedColors` remains granular because the recoloring workflow edits
+it elsewhere. Two clients changing those independent parts cannot overwrite each other
+with stale whole-object copies: the bridge merges each change into its current state and
 broadcasts the new object. A save request completes only after pattr echoes the exact
 base64url value; a broken route times out visibly instead of reporting false persistence.
 

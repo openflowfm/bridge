@@ -311,7 +311,7 @@ const deviceState = obj('pattr bsv-state', [370, 244, 110, 22], 1, 3, {
   },
 });
 const prependDeviceState = obj('prepend device_state', [500, 244, 150, 22], 1, 1);
-comment('stored in the Live Set — roles + allowed colors', [370, 274, 310, 20], {
+comment('stored in the Live Set — default artist, roles + allowed colors', [370, 274, 310, 20], {
   fontsize: 10.0,
 });
 

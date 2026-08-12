@@ -136,12 +136,20 @@ function cleanAllowedColors(value: unknown): number[] | null {
   )].sort((a, b) => a - b);
 }
 
+function cleanDefaultArtist(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
   if (!value || typeof value !== 'object' || (value as { version?: unknown }).version !== 1) {
     return null;
   }
-  const source = value as { roles?: unknown; allowedColors?: unknown };
-  const state: BSV.DeviceState = { version: 1, roles: cleanRoles(source.roles) };
+  const source = value as { defaultArtist?: unknown; roles?: unknown; allowedColors?: unknown };
+  const state: BSV.DeviceState = {
+    version: 1,
+    defaultArtist: cleanDefaultArtist(source.defaultArtist),
+    roles: cleanRoles(source.roles),
+  };
   if (Object.prototype.hasOwnProperty.call(source, 'allowedColors')) {
     state.allowedColors = cleanAllowedColors(source.allowedColors);
   }
@@ -193,7 +201,11 @@ interface DeviceStateWaiter {
 const deviceStateWaiters = new Map<string, DeviceStateWaiter[]>();
 
 function publishDeviceState(next: BSV.DeviceState): Promise<void> {
-  const normalized = normalizeDeviceState(next) ?? { version: 1, roles: [] };
+  const normalized = normalizeDeviceState(next) ?? {
+    version: 1,
+    defaultArtist: '',
+    roles: [],
+  };
   deviceState = normalized;
   deviceStateEncoded = encodeDeviceState(normalized);
   const encoded = deviceStateEncoded;
@@ -228,7 +240,7 @@ function migrateLegacyDeviceState(): void {
   needsLegacyState = false;
   // allowedColors is deliberately absent. The first connected UI migrates its
   // old localStorage value, where that browser-owned value can still be read.
-  void publishDeviceState({ version: 1, roles })
+  void publishDeviceState({ version: 1, defaultArtist: '', roles })
     .then(() => Max.post(`device state: migrated ${roles.length} role(s) into the Live Set`))
     .catch((e) => Max.post(`device state migration failed — ${describe(e)}`));
 }
@@ -770,20 +782,30 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     }
     // Device configuration is a Stored Only Max parameter. No LOM gate: it
     // belongs to this device instance and Live persists it with the .als.
-    case 'saveRoles': {
+    case 'saveSetConfig': {
       const roles = cleanRoles(m.roles);
+      const defaultArtist = cleanDefaultArtist(m.defaultArtist);
       await publishDeviceState({
-        ...(deviceState ?? { version: 1 as const, roles: [] }),
+        ...(deviceState ?? { version: 1 as const, defaultArtist: '', roles: [] }),
+        defaultArtist,
         roles,
       });
-      Max.post(`device state: ${roles.length} role(s) saved`);
-      send(ws, { type: 'rolesSaved', id: m.id, count: roles.length });
+      Max.post(
+        `device state: ${roles.length} role(s), ` +
+          `${defaultArtist === '' ? 'no default artist' : `default artist ${defaultArtist}`}`,
+      );
+      send(ws, {
+        type: 'setConfigSaved',
+        id: m.id,
+        defaultArtist,
+        roleCount: roles.length,
+      });
       break;
     }
     case 'saveAllowedColors': {
       const colors = cleanAllowedColors(m.colors);
       await publishDeviceState({
-        ...(deviceState ?? { version: 1 as const, roles: [] }),
+        ...(deviceState ?? { version: 1 as const, defaultArtist: '', roles: [] }),
         allowedColors: colors,
       });
       send(ws, { type: 'allowedColorsSaved', id: m.id, colors });
@@ -1006,6 +1028,11 @@ Max.addHandler('device_state', (...atoms: unknown[]) => {
   }
   Max.post(
     `device state: restored ${restored.roles.length} role(s)` +
+      ` · ${
+        restored.defaultArtist === ''
+          ? 'no default artist'
+          : `default artist ${restored.defaultArtist}`
+      }` +
       (restored.allowedColors === undefined
         ? ' · awaiting allowed-color migration'
         : ` · ${restored.allowedColors === null ? 'all' : restored.allowedColors.length} allowed color(s)`),
