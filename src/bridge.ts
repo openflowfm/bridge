@@ -468,6 +468,7 @@ const WATCH_MESSAGE = {
   selection: 'watch_selection',
   play: 'watch_play',
   meters: 'watch_meters',
+  status: 'watch_status',
   sends: 'watch_sends',
   transport: 'watch_transport',
 } as const;
@@ -479,6 +480,7 @@ const watchers: Record<WatchKind, Set<WebSocket>> = {
   selection: new Set(),
   play: new Set(),
   meters: new Set(),
+  status: new Set(),
   sends: new Set(),
   transport: new Set(),
 };
@@ -999,6 +1001,10 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'meters', m.on);
       break;
+    case 'watchStatus':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      setWatch(ws, 'status', m.on);
+      break;
     case 'watchSends':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'sends', m.on);
@@ -1300,6 +1306,40 @@ Max.addHandler('meter_levels', (...args: number[]) => {
     tracks.push({ t, level });
   }
   broadcast({ type: 'meterLevels', frame: { master, tracks } });
+});
+
+// Nine atoms per track that has a clip playing, and nothing at all for the rest
+// — see `clipStatusAtoms` in lom.ts. Flat atoms for the same reason play_state
+// uses them: this pushes many times a second, and a global dict name would race
+// itself. Every field is a plain number, so there is no punctuation to survive.
+const CLIP_STATUS_FIELDS = 9;
+
+Max.addHandler('clip_status', (...args: number[]) => {
+  const tracks: BSV.PlayingClip[] = [];
+  for (let i = 0; i + CLIP_STATUS_FIELDS <= args.length; i += CLIP_STATUS_FIELDS) {
+    const t = Number(args[i]);
+    const position = Number(args[i + 1]);
+    const loopStart = Number(args[i + 2]);
+    const loopEnd = Number(args[i + 3]);
+    // A track index that isn't one would land this frame's clip on some other
+    // column. Drop the entry rather than the frame: the rest of it is fine.
+    if (!Number.isInteger(t) || t < 0) continue;
+    if (!Number.isFinite(position) || !Number.isFinite(loopStart) || !Number.isFinite(loopEnd)) {
+      continue;
+    }
+    tracks.push({
+      t,
+      position,
+      loopStart,
+      loopEnd,
+      looping: Number(args[i + 4]) === 1,
+      recording: Number(args[i + 5]) === 1,
+      inSeconds: Number(args[i + 6]) === 1,
+      signatureNumerator: Number(args[i + 7]),
+      signatureDenominator: Number(args[i + 8]),
+    });
+  }
+  broadcast({ type: 'clipStatus', frame: { tracks } });
 });
 
 function mixerParameter(value: unknown): BSV.MixerParameterState | null | undefined {

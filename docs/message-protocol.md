@@ -47,6 +47,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `delta <dict>` | a partial re-read, pushed after a change in Live |
 | `play_state <isPlaying> <playing> <fired> <armed> …` | triples, one per track |
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
+| `clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording> <inSeconds> <sigNum> <sigDen> …` | nine atoms per *playing* track; silent tracks are absent |
 | `mixer_state <encodedState>` | complete cached mixer-control state |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `transport_state <encodedState>` | complete tempo, metronome, launch-quantization, Arrangement Record and scale state |
@@ -71,7 +72,7 @@ the number into words, so no string ever has to survive the crossing.
 
 ### Realtime numeric pushes use atoms, not Dicts
 
-`play_state` and `meter_levels` break the rule below on purpose, and the reason is worth
+`play_state`, `meter_levels` and `clip_status` break the rule below on purpose, and the reason is worth
 knowing before "fixing" it: **dict names are global.** A request/response payload like
 the snapshot is safe in `bsv_snapshot` because only one is ever in flight. Realtime
 pushes can arrive many times a second, so a dict would race itself, `v8` overwriting it
@@ -82,6 +83,25 @@ the case atoms handle safely. Meter observers update an in-device array independ
 roughly every 33ms, the entire array crosses as one coherent frame containing every
 track's and the master track's latest values. There is no queue of historical meter
 callbacks to drain. Clip names never are.
+
+`clip_status` is the same shape and the same reasoning, with one difference worth
+knowing: **it is polled, where everything else here is observed.** `Clip.playing_position`
+is observable, but the object that holds it is a different clip every time a different
+one starts — so an observer design means tearing down and rebuilding one observer per
+track on every scene launch, on Live's main thread, at the moment the set is busiest. A
+repeating `Task` at 50ms costs a fixed, predictable number of reads and nothing at all
+while the stop row is closed.
+
+The read count is kept down by splitting the clip's facts in two. Only the playhead and
+the recording flag can change without the *playing slot* changing, so those are read
+every tick and the loop markers, signature and beats-or-seconds unit are cached until
+Live reports a different slot in that track. A frame identical to the last one is
+dropped in `v8`, so a stopped set broadcasts nothing rather than the same empty frame
+twenty times a second.
+
+This is also the only place the device reads *clip* properties for the whole set, which
+the protocol rules otherwise forbid. It is affordable for the reason the ban exists: a
+track has at most one playing clip, so it costs per **track**, not per slot.
 
 Arrangement position is a separate three-integer `song_position` push. It comes from
 Live's `Song.get_current_beats_song_time`, so meter changes and Live's own bar numbering

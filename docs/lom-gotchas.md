@@ -96,6 +96,26 @@ behaves the way its name suggests.
   `strings -n 6 "/Applications/Ableton Live 12 Suite.app/Contents/MacOS/Live" | grep -n …`
 - **Clips have no stable id across sessions.** `LiveAPI.id` is a runtime handle.
   Within a session, address by `(track, scene)`.
+- **A clip's times are in beats *or* seconds, and nothing in the value says which.**
+  `playing_position`, `loop_start` and `loop_end` are in beats for MIDI and warped audio
+  clips and in **seconds** for unwarped audio. Reading one as the other doesn't fail — it
+  yields a loop phase quietly wrong by the tempo. Resolve it once from
+  `is_audio_clip && !warping` and carry the answer with the numbers; `clipStatusAtoms`
+  sends it as `inSeconds` for exactly this reason. `length` is worse: Live's own docstring
+  says it "makes no sense for unwarped audio clips", so the loop markers are what to
+  subtract rather than what to trust.
+- **`Clip.playing_position` is observable, and observing it is still the wrong move.**
+  The property notifies fine; the problem is that the object holding it is a *different
+  clip* every time a different one starts. Following it with observers means tearing down
+  and rebuilding one per track on every scene launch — on Live's main thread, at the
+  moment the set is busiest. `watch_status` polls a `Task` instead, which costs a fixed
+  read count and nothing while its panel is closed. This is the one place in `lom.ts`
+  where polling beats observing, and the shape of the object graph is why.
+- **Reading clip properties across the whole set is banned; reading the *playing* clip
+  isn't.** The rule against clip-addressed reads exists because per-slot costs
+  trackCount × sceneCount. A track has at most one playing clip, so anything keyed off
+  `playing_slot_index` costs per track — the same budget as the play-state watcher, for
+  data that would otherwise look forbidden.
 - **Play state is a track property, not a clip one.** `Track.playing_slot_index` (-1 for
   none) and `Track.fired_slot_index` (-1 for none, **-2 when the track's stop button is
   fired**) describe the entire grid in two properties per track. Watching them costs

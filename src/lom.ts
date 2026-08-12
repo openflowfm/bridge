@@ -19,7 +19,7 @@
 //      select_scene <scene> | set_fold <track> <0|1> | set_transport <encodedPatch>
 //      set_mixer <encodedTargetAndPatch>
 //      watch_play <0|1> | watch_meters <0|1> | watch_sends <0|1> | watch_transport <0|1>
-//      watch_selection <0|1> | ping | set_info
+//      watch_status <0|1> | watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | add_scenes_done <reqId> <dict> <ms>
@@ -31,6 +31,8 @@
 //      song_position <bar> <beat> <sixteenth>
 //      transport_state <encodedState>
 //      meter_levels <masterLevel> <track0> <level0> <track1> <level1> …
+//      clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording>
+//        <inSeconds> <sigNum> <sigDen> … (nine atoms per *playing* track)
 //      mixer_state <encodedState>
 //      pong
 
@@ -1964,6 +1966,139 @@ function clearPlayObservers(): void {
   playObservers = [];
 }
 
+// --- track status -----------------------------------------------------
+// What each track's stop-row status display shows: how far through a looping
+// clip it is, how long a one-shot has left, or how much of a recording exists.
+//
+// Clip-addressed, which everything else here avoids — and affordable for the
+// same reason the rest isn't. A track has at most one playing clip, so this
+// costs per *track* despite reading clip properties, where the grid's play
+// state would have cost two observers per *slot*.
+//
+// Polled rather than observed, which is the other departure. `playing_position`
+// is observable, but the object holding it changes every time a different clip
+// starts, so an observer design means tearing down and rebuilding one observer
+// per track on every scene launch — on Live's main thread, at the exact moment
+// the set is busiest. A repeating Task costs a fixed, predictable read count
+// and nothing at all while the stop row is closed.
+//
+// The reads are kept down by splitting the clip's facts in two. Only the
+// playhead and the recording flag can change without the playing slot changing,
+// so those are read every tick and the rest is cached until Live reports a
+// different slot in that track.
+
+/** 20 Hz. Fast enough for a smooth pie, half the read rate of the meters. */
+var STATUS_INTERVAL_MS = 50;
+
+var statusWatching = false;
+/** Which slot each track's cached clip facts were read from; -1 for none. */
+var statusSlots: number[] = [];
+/** loopStart, loopEnd, looping, inSeconds, sigNum, sigDen — per track, cached. */
+var statusFacts: number[][] = [];
+/** Last frame sent, so a stopped set doesn't broadcast the same nothing at 20 Hz. */
+var lastStatusKey = '';
+
+/**
+ * The facts about a playing clip that only a different clip can change.
+ *
+ * Unwarped audio is the one that matters beyond the loop markers: Live reports
+ * its position and markers in seconds where everything else is in beats, and
+ * `warping` exists only on audio clips.
+ */
+function clipFacts(path: string): number[] {
+  const clip = at(path);
+  const inSeconds =
+    gbool(clip, 'is_audio_clip') && !gbool(clip, 'warping') ? 1 : 0;
+  return [
+    gnumOr(clip, 'loop_start', 0),
+    gnumOr(clip, 'loop_end', 0),
+    gbool(clip, 'looping') ? 1 : 0,
+    inSeconds,
+    gnumOr(clip, 'signature_numerator', 4),
+    gnumOr(clip, 'signature_denominator', 4),
+  ];
+}
+
+function clipStatusAtoms(): unknown[] {
+  const trackCount = at('live_set').getcount('tracks');
+  const atoms: unknown[] = [];
+  for (let t = 0; t < trackCount; t++) {
+    // -1 is no Session clip and -2 is the stop button; neither is a clip to
+    // read. gnumOr rather than gnum so an unreadable property reads as "none"
+    // instead of as slot 0.
+    const slot = gnumOr(at('live_set tracks ' + t), 'playing_slot_index', -1);
+    if (slot < 0) {
+      statusSlots[t] = -1;
+      continue;
+    }
+    const path = 'live_set tracks ' + t + ' clip_slots ' + slot + ' clip';
+    if (statusSlots[t] !== slot || !statusFacts[t]) {
+      // A slot Live calls playing always holds a clip, but it can stop holding
+      // one between that read and this one. An empty cursor answers 0 for
+      // everything, which `trackStatus` reports as nothing rather than as a
+      // zero-length loop, so the frame stays honest without a second check.
+      statusFacts[t] = clipFacts(path);
+      statusSlots[t] = slot;
+    }
+    const clip = at(path);
+    const facts = statusFacts[t];
+    atoms.push(
+      t,
+      gnumOr(clip, 'playing_position', 0),
+      facts[0],
+      facts[1],
+      facts[2],
+      gbool(clip, 'is_recording') ? 1 : 0,
+      facts[3],
+      facts[4],
+      facts[5],
+    );
+  }
+  return atoms;
+}
+
+function sendClipStatus(): void {
+  if (!statusWatching) return;
+  try {
+    const atoms = clipStatusAtoms();
+    // A set with nothing playing is the resting state, and it would otherwise
+    // broadcast an identical empty frame twenty times a second to every client.
+    // Positions move constantly while anything sounds, so this only ever
+    // suppresses frames that carry no news.
+    const key = atoms.join(',');
+    if (key === lastStatusKey) return;
+    lastStatusKey = key;
+    outlet(0, 'clip_status', ...atoms);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+var statusTask = new Task(sendClipStatus);
+statusTask.interval = STATUS_INTERVAL_MS;
+
+function watch_status(on: number): void {
+  clearStatusWatch();
+  if (Number(on) !== 1) return;
+  if (!deviceReady) return fail(-1, 'device not ready');
+  statusWatching = true;
+  try {
+    sendClipStatus();
+    statusTask.repeat();
+  } catch (e) {
+    clearStatusWatch();
+    fail(-1, e);
+  }
+}
+
+function clearStatusWatch(): void {
+  statusWatching = false;
+  statusTask.cancel();
+  statusSlots = [];
+  statusFacts = [];
+  lastStatusKey = '';
+}
+
 // --- mixer controls ---------------------------------------------------
 // The meter panel is also the mixer panel. While it is open, Track.mute,
 // Track.solo, Track.arm and MixerDevice volume/panning/sends are observed and
@@ -3774,6 +3909,7 @@ function anything(): void {
 function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
+  clearStatusWatch();
   clearMeterObservers();
   clearTransportObservers();
   clearSelObservers();
