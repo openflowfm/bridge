@@ -161,7 +161,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `select_scene <scene>` | select an exact scene and reveal it in Live's Session View |
 | `set_transport <encodedPatch>` | set tempo, metronome, launch quantization or current scale controls as one patch |
-| `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm and/or volume on one mixer strip |
+| `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm, volume and/or pan on one mixer strip |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_transport <0\|1>` | install / remove the six fixed control-bar observers |
@@ -233,7 +233,8 @@ partial patch, keeping one operation for related control-bar settings rather tha
 message type per property.
 
 `mixer_state` also uses a punctuation-safe encoded JSON atom because its nested state has
-nullable volume parameters. Volume automation is coalesced to one push per display frame.
+nullable volume and pan parameters. Parameter automation is coalesced to one push per
+display frame.
 The property observers update the cached strip they belong to instead of re-reading all
 tracks, so automation cannot turn into a continuous LOM walk. `set_mixer` carries one
 patch for one strip in the other direction and reads that strip back even when an

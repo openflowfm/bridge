@@ -1934,27 +1934,45 @@ function clearPlayObservers(): void {
 
 // --- mixer controls ---------------------------------------------------
 // The meter panel is also the mixer panel. While it is open, Track.mute,
-// Track.solo, Track.arm and MixerDevice.volume are observed and reported as
+// Track.solo, Track.arm and MixerDevice volume/panning are observed and reported as
 // one coherent state. The observers update a cache from their callback atoms;
-// volume automation therefore costs one small push, not a full LOM walk at
+// parameter automation therefore costs one small push, not a full LOM walk at
 // every automation tick.
 
-function readMixerVolume(path: string): BSV.MixerVolumeState | null {
+function parameterDisplay(parameter: LiveAPI, value: number): string {
   try {
-    const volume = at(path);
-    if (!exists(volume)) return null;
-    const min = gnumOr(volume, 'min', 0);
-    const max = gnumOr(volume, 'max', 1);
-    const value = gnumOr(volume, 'value', min);
-    if (!isFinite(min) || !isFinite(max) || !isFinite(value) || min > max) return null;
+    const displayed = parameter.call('str_for_value', value);
+    if (displayed === undefined || displayed === null) return '';
+    if (Array.isArray(displayed)) return displayed.map(String).join(' ');
+    return String(displayed);
+  } catch (e) {
+    return '';
+  }
+}
+
+function readMixerParameter(path: string): BSV.MixerParameterState | null {
+  try {
+    const parameter = at(path);
+    if (!exists(parameter)) return null;
+    const min = gnumOr(parameter, 'min', 0);
+    const max = gnumOr(parameter, 'max', 1);
+    const value = gnumOr(parameter, 'value', min);
+    const defaultValue = gnumOr(parameter, 'default_value', value);
+    if (
+      !isFinite(min) || !isFinite(max) || !isFinite(value) ||
+      !isFinite(defaultValue) || min > max
+    ) return null;
+    const next = Math.max(min, Math.min(max, value));
     return {
-      value: Math.max(min, Math.min(max, value)),
+      value: next,
       min: min,
       max: max,
-      enabled: gbool(volume, 'is_enabled'),
+      defaultValue: Math.max(min, Math.min(max, defaultValue)),
+      display: parameterDisplay(parameter, next),
+      enabled: gbool(parameter, 'is_enabled'),
     };
   } catch (e) {
-    post('bsv mixer volume unavailable at ' + path + ': ' + describe(e) + '\n');
+    post('bsv mixer parameter unavailable at ' + path + ': ' + describe(e) + '\n');
     return null;
   }
 }
@@ -1964,7 +1982,7 @@ function readMixerTrack(t: number): BSV.MixerTrackState | null {
   const track = at(path);
   if (!exists(track)) return null;
   const canArm = gbool(track, 'can_be_armed');
-  // Read every Track property before readMixerVolume moves the shared cursor.
+  // Read every Track property before readMixerParameter moves the shared cursor.
   const state: BSV.MixerTrackState = {
     t: t,
     active: !gbool(track, 'mute'),
@@ -1972,8 +1990,10 @@ function readMixerTrack(t: number): BSV.MixerTrackState | null {
     armed: canArm ? gbool(track, 'arm') : false,
     canArm: canArm,
     volume: null,
+    pan: null,
   };
-  state.volume = readMixerVolume(path + ' mixer_device volume');
+  state.volume = readMixerParameter(path + ' mixer_device volume');
+  state.pan = readMixerParameter(path + ' mixer_device panning');
   return state;
 }
 
@@ -1985,7 +2005,8 @@ function readMixerState(): BSV.MixerState {
     if (state) tracks.push(state);
   }
   return {
-    masterVolume: readMixerVolume('live_set master_track mixer_device volume'),
+    masterVolume: readMixerParameter('live_set master_track mixer_device volume'),
+    masterPan: readMixerParameter('live_set master_track mixer_device panning'),
     tracks: tracks,
   };
 }
@@ -2009,7 +2030,7 @@ function queueMixerState(): void {
 
 function onMixerTrackChange(
   t: number,
-  field: 'active' | 'solo' | 'armed' | 'volume',
+  field: 'active' | 'solo' | 'armed' | 'volume' | 'pan',
   property: string,
   args: unknown[],
 ): void {
@@ -2018,11 +2039,16 @@ function onMixerTrackChange(
   if (value === null) return;
   const track = mixerState.tracks[t];
   if (!track || track.t !== t) return;
-  if (field === 'volume') {
-    if (!track.volume) return;
-    const next = Math.max(track.volume.min, Math.min(track.volume.max, value));
-    if (track.volume.value === next) return;
-    track.volume.value = next;
+  if (field === 'volume' || field === 'pan') {
+    const parameter = track[field];
+    if (!parameter) return;
+    const next = Math.max(parameter.min, Math.min(parameter.max, value));
+    if (parameter.value === next) return;
+    parameter.value = next;
+    parameter.display = parameterDisplay(
+      at('live_set tracks ' + t + ' mixer_device ' + (field === 'volume' ? 'volume' : 'panning')),
+      next,
+    );
   } else {
     const next = field === 'active' ? value !== 1 : value === 1;
     if (track[field] === next) return;
@@ -2031,20 +2057,25 @@ function onMixerTrackChange(
   queueMixerState();
 }
 
-function onMasterVolumeChange(args: unknown[]): void {
-  if (!metersWatching || !mixerState || !mixerState.masterVolume) return;
+function onMasterParameterChange(field: 'masterVolume' | 'masterPan', args: unknown[]): void {
+  if (!metersWatching || !mixerState || !mixerState[field]) return;
   const value = mixerValue(args, 'value');
   if (value === null) return;
-  const volume = mixerState.masterVolume;
-  const next = Math.max(volume.min, Math.min(volume.max, value));
-  if (volume.value === next) return;
-  volume.value = next;
+  const parameter = mixerState[field];
+  if (!parameter) return;
+  const next = Math.max(parameter.min, Math.min(parameter.max, value));
+  if (parameter.value === next) return;
+  parameter.value = next;
+  parameter.display = parameterDisplay(
+    at('live_set master_track mixer_device ' + (field === 'masterVolume' ? 'volume' : 'panning')),
+    next,
+  );
   queueMixerState();
 }
 
 function addMixerTrackObserver(
   t: number,
-  field: 'active' | 'solo' | 'armed' | 'volume',
+  field: 'active' | 'solo' | 'armed' | 'volume' | 'pan',
   path: string,
   property: string,
 ): void {
@@ -2081,14 +2112,25 @@ function startMixerObservers(trackCount: number): void {
     if (state.volume) {
       addMixerTrackObserver(t, 'volume', path + ' mixer_device volume', 'value');
     }
+    if (state.pan) {
+      addMixerTrackObserver(t, 'pan', path + ' mixer_device panning', 'value');
+    }
   }
   if (mixerState.masterVolume) {
     const master = new LiveAPI(
-      onMasterVolumeChange,
+      function (args: unknown[]) { onMasterParameterChange('masterVolume', args); },
       'live_set master_track mixer_device volume',
     );
     master.property = 'value';
     mixerObservers.push(master);
+  }
+  if (mixerState.masterPan) {
+    const masterPan = new LiveAPI(
+      function (args: unknown[]) { onMasterParameterChange('masterPan', args); },
+      'live_set master_track mixer_device panning',
+    );
+    masterPan.property = 'value';
+    mixerObservers.push(masterPan);
   }
   sendMixerState();
 }
@@ -2096,7 +2138,8 @@ function startMixerObservers(trackCount: number): void {
 function refreshMixerTarget(target: BSV.MixerTarget): void {
   if (!mixerState) return;
   if (target.kind === 'master') {
-    mixerState.masterVolume = readMixerVolume('live_set master_track mixer_device volume');
+    mixerState.masterVolume = readMixerParameter('live_set master_track mixer_device volume');
+    mixerState.masterPan = readMixerParameter('live_set master_track mixer_device panning');
   } else {
     const state = readMixerTrack(target.t);
     if (state) mixerState.tracks[target.t] = state;
@@ -2126,14 +2169,16 @@ function set_mixer(encoded: unknown): void {
     return fail(-1, 'armed must be boolean');
   }
   const volume = has.call(patch, 'volume') ? Number(patch.volume) : undefined;
-  if (volume !== undefined && (!isFinite(volume) || volume < 0 || volume > 1)) {
-    return fail(-1, 'volume must be 0–1');
-  }
+  const pan = has.call(patch, 'pan') ? Number(patch.pan) : undefined;
+  if (volume !== undefined && !isFinite(volume)) return fail(-1, 'volume must be numeric');
+  if (pan !== undefined && !isFinite(pan)) return fail(-1, 'pan must be numeric');
   const hasTrackField =
     has.call(patch, 'active') || has.call(patch, 'solo') || has.call(patch, 'armed');
-  if (!hasTrackField && volume === undefined) return fail(-1, 'mixer patch is empty');
+  if (!hasTrackField && volume === undefined && pan === undefined) {
+    return fail(-1, 'mixer patch is empty');
+  }
   if (target.kind === 'master' && hasTrackField) {
-    return fail(-1, 'Master exposes volume only');
+    return fail(-1, 'Master exposes volume and pan only');
   }
 
   try {
@@ -2154,13 +2199,22 @@ function set_mixer(encoded: unknown): void {
       }
     }
 
-    let volumeState: BSV.MixerVolumeState | null = null;
+    let volumeState: BSV.MixerParameterState | null = null;
     if (volume !== undefined) {
-      volumeState = readMixerVolume(base + ' mixer_device volume');
+      volumeState = readMixerParameter(base + ' mixer_device volume');
       if (!volumeState) return fail(-1, 'mixer volume did not resolve');
       if (!volumeState.enabled) return fail(-1, 'mixer volume is not enabled');
       if (volume < volumeState.min || volume > volumeState.max) {
         return fail(-1, 'volume is outside the parameter range');
+      }
+    }
+    let panState: BSV.MixerParameterState | null = null;
+    if (pan !== undefined) {
+      panState = readMixerParameter(base + ' mixer_device panning');
+      if (!panState) return fail(-1, 'mixer pan did not resolve');
+      if (!panState.enabled) return fail(-1, 'mixer pan is not enabled');
+      if (pan < panState.min || pan > panState.max) {
+        return fail(-1, 'pan is outside the parameter range');
       }
     }
 
@@ -2172,6 +2226,7 @@ function set_mixer(encoded: unknown): void {
       if (has.call(patch, 'armed')) at(base).set('arm', patch.armed ? 1 : 0);
     }
     if (volume !== undefined) at(base + ' mixer_device volume').set('value', volume);
+    if (pan !== undefined) at(base + ' mixer_device panning').set('value', pan);
     // An unchanged write may not notify. Read back the one target regardless.
     refreshMixerTarget(target);
   } catch (e) {

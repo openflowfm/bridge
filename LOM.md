@@ -516,7 +516,7 @@ Canonical path: `live_set tracks N view`
 
 ## MixerDevice
 
-The per-track mixer. Better Session View currently reaches only `volume`; activator state
+The per-track mixer. Better Session View reaches `volume` and `panning`; activator state
 uses the equivalent inverse of `Track.mute`, while Solo and Arm use their direct Track
 properties above.
 
@@ -528,10 +528,11 @@ Canonical path: `live_set tracks N mixer_device`
 |---|---|---|---|
 | `track_activator` | DeviceParameter | get | Exposed by Live, but `lom.ts` uses observable `Track.mute` for this switch. |
 | `volume` | DeviceParameter | get | Track volume fader. Master uses `live_set master_track mixer_device volume`. |
+| `panning` | DeviceParameter | get | Stereo pan. Master uses `live_set master_track mixer_device panning`. |
 
 ## DeviceParameter
 
-The writable and automatable parameter object behind the volume fader. The canonical
+The writable and automatable parameter object behind volume and pan. The canonical
 device parameter path is `live_set tracks N devices M parameters L`; mixer parameters are
 also reachable as children of MixerDevice, including the volume paths above.
 
@@ -540,9 +541,16 @@ also reachable as children of MixerDevice, including the volume paths above.
 | property | type | access | notes |
 |---|---|---|---|
 | `value` | float | get, set, observe | Internal value between `min` and `max`; track and Master volume report 0–1. Linear to Live's GUI fader, not to displayed dB. |
+| `default_value` | float | get | Reset value used for double-click on the compact control. |
 | `min` | float | get | Lowest allowed internal value. |
 | `max` | float | get | Highest allowed internal value. |
 | `is_enabled` | bool | get | 0 when automation, a mapping, remote control or Live prevents direct edits. |
+
+### Functions used here
+
+| function | notes |
+|---|---|
+| `str_for_value` | Parameter: `value` [float]. Live's formatted representation, used so compact mixer readouts match its dB and pan text. |
 
 ## ClipSlot
 
