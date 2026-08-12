@@ -102,6 +102,11 @@ behaves the way its name suggests.
   `2 × trackCount` observers; the per-clip equivalent is two per *slot*, which is tens of
   thousands on a real set. There is no "scene is playing" property at all — the UI
   derives it from the tracks.
+- **`Track.arm` rides the play-state watcher**, one more observer on tracks that report
+  `can_be_armed`. It isn't play state, but it decides what an empty slot's button *does*
+  (below), so the grid needs it whether or not the mixer footer — which observes arm for
+  its own strip — happens to be open. Read through `can_be_armed` rather than directly:
+  `gbool` answers 0 both for a disarmed track and for a property that isn't there.
 - **A burst of observer callbacks is one event, not N.** Firing a scene changes
   `playing_slot_index` on every track at once. `onPlayChange` sets a dirty flag and
   schedules a `Task`, so 40 callbacks produce one `play_state`.
@@ -114,8 +119,10 @@ behaves the way its name suggests.
   real improvement for auditing a set you're labelling, and it's **unverified**, same
   class of unknown as `ClipSlot.fire`'s optional args below.
 - **`ClipSlot.fire()` on an empty slot triggers that slot's stop button** instead of
-  erroring, which is Live's documented behaviour and is why ⌘-clicking an empty cell
-  usefully stops the track.
+  erroring — *unless the track is armed*, in which case the same call starts recording
+  into that slot. Both are Live's documented behaviour for one call, which is why the
+  grid draws one button in every empty cell and changes only its glyph: ⌘-click and the
+  button reach the same `playback clip`, and Live picks the meaning from `Track.arm`.
 - **`ClipSlot.fire` takes optional args** — `(record_length, launch_quantization,
   force_legato)` — and `launch_quantization` overrides the song's global value for that
   one call. That's the non-destructive way to make audition instant, since writing

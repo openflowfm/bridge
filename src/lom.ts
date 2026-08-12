@@ -1802,19 +1802,24 @@ function clearTransportObservers(): void {
 }
 
 // --- play state -------------------------------------------------------
-// Which slot is playing and which is blinking, per track.
+// Which slot is playing, which is blinking, and whether the track is armed.
 //
-// Per-track, not per-clip. Track.playing_slot_index and fired_slot_index cover
-// the entire grid in two properties each, so watching the whole set costs
-// 2 × trackCount observers. Per-clip observers would be 2 per slot — tens of
-// thousands on a real set, which is exactly the chatty design the protocol
+// Per-track, not per-clip. Track.playing_slot_index, fired_slot_index and arm
+// cover the entire grid in three properties each, so watching the whole set
+// costs 3 × trackCount observers. Per-clip observers would be 2 per slot — tens
+// of thousands on a real set, which is exactly the chatty design the protocol
 // rules exist to prevent.
+//
+// Arm is here and not only in the mixer's own watcher because it decides what
+// every *empty* cell in the grid does: ClipSlot.fire() triggers that slot's
+// stop button on an unarmed track and starts recording on an armed one. The
+// mixer is observed only while its footer is open; the grid is never closed.
 //
 // The report goes out as message atoms rather than a Dict, which is the
 // opposite of the rule for the snapshot, and deliberately: dict names are
 // global, so a push that can fire many times a second would race itself —
 // v8 overwriting bsv_playstate before Node had finished reading the previous
-// one. The payload is 1 + 2 × trackCount plain numbers with no punctuation in
+// one. The payload is 1 + 3 × trackCount plain numbers with no punctuation in
 // it, so atoms are safe here in a way clip names never are.
 
 function playStateAtoms(): unknown[] {
@@ -1827,6 +1832,11 @@ function playStateAtoms(): unknown[] {
     // and "scene 0 is playing" is a plausible-looking lie. -1 is "nothing".
     atoms.push(gnumOr(a, 'playing_slot_index', -1));
     atoms.push(gnumOr(a, 'fired_slot_index', -1));
+    // `arm` is documented "[not in return/master tracks]", and Song.tracks
+    // holds neither — but a track that reports can_be_armed = 0 has no arm to
+    // read, so gate on it rather than letting gbool answer 0 for a missing
+    // property and a disarmed one alike.
+    atoms.push(gbool(a, 'can_be_armed') && gbool(a, 'arm') ? 1 : 0);
   }
   return atoms;
 }
@@ -1918,6 +1928,15 @@ function watch_play(on: number): void {
       const f = new LiveAPI(onPlayChange, 'live_set tracks ' + t);
       f.property = 'fired_slot_index';
       playObservers.push(p, f);
+      // Arming a track changes what every empty cell in its column does, so it
+      // reports through the same push. Skipped where Live says the track has
+      // no arm at all, which keeps the observer count off group and any other
+      // unarmable track rather than attaching to a property that isn't there.
+      if (gbool(at('live_set tracks ' + t), 'can_be_armed')) {
+        const armObs = new LiveAPI(onPlayChange, 'live_set tracks ' + t);
+        armObs.property = 'arm';
+        playObservers.push(armObs);
+      }
     }
 
     // Seed it, so the UI shows the truth immediately rather than staying blank
