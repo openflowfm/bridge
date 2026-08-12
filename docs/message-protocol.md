@@ -24,12 +24,12 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `select_scene <scene>` | select an exact scene and reveal it in Live's Session View |
-| `set_transport <encodedPatch>` | set tempo, metronome, launch quantization or current scale controls as one patch |
+| `set_transport <encodedPatch>` | set tempo, metronome, launch quantization, Arrangement Record or current scale controls as one patch |
 | `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm, volume, pan and/or one indexed send on one mixer strip |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_sends <0\|1>` | add / remove the optional per-track send observers and return-track observer |
-| `watch_transport <0\|1>` | install / remove the six fixed control-bar observers |
+| `watch_transport <0\|1>` | install / remove the seven fixed control-bar observers |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
 | `ping` | |
 
@@ -49,7 +49,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `mixer_state <encodedState>` | complete cached mixer-control state |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
-| `transport_state <encodedState>` | complete tempo, metronome, launch-quantization and scale state |
+| `transport_state <encodedState>` | complete tempo, metronome, launch-quantization, Arrangement Record and scale state |
 | `err <reqId> <msg>` | |
 
 Two wire messages (`launch` and `stop`) collapse onto the single `playback` message with
@@ -88,9 +88,9 @@ Live's `Song.get_current_beats_song_time`, so meter changes and Live's own bar n
 stay authoritative. `current_song_time` may notify more often than the header can show;
 `lom.ts` drops repeated ticks and crosses to Node only when bar, beat or sixteenth changes.
 
-`transport_state` has one string (`scale_name`) mixed with five numbers/booleans, so it is
+`transport_state` has one string (`scale_name`) mixed with six numbers/booleans, so it is
 JSON percent-encoded into one punctuation-safe Max atom. That avoids both a racing global
-Dict and the atom splitting that would turn `Phrygian Dominant` into two arguments. Six
+Dict and the atom splitting that would turn `Phrygian Dominant` into two arguments. Seven
 fixed `Song` observers feed one coalesced full-state report; tempo is rounded to the two
 decimals the header can render and reports are limited to one per 50ms while automation
 is moving it. `set_transport` uses the same encoding in the other direction and accepts a

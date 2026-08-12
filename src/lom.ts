@@ -1643,9 +1643,10 @@ function set_fold(t: number, folded: number): void {
 }
 
 // --- control bar ------------------------------------------------------
-// Tempo, metronome, global clip-launch quantization and Live's current Scale
-// controls. Six fixed observers for the whole set, reported as one state so a
-// change made in Live and a change made here take the same path back to the UI.
+// Tempo, metronome, global clip-launch quantization, Arrangement Record and
+// Live's current Scale controls. Seven fixed observers for the whole set,
+// reported as one state so a change made in Live and a change made here take
+// the same path back to the UI.
 //
 // The encoded JSON is one Max-safe atom. Scale names contain spaces and Max
 // message punctuation is syntax, so sending the raw string would eventually
@@ -1659,6 +1660,7 @@ function readTransportState(): BSV.TransportState {
     tempo: Math.round(gnum(set, 'tempo') * 100) / 100,
     metronome: gbool(set, 'metronome'),
     clipTriggerQuantization: gnum(set, 'clip_trigger_quantization'),
+    recordMode: gbool(set, 'record_mode'),
     rootNote: gnum(set, 'root_note'),
     scaleName: gstr(set, 'scale_name'),
     scaleMode: gbool(set, 'scale_mode'),
@@ -1732,6 +1734,9 @@ function set_transport(encoded: unknown): void {
   if (has.call(patch, 'scaleMode') && typeof patch.scaleMode !== 'boolean') {
     return fail(-1, 'scale mode must be boolean');
   }
+  if (has.call(patch, 'recordMode') && typeof patch.recordMode !== 'boolean') {
+    return fail(-1, 'record mode must be boolean');
+  }
 
   try {
     const set = at('live_set');
@@ -1740,6 +1745,9 @@ function set_transport(encoded: unknown): void {
       set.set('metronome', patch.metronome ? 1 : 0);
     }
     if (quantization !== undefined) set.set('clip_trigger_quantization', quantization);
+    if (has.call(patch, 'recordMode')) {
+      set.set('record_mode', patch.recordMode ? 1 : 0);
+    }
     if (root !== undefined) set.set('root_note', root);
     if (name !== undefined) set.set('scale_name', name);
     if (has.call(patch, 'scaleMode')) {
@@ -1762,6 +1770,7 @@ function watch_transport(on: number): void {
       'tempo',
       'metronome',
       'clip_trigger_quantization',
+      'record_mode',
       'root_note',
       'scale_name',
       'scale_mode',

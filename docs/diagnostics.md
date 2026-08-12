@@ -108,9 +108,14 @@ anything. The name write landing while the color doesn't is the signature to loo
 it never happened. The check that costs nothing is to fire a scene after setting it — the
 song tempo should follow.
 
-**The new control-bar observer and writes are also unverified in Live.** All six members
+**The new control-bar observer and writes are also unverified in Live.** All seven members
 are documented `get, set, observe` on `Song`, and the bridge reports Live's readback rather
 than trusting the attempted patch. Still, `lom.ts` has no automated host coverage. Check
-tempo, metronome, clip-trigger quantization, root note, scale name and Scale Mode against
-Live's own Control Bar with the device loaded; a missing `transport_state` or an unchanged
-readback is the visible, harmless failure mode.
+tempo, metronome, clip-trigger quantization, Arrangement Record, root note, scale name and
+Scale Mode against Live's own Control Bar with the device loaded; a missing
+`transport_state` or an unchanged readback is the visible, harmless failure mode.
+
+`record_mode` is the one member of that set with a side effect beyond its own value:
+setting it to 1 while the song is rolling starts an Arrangement take immediately. That is
+Live's own behavior for the button, and it's why the header's control arms rather than
+records — nothing here calls it on the user's behalf.
