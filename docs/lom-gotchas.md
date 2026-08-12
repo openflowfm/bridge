@@ -72,7 +72,7 @@ behaves the way its name suggests.
   `live_set master_track color` into `Snapshot.masterColor`, and one fixed observer folds
   later recolors into the ordinary snapshot delta. Both paths are isolated from the
   established track walk: if the embedded runtime rejects the documented Master atom,
-  the field is `null`, the UI keeps its neutral Songs header, and ordinary track following
+  the field is `null`, the UI keeps a neutral Master header, and ordinary track following
   continues.
 - **A group track's clip slots are real slots.** They hold no clip, and
   `ClipSlot.fire()` on one fires every clip the group has in that scene — which is how
