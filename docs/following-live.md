@@ -156,7 +156,7 @@ M4L device, a remote script, and possibly undo.
 - **Scope-then-replace, never upsert.** The merge is `mergeTrackDelta` in `core/`, where
   it has tests. An upsert by `(t, s)` keeps a clip the user deleted, because a deleted
   clip has no incoming entry to overwrite it — and a clip moved *out* of a slot is a
-  deletion at the source. See [`../core/README.md`](../../core/README.md).
+  deletion at the source. See [`core/docs/snapshotDelta.md`](../../core/docs/snapshotDelta.md).
 - **A write in flight defers the flush** — `job`, `moveJob` **and `clipJob`**. Each is
   reconciled by the client from the batch or plan it sent, and a delta computed against a
   half-written set races that. `clipJob` was missing, and a clip drag is precisely the
