@@ -161,9 +161,10 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `select_scene <scene>` | select an exact scene and reveal it in Live's Session View |
 | `set_transport <encodedPatch>` | set tempo, metronome, launch quantization or current scale controls as one patch |
-| `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm, volume and/or pan on one mixer strip |
+| `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm, volume, pan and/or one indexed send on one mixer strip |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
+| `watch_sends <0\|1>` | add / remove the optional per-track send observers and return-track observer |
 | `watch_transport <0\|1>` | install / remove the six fixed control-bar observers |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
 | `ping` | |
@@ -233,8 +234,9 @@ partial patch, keeping one operation for related control-bar settings rather tha
 message type per property.
 
 `mixer_state` also uses a punctuation-safe encoded JSON atom because its nested state has
-nullable volume and pan parameters. Parameter automation is coalesced to one push per
-display frame.
+nullable volume, pan and send parameters. Parameter automation is coalesced to one push
+per display frame. Sends are indexed in the same order as `Song.return_tracks`; changing
+that list rebuilds the send portion of every cached strip.
 The property observers update the cached strip they belong to instead of re-reading all
 tracks, so automation cannot turn into a continuous LOM walk. `set_mixer` carries one
 patch for one strip in the other direction and reads that strip back even when an
@@ -318,12 +320,12 @@ the watch open forever.
 re-arms from that record when the LOM reports ready again after a device reload.
 
 **`on` is always forwarded and only `off` is edge-triggered**, which looks like a bug and
-isn't. `watch_play` and `watch_meters` install observers per *track* (and meters also on
-Master), so a client re-sends `on` to rebuild them when a snapshot finds a different track
-count; suppressing that because another client already held the watch would leave the
-observers addressing a set that no longer exists. Forwarding it costs nothing, because
-every `watch_*` handler in `lom.ts` clears before it installs. Sets rather than counters,
-so a client sending `on` twice doesn't need two `off`s to release.
+isn't. `watch_play`, `watch_meters` and `watch_sends` install observers per *track* (and
+meters also on Master), so a client re-sends `on` to rebuild them when a snapshot finds a
+different track count; suppressing that because another client already held the watch
+would leave the observers addressing a set that no longer exists. Forwarding it costs
+nothing, because every `watch_*` handler in `lom.ts` clears or rebuilds before it installs.
+Sets rather than counters, so a client sending `on` twice doesn't need two `off`s to release.
 
 **Not yet guaranteed.** Three things to fix before a second *kind* of client exists:
 

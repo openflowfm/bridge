@@ -18,7 +18,7 @@
 //      playback <verb> <i> <j>
 //      select_scene <scene> | set_fold <track> <0|1> | set_transport <encodedPatch>
 //      set_mixer <encodedTargetAndPatch>
-//      watch_play <0|1> | watch_meters <0|1> | watch_transport <0|1>
+//      watch_play <0|1> | watch_meters <0|1> | watch_sends <0|1> | watch_transport <0|1>
 //      watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
@@ -88,8 +88,10 @@ var cursorApi: LiveAPI | null = null;
 var observers: LiveAPI[] = [];
 var playObservers: LiveAPI[] = [];
 var meterObservers: LiveAPI[] = [];
-/** Activator, Solo, Arm and volume observers, alive only with the mixer panel. */
+/** Activator, Solo, Arm, volume, pan and send observers, alive only with the mixer panel. */
 var mixerObservers: LiveAPI[] = [];
+/** Return-track membership changes rebuild the send parameter list. */
+var mixerStructureObserver: LiveAPI | null = null;
 var transportObservers: LiveAPI[] = [];
 /** A burst of play-state callbacks is pending a single coalesced report. */
 var playDirty = false;
@@ -110,6 +112,8 @@ var masterMeterLevel = 0;
 var masterMeterLeft = 0;
 var masterMeterRight = 0;
 var metersWatching = false;
+/** Send parameters are the expensive optional section of the mixer watch. */
+var sendsWatching = false;
 /** Latest coherent control state; observer callbacks update this cache in place. */
 var mixerState: BSV.MixerState | null = null;
 var mixerDirty = false;
@@ -1934,8 +1938,8 @@ function clearPlayObservers(): void {
 
 // --- mixer controls ---------------------------------------------------
 // The meter panel is also the mixer panel. While it is open, Track.mute,
-// Track.solo, Track.arm and MixerDevice volume/panning are observed and reported as
-// one coherent state. The observers update a cache from their callback atoms;
+// Track.solo, Track.arm and MixerDevice volume/panning/sends are observed and
+// reported as one coherent state. The observers update a cache from their callback atoms;
 // parameter automation therefore costs one small push, not a full LOM walk at
 // every automation tick.
 
@@ -1977,7 +1981,7 @@ function readMixerParameter(path: string): BSV.MixerParameterState | null {
   }
 }
 
-function readMixerTrack(t: number): BSV.MixerTrackState | null {
+function readMixerTrack(t: number, sendCount: number): BSV.MixerTrackState | null {
   const path = 'live_set tracks ' + t;
   const track = at(path);
   if (!exists(track)) return null;
@@ -1991,20 +1995,35 @@ function readMixerTrack(t: number): BSV.MixerTrackState | null {
     canArm: canArm,
     volume: null,
     pan: null,
+    sends: [],
   };
   state.volume = readMixerParameter(path + ' mixer_device volume');
   state.pan = readMixerParameter(path + ' mixer_device panning');
+  for (let i = 0; i < sendCount; i++) {
+    state.sends.push(readMixerParameter(path + ' mixer_device sends ' + i));
+  }
   return state;
 }
 
 function readMixerState(): BSV.MixerState {
   const count = at('live_set').getcount('tracks');
+  // Sends are additive to the already-working strip. If an embedded runtime
+  // rejects this documented child list, preserve volume/pan with zero rows.
+  let sendCount = 0;
+  if (sendsWatching) {
+    try {
+      sendCount = at('live_set').getcount('return_tracks');
+    } catch (e) {
+      post('bsv mixer sends unavailable: ' + describe(e) + '\n');
+    }
+  }
   const tracks: BSV.MixerTrackState[] = [];
   for (let t = 0; t < count; t++) {
-    const state = readMixerTrack(t);
+    const state = readMixerTrack(t, sendCount);
     if (state) tracks.push(state);
   }
   return {
+    sendCount: sendCount,
     masterVolume: readMixerParameter('live_set master_track mixer_device volume'),
     masterPan: readMixerParameter('live_set master_track mixer_device panning'),
     tracks: tracks,
@@ -2057,6 +2076,24 @@ function onMixerTrackChange(
   queueMixerState();
 }
 
+function onMixerSendChange(t: number, index: number, args: unknown[]): void {
+  if (!metersWatching || !mixerState) return;
+  const value = mixerValue(args, 'value');
+  if (value === null) return;
+  const track = mixerState.tracks[t];
+  if (!track || track.t !== t) return;
+  const parameter = track.sends[index];
+  if (!parameter) return;
+  const next = Math.max(parameter.min, Math.min(parameter.max, value));
+  if (parameter.value === next) return;
+  parameter.value = next;
+  parameter.display = parameterDisplay(
+    at('live_set tracks ' + t + ' mixer_device sends ' + index),
+    next,
+  );
+  queueMixerState();
+}
+
 function onMasterParameterChange(field: 'masterVolume' | 'masterPan', args: unknown[]): void {
   if (!metersWatching || !mixerState || !mixerState[field]) return;
   const value = mixerValue(args, 'value');
@@ -2087,6 +2124,15 @@ function addMixerTrackObserver(
   mixerObservers.push(observer);
 }
 
+function addMixerSendObserver(t: number, index: number): void {
+  const observer = new LiveAPI(
+    function (args: unknown[]) { onMixerSendChange(t, index, args); },
+    'live_set tracks ' + t + ' mixer_device sends ' + index,
+  );
+  observer.property = 'value';
+  mixerObservers.push(observer);
+}
+
 function sendMixerState(): void {
   if (!metersWatching || !mixerState) return;
   const key = JSON.stringify(mixerState);
@@ -2100,7 +2146,47 @@ var mixerTask = new Task(function () {
   sendMixerState();
 });
 
-function startMixerObservers(trackCount: number): void {
+function clearMixerParameterObservers(): void {
+  for (let i = 0; i < mixerObservers.length; i++) {
+    try {
+      mixerObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  mixerObservers = [];
+}
+
+function clearMixerStructureObserver(): void {
+  if (!mixerStructureObserver) return;
+  try {
+    mixerStructureObserver.property = '';
+  } catch (e) {
+    /* object may already be gone */
+  }
+  mixerStructureObserver = null;
+}
+
+var mixerStructureTask = new Task(function () {
+  if (!metersWatching || !mixerState) return;
+  try {
+    const sendCount = at('live_set').getcount('return_tracks');
+    if (sendCount === mixerState.sendCount) return;
+    const trackCount = at('live_set').getcount('tracks');
+    clearMixerParameterObservers();
+    startMixerParameterObservers(trackCount);
+  } catch (e) {
+    fail(-1, 'mixer sends unavailable after return-track change: ' + describe(e));
+  }
+});
+
+function onMixerStructureChange(args: unknown[]): void {
+  if (!metersWatching) return;
+  mixerStructureTask.cancel();
+  mixerStructureTask.schedule(METER_INTERVAL_MS);
+}
+
+function startMixerParameterObservers(trackCount: number): void {
   mixerState = readMixerState();
   for (let t = 0; t < trackCount; t++) {
     const state = mixerState.tracks[t];
@@ -2114,6 +2200,9 @@ function startMixerObservers(trackCount: number): void {
     }
     if (state.pan) {
       addMixerTrackObserver(t, 'pan', path + ' mixer_device panning', 'value');
+    }
+    for (let i = 0; i < state.sends.length; i++) {
+      if (state.sends[i]) addMixerSendObserver(t, i);
     }
   }
   if (mixerState.masterVolume) {
@@ -2135,13 +2224,29 @@ function startMixerObservers(trackCount: number): void {
   sendMixerState();
 }
 
+function startMixerStructureObserver(): void {
+  if (!sendsWatching || mixerStructureObserver) return;
+  try {
+    const structure = new LiveAPI(onMixerStructureChange, 'live_set');
+    structure.property = 'return_tracks';
+    mixerStructureObserver = structure;
+  } catch (e) {
+    post('bsv return-track observer unavailable: ' + describe(e) + '\n');
+  }
+}
+
+function startMixerObservers(trackCount: number): void {
+  startMixerParameterObservers(trackCount);
+  startMixerStructureObserver();
+}
+
 function refreshMixerTarget(target: BSV.MixerTarget): void {
   if (!mixerState) return;
   if (target.kind === 'master') {
     mixerState.masterVolume = readMixerParameter('live_set master_track mixer_device volume');
     mixerState.masterPan = readMixerParameter('live_set master_track mixer_device panning');
   } else {
-    const state = readMixerTrack(target.t);
+    const state = readMixerTrack(target.t, mixerState.sendCount);
     if (state) mixerState.tracks[target.t] = state;
   }
   queueMixerState();
@@ -2170,14 +2275,22 @@ function set_mixer(encoded: unknown): void {
   }
   const volume = has.call(patch, 'volume') ? Number(patch.volume) : undefined;
   const pan = has.call(patch, 'pan') ? Number(patch.pan) : undefined;
+  const send = has.call(patch, 'send') ? patch.send : undefined;
   if (volume !== undefined && !isFinite(volume)) return fail(-1, 'volume must be numeric');
   if (pan !== undefined && !isFinite(pan)) return fail(-1, 'pan must be numeric');
+  if (
+    send !== undefined &&
+    (!send || typeof send !== 'object' || !isFinite(send.index) ||
+      Math.floor(send.index) !== send.index || send.index < 0 || !isFinite(send.value))
+  ) {
+    return fail(-1, 'invalid mixer send');
+  }
   const hasTrackField =
     has.call(patch, 'active') || has.call(patch, 'solo') || has.call(patch, 'armed');
-  if (!hasTrackField && volume === undefined && pan === undefined) {
+  if (!hasTrackField && volume === undefined && pan === undefined && send === undefined) {
     return fail(-1, 'mixer patch is empty');
   }
-  if (target.kind === 'master' && hasTrackField) {
+  if (target.kind === 'master' && (hasTrackField || send !== undefined)) {
     return fail(-1, 'Master exposes volume and pan only');
   }
 
@@ -2217,6 +2330,17 @@ function set_mixer(encoded: unknown): void {
         return fail(-1, 'pan is outside the parameter range');
       }
     }
+    let sendState: BSV.MixerParameterState | null = null;
+    if (send !== undefined) {
+      const sendCount = at('live_set').getcount('return_tracks');
+      if (send.index >= sendCount) return fail(-1, 'invalid send index');
+      sendState = readMixerParameter(base + ' mixer_device sends ' + send.index);
+      if (!sendState) return fail(-1, 'mixer send did not resolve');
+      if (!sendState.enabled) return fail(-1, 'mixer send is not enabled');
+      if (send.value < sendState.min || send.value > sendState.max) {
+        return fail(-1, 'send is outside the parameter range');
+      }
+    }
 
     // Every field is valid before the first write, so a malformed patch cannot
     // land its early fields and fail halfway through the strip.
@@ -2227,6 +2351,9 @@ function set_mixer(encoded: unknown): void {
     }
     if (volume !== undefined) at(base + ' mixer_device volume').set('value', volume);
     if (pan !== undefined) at(base + ' mixer_device panning').set('value', pan);
+    if (send !== undefined) {
+      at(base + ' mixer_device sends ' + send.index).set('value', send.value);
+    }
     // An unchanged write may not notify. Read back the one target regardless.
     refreshMixerTarget(target);
   } catch (e) {
@@ -2236,17 +2363,12 @@ function set_mixer(encoded: unknown): void {
 
 function clearMixerObservers(): void {
   mixerTask.cancel();
+  mixerStructureTask.cancel();
   mixerDirty = false;
   lastMixerKey = '';
   mixerState = null;
-  for (let i = 0; i < mixerObservers.length; i++) {
-    try {
-      mixerObservers[i].property = '';
-    } catch (e) {
-      /* object may already be gone */
-    }
-  }
-  mixerObservers = [];
+  clearMixerParameterObservers();
+  clearMixerStructureObserver();
 }
 
 // --- output meters ----------------------------------------------------
@@ -2393,6 +2515,36 @@ function watch_meters(on: number): void {
   } catch (e) {
     clearMeterObservers();
     fail(-1, e);
+  }
+}
+
+function watch_sends(on: number): void {
+  sendsWatching = Number(on) === 1;
+  mixerStructureTask.cancel();
+  clearMixerStructureObserver();
+  if (sendsWatching && !deviceReady) {
+    sendsWatching = false;
+    return fail(-1, 'device not ready');
+  }
+  if (!metersWatching) return;
+  try {
+    clearMixerParameterObservers();
+    lastMixerKey = '';
+    const trackCount = at('live_set').getcount('tracks');
+    startMixerParameterObservers(trackCount);
+    startMixerStructureObserver();
+  } catch (e) {
+    // A failed optional send path must not take away the mixer that was already
+    // working. Fall back to the base strip and make the failure visible.
+    sendsWatching = false;
+    clearMixerParameterObservers();
+    try {
+      startMixerParameterObservers(at('live_set').getcount('tracks'));
+    } catch (fallbackError) {
+      clearMixerObservers();
+      fail(-1, 'mixer controls unavailable: ' + describe(fallbackError));
+    }
+    fail(-1, 'mixer sends unavailable: ' + describe(e));
   }
 }
 

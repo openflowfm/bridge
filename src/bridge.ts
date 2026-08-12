@@ -450,12 +450,14 @@ function track(ws: WebSocket, m: BSV.Request): number {
 // hypothetical.
 //
 // **`on` is always forwarded; only `off` is edge-triggered**, and that asymmetry
-// is deliberate rather than an oversight. `watch_play` and `watch_meters`
-// install observers per *track* (and meters also on Master), so a client
+// is deliberate rather than an oversight. `watch_play`, `watch_meters` and
+// `watch_sends` install observers per *track* (and meters also on Master), so a
+// client
 // re-sends `on` to rebuild them when a snapshot reports a different track
 // count — suppressing that because someone else already held the watch would
 // leave the observers pointed at a set that no longer exists. Forwarding it
-// costs nothing: every `watch_*` handler in `lom.ts` clears before it installs.
+// costs nothing: every `watch_*` handler in `lom.ts` clears or rebuilds before
+// it installs.
 //
 // Sets of sockets rather than integer counters, so a client sending `on` twice
 // doesn't need two `off`s to release, and a dropped socket releases exactly what
@@ -466,6 +468,7 @@ const WATCH_MESSAGE = {
   selection: 'watch_selection',
   play: 'watch_play',
   meters: 'watch_meters',
+  sends: 'watch_sends',
   transport: 'watch_transport',
 } as const;
 
@@ -476,6 +479,7 @@ const watchers: Record<WatchKind, Set<WebSocket>> = {
   selection: new Set(),
   play: new Set(),
   meters: new Set(),
+  sends: new Set(),
   transport: new Set(),
 };
 
@@ -931,12 +935,27 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
         }
         patch[field] = value;
       }
+      if (source.send !== undefined) {
+        if (!source.send || typeof source.send !== 'object') {
+          return send(ws, { type: 'error', id: m.id, message: 'send must be an object' });
+        }
+        const index = Number(source.send.index);
+        const value = Number(source.send.value);
+        if (!Number.isInteger(index) || index < 0) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid send index' });
+        }
+        if (!Number.isFinite(value)) {
+          return send(ws, { type: 'error', id: m.id, message: 'send must be numeric' });
+        }
+        patch.send = { index, value };
+      }
       if (Object.keys(patch).length === 0) {
         return send(ws, { type: 'error', id: m.id, message: 'mixer patch is empty' });
       }
       if (
         target.kind === 'master' &&
-        (patch.active !== undefined || patch.solo !== undefined || patch.armed !== undefined)
+        (patch.active !== undefined || patch.solo !== undefined || patch.armed !== undefined ||
+          patch.send !== undefined)
       ) {
         return send(ws, {
           type: 'error',
@@ -973,6 +992,10 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'watchMeters':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'meters', m.on);
+      break;
+    case 'watchSends':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      setWatch(ws, 'sends', m.on);
       break;
     case 'watchTransport':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
@@ -1301,9 +1324,13 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
     return;
   }
   const source = value as Partial<BSV.MixerState>;
+  const sendCount = Number(source.sendCount);
   const masterVolume = mixerParameter(source.masterVolume);
   const masterPan = mixerParameter(source.masterPan);
-  if (masterVolume === undefined || masterPan === undefined || !Array.isArray(source.tracks)) {
+  if (
+    !Number.isInteger(sendCount) || sendCount < 0 ||
+    masterVolume === undefined || masterPan === undefined || !Array.isArray(source.tracks)
+  ) {
     Max.post('mixer_state: invalid top-level fields from lom');
     return;
   }
@@ -1313,6 +1340,7 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
     const track = raw as Partial<BSV.MixerTrackState>;
     const volume = mixerParameter(track.volume);
     const pan = mixerParameter(track.pan);
+    const sends = Array.isArray(track.sends) ? track.sends.map(mixerParameter) : null;
     if (
       !Number.isInteger(track.t) || track.t! < 0 ||
       typeof track.active !== 'boolean' ||
@@ -1320,7 +1348,8 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
       typeof track.armed !== 'boolean' ||
       typeof track.canArm !== 'boolean' ||
       volume === undefined ||
-      pan === undefined
+      pan === undefined ||
+      !sends || sends.length !== sendCount || sends.some((parameter) => parameter === undefined)
     ) {
       Max.post('mixer_state: invalid track fields from lom');
       return;
@@ -1333,9 +1362,10 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
       canArm: track.canArm,
       volume,
       pan,
+      sends: sends as (BSV.MixerParameterState | null)[],
     });
   }
-  broadcast({ type: 'mixerState', state: { masterVolume, masterPan, tracks } });
+  broadcast({ type: 'mixerState', state: { sendCount, masterVolume, masterPan, tracks } });
 });
 
 // Kept separate from play_state: current_song_time changes continuously, and

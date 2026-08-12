@@ -516,7 +516,7 @@ Canonical path: `live_set tracks N view`
 
 ## MixerDevice
 
-The per-track mixer. Better Session View reaches `volume` and `panning`; activator state
+The per-track mixer. Better Session View reaches `volume`, `panning` and `sends`; activator state
 uses the equivalent inverse of `Track.mute`, while Solo and Arm use their direct Track
 properties above.
 
@@ -529,10 +529,11 @@ Canonical path: `live_set tracks N mixer_device`
 | `track_activator` | DeviceParameter | get | Exposed by Live, but `lom.ts` uses observable `Track.mute` for this switch. |
 | `volume` | DeviceParameter | get | Track volume fader. Master uses `live_set master_track mixer_device volume`. |
 | `panning` | DeviceParameter | get | Stereo pan. Master uses `live_set master_track mixer_device panning`. |
+| `sends` | list of DeviceParameter | get, observe | One per return track, addressed as `live_set tracks N mixer_device sends L`. |
 
 ## DeviceParameter
 
-The writable and automatable parameter object behind volume and pan. The canonical
+The writable and automatable parameter object behind volume, pan and sends. The canonical
 device parameter path is `live_set tracks N devices M parameters L`; mixer parameters are
 also reachable as children of MixerDevice, including the volume paths above.
 
