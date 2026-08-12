@@ -1,0 +1,121 @@
+# Diagnostics, snapshot phases and testing
+
+The diagnostic surfaces, the phase breakdown, and what can be tested without Live.
+
+## Diagnostics
+
+`diag <what> [arg]`, sent by [`../tools/diag.ts`](../../tools/diag.ts) and never by the
+shipped UI — the same standing as `palette`.
+
+```sh
+npm run dev:diag -- sel
+npm run dev:diag -- watch 1     # then drag a clip in Live
+npm run dev:diag -- scroll 1    # one Session-view step down; -1 goes up
+npm run dev:diag -- selectscene 42  # select scene 42 directly; zero-based
+```
+
+**The answers land in the Max window, not on the wire**, which is why this message has
+no reply event and nothing in `TERMINAL`. These probes settle behavior visible only with
+Live open, so the readout has to be somewhere you can watch without leaving Live.
+
+| what | question it settles |
+|---|---|
+| `ids` | does `goto('id N')` resolve? Decides whether the slot scan can be made fast **and** whether an observer can be attached by id |
+| `slot` | is `ClipSlot.color_index` the contained clip's color on an *ordinary* slot, and does an empty slot answer None? |
+| `sel` | where is the Session cursor, and what does `Track.is_part_of_selection` cover? |
+| `watch 0\|1` | does moving a clip in Live move the cursor — at the source *and* the target? |
+| `scan <track>` | what one track's occupancy rescan costs |
+| `attach <n>` / `detach` | what N slot observers cost to install, and whether they slow *Live* down |
+| `scroll <signed steps>` | does one `Application.View.scroll_view` call move Session by exactly one scene row? Positive is down; negative is up |
+| `selectscene <index>` | does assigning an exact `Song.View.selected_scene` also reveal and center that scene? The index is zero-based |
+
+`scroll` established that one call moves the selected scene exactly one row and centers
+it in Session View. A synchronous loop of calls produced only one move, so the probe now
+schedules multiple calls 50ms apart to test whether Live's deferred UI work was
+coalescing them. The LOM still exposes no current offset, visible range or result saying
+whether the view moved. That leaves two candidates for absolute scrolling: assign the
+target directly through `selected_scene`, or send the required number of scheduled
+relative calls. `selectscene` tests the direct path. Its readback can prove the scene
+became selected; whether Live also centers it is visible only in Live itself.
+
+Three of these exist to settle whether the set can be kept in sync by watching Live's
+**selection** rather than every clip slot. The reasoning: there is no aggregate "a clip
+in this track changed" observable (see [`LOM.md`](../LOM.md)), but `selected_track` and
+`selected_scene` are observable and cost two observers total — and you have to select a
+clip to move it. So the cursor says *where to look* and a targeted re-read says *what
+happened*, with no drag/drop inference to get wrong.
+
+`watch` is the one that decides it. **Two lines per drag** — one naming the source slot,
+one the target — is what the design needs. One line means only the drop is visible, and
+a resync driven by it would leave the source stale, drawing the clip in both places.
+
+`attach`'s useful output isn't in its own log. Install the observers, then use Live
+normally — delete a scene, undo something — and see whether *Live* got slower. Observer
+callbacks run on Live's main thread, so the cost lands on Live's own operations, which
+is what a user would notice and blame the device for.
+
+## Snapshot phases
+
+The walk is instrumented per phase because every phase is a linear scan and they
+scale differently:
+
+| phase | cost |
+|---|---|
+| tracks | `trackCount` |
+| scenes | `sceneCount` |
+| slot scan | `trackCount × sceneCount` — mostly empty slots |
+| clip reads | `clipCount` |
+
+The scan dominates on a large set, which is what the id-addressing above targets.
+
+**Snapshots use canonical path addressing plus `has_clip`.** An earlier id-addressed
+fast path was guarded by an outcome-based fallback, but `goto('id N')` is known not to
+resolve under this v8 LiveAPI build. It therefore emitted one `get: no valid object set`
+per non-group track on every walk before doing the canonical path scan anyway. The dead
+probe was removed; `diag ids` is the explicit, developer-only place to re-test id
+addressing after a Max upgrade.
+
+## Testing
+
+`bridge.js` has 19 end-to-end assertions against a stubbed `max-api`, run against the
+**compiled** output: static serving, path traversal, WS handshake and path, readiness
+gating, request routing by id, dict staging with punctuation intact, progress
+streaming, palette caching, error paths.
+
+`lom.js` needs Live and has no automated coverage. **It's the file to suspect first.**
+The parts that could be extracted are, in `core/src/lomAtoms.ts`.
+
+- **`Scene.tempo` needs `tempo_enabled` set first, and the order is load-bearing.** Live
+  documents the pair as "the song will use the scene's tempo as soon as the scene is
+  fired" / "when disabled, the scene will use the song's tempo, and the tempo value
+  returned will be -1". So writing `tempo` to a disabled scene lands nowhere and reads
+  back -1 — visually identical to the write never happening. `setSceneTempo` enables then
+  writes, and disables *without* writing a value it's about to switch off. Live's own
+  bound, from an assertion in the binary, is `>= 20.0 && <= 1000.0`.
+
+**`execSceneOp` is unverified.** Nothing has yet written a scene name or a scene color
+against a real set. The name half goes through the same `setName` the clip path has
+always used, so it's the low-risk half; the color half writes plain `color` (RGB) rather
+than `color_index`, which is the form the palette-derivation failure established as the
+writable one for scenes — but *reading* that conclusion off a failed `color_index` write
+is not the same as having watched a scene change color. If it's wrong, the failure mode
+is the one this file has produced three times before: the write silently does nothing and
+the following snapshot reports the old color, which looks like the UI not having sent
+anything. The name write landing while the color doesn't is the signature to look for.
+
+**Scene tempo is unverified in the same way**, and fails identically: if the
+`tempo_enabled` ordering is wrong, `Scene.tempo` reads back -1 and the write looks like
+it never happened. The check that costs nothing is to fire a scene after setting it — the
+song tempo should follow.
+
+**The new control-bar observer and writes are also unverified in Live.** All seven members
+are documented `get, set, observe` on `Song`, and the bridge reports Live's readback rather
+than trusting the attempted patch. Still, `lom.ts` has no automated host coverage. Check
+tempo, metronome, clip-trigger quantization, Arrangement Record, root note, scale name and
+Scale Mode against Live's own Control Bar with the device loaded; a missing
+`transport_state` or an unchanged readback is the visible, harmless failure mode.
+
+`record_mode` is the one member of that set with a side effect beyond its own value:
+setting it to 1 while the song is rolling starts an Arrangement take immediately. That is
+Live's own behavior for the button, and it's why the header's control arms rather than
+records — nothing here calls it on the user's behalf.
