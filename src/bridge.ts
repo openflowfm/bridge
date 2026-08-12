@@ -1274,11 +1274,15 @@ Max.addHandler('delta', async (dictName: string) => {
 
 // Flat atoms, not a Dict: this pushes on every play-state change, and a global
 // dict name would race itself. See the note above `playStateAtoms` in lom.ts.
-// Shape: isPlaying, then (playing, fired) per track in track order.
+// Shape: isPlaying, then (playing, fired, armed) per track in track order.
 Max.addHandler('play_state', (...args: number[]) => {
   const tracks: BSV.TrackPlayState[] = [];
-  for (let i = 1; i + 1 < args.length; i += 2) {
-    tracks.push({ playing: Number(args[i]), fired: Number(args[i + 1]) });
+  for (let i = 1; i + 2 < args.length; i += 3) {
+    tracks.push({
+      playing: Number(args[i]),
+      fired: Number(args[i + 1]),
+      armed: Number(args[i + 2]) === 1,
+    });
   }
   broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
 });

@@ -45,7 +45,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
 | `delta <dict>` | a partial re-read, pushed after a change in Live |
-| `play_state <isPlaying> <playing> <fired> …` | pairs, one per track |
+| `play_state <isPlaying> <playing> <fired> <armed> …` | triples, one per track |
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `mixer_state <encodedState>` | complete cached mixer-control state |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
