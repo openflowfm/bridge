@@ -865,6 +865,12 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
         }
         patch.clipTriggerQuantization = quantization;
       }
+      if (source.recordMode !== undefined) {
+        if (typeof source.recordMode !== 'boolean') {
+          return send(ws, { type: 'error', id: m.id, message: 'record mode must be boolean' });
+        }
+        patch.recordMode = source.recordMode;
+      }
       if (source.rootNote !== undefined) {
         const root = Number(source.rootNote);
         if (!Number.isInteger(root) || root < 0 || root > 11) {
@@ -1395,6 +1401,7 @@ Max.addHandler('transport_state', (...atoms: unknown[]) => {
     typeof state.metronome !== 'boolean' ||
     !Number.isInteger(state.clipTriggerQuantization) ||
     state.clipTriggerQuantization! < 0 || state.clipTriggerQuantization! > 13 ||
+    typeof state.recordMode !== 'boolean' ||
     !Number.isInteger(state.rootNote) || state.rootNote! < 0 || state.rootNote! > 11 ||
     typeof state.scaleName !== 'string' ||
     typeof state.scaleMode !== 'boolean'
