@@ -518,22 +518,39 @@ function rearmWatches(): void {
 
 // --- Push song browser -------------------------------------------------
 //
-// Push's 8-encoder parameter strip shows any Live-visible parameter a
-// selected device defines, via `live.banks` — see the pool of hidden
-// parameters and the static bank definitions in `tools/build-device.ts`. The
-// song list has to be held here rather than only derived in the browser
+// One Int parameter on Push's encoder strip — see `tools/build-device.ts` for
+// the parameter and its single live.banks page, and for the two designs this
+// replaced. Its value is a position in the running order and its label is the
+// song at that position, so turning the encoder walks the set with the name
+// under your hand. It selects that song's first scene in Live and fires
+// nothing, so scrubbing mid-song is safe.
+//
+// The song list is held here rather than only derived in the browser
 // (`useSongLayout`), because the point of the feature is jumping to a song
 // with no browser tab open at all.
-
-/** Two live.banks pages of eight positions each. Raise later; see the plan. */
-const POOL_SIZE = 16;
+//
+// Only ever one name goes to the device — the one under the encoder. That's
+// what makes this work where a whole list didn't: an enum's items are fixed
+// when the device loads, but a parameter's short name can be rewritten as often
+// as you like.
 
 /**
- * A starting budget for a bank-strip label, not a verified one. Cycling '74's
- * own generic `parameter_shortname` guidance is "5 to 7 characters" and isn't
- * Push-3-specific — calibrate against real hardware before trusting this.
+ * Cycling '74's guidance for a `parameter_shortname` is "5 to 7 characters",
+ * and it isn't Push-3-specific. Kept a little over that to find out where Push
+ * actually truncates rather than assuming the generic number — a name cut short
+ * by the hardware still reads, where one cut short here is gone for good.
  */
-const PUSH_LABEL_MAX = 7;
+const PUSH_LABEL_MAX = 12;
+
+/**
+ * Enough for the hundred-song set the app is built for, with room over. A cap
+ * at all only so a pathological set can't hand Live a parameter with thousands
+ * of steps, which is a detent count no encoder is usable at.
+ */
+const PUSH_SONG_MAX = 128;
+
+/** What the encoder reads before a walk has produced anything. */
+const NO_SONGS = 'no songs';
 
 interface PushSong {
   name: string;
@@ -544,34 +561,82 @@ interface PushSong {
 let heldScenes: BSV.Scene[] = [];
 let heldRev = -1;
 let pushSongs: PushSong[] = [];
+/** Last index seen from the encoder, to tell a real turn from a re-send. */
+let pushSongIndex = -1;
 
-/** Strip characters Max message syntax treats specially, then fit the budget. */
+/**
+ * Strip characters Max message syntax treats specially, then fit the budget.
+ *
+ * Spaces are kept. Each name crosses to Max as one symbol atom and is passed
+ * object to object without being re-parsed as text, so a two-word title stays
+ * one enum item — but this is the assumption to check first if the encoder
+ * shows a set of half-titles.
+ */
 function sanitizePushLabel(name: string): string {
   const clean = name.replace(/[,;"]/g, '').replace(/\s+/g, ' ').trim();
+  if (clean === '') return '(untitled)';
   return clean.length > PUSH_LABEL_MAX ? clean.slice(0, PUSH_LABEL_MAX) : clean;
 }
 
-/** Song `i` maps directly to bank position `i` — see `tools/build-device.ts`. */
-function refreshPushBankStrip(): void {
-  for (let i = 0; i < POOL_SIZE; i++) {
+/**
+ * How long the encoder has to settle before its name is rewritten.
+ *
+ * Renaming a parameter is not like sending it a value: a control surface re-reads
+ * the parameter when its metadata changes, and a spun encoder would ask Push to
+ * do that dozens of times a second. Trailing rather than leading, so a slow turn
+ * still names each song as you reach it, and a fast sweep names only where you
+ * stopped.
+ */
+const PUSH_LABEL_SETTLE_MS = 80;
+
+let pushLabelTimer: NodeJS.Timeout | undefined;
+
+/** Name the position the encoder is on. The only name Push ever has to hold. */
+function labelPushSong(i: number): void {
+  if (pushLabelTimer) clearTimeout(pushLabelTimer);
+  pushLabelTimer = setTimeout(() => {
+    pushLabelTimer = undefined;
     const song = pushSongs[i];
-    Max.outlet('push_shortname', i, song ? sanitizePushLabel(song.name) : '-');
-  }
+    Max.outlet('push_label', song ? sanitizePushLabel(song.name) : NO_SONGS);
+  }, PUSH_LABEL_SETTLE_MS);
+}
+
+/**
+ * Name wherever the encoder is currently standing.
+ *
+ * The encoder is *not* resized to the set: its span and detent count are baked
+ * into the device at `PUSH_SONG_MAX`, because on hardware `_parameter_range`
+ * propagated and `_parameter_steps` did not, which left a 34-song set spanning
+ * 0…33 in two detents. Positions past the end of the running order name
+ * themselves `no songs` and jump nowhere, which is the whole handling they need.
+ */
+function refreshPushBankStrip(): void {
+  labelPushSong(0);
 }
 
 /** Re-derive the song list from whatever scene rows are currently held. */
 function refreshPushSongs(scenes: readonly BSV.Scene[]): void {
-  pushSongs = derive(scenes, SCENE_PATTERNS)
+  const all = derive(scenes, SCENE_PATTERNS)
     .songs.map((s) => ({ name: s.name, scene: s.scenes[0] }))
-    .sort((a, b) => a.scene - b.scene)
-    .slice(0, POOL_SIZE);
+    .sort((a, b) => a.scene - b.scene);
+  pushSongs = all.slice(0, PUSH_SONG_MAX);
+  // A cap that silently drops songs would read as "this set has 128 songs".
+  if (all.length > pushSongs.length) {
+    Max.post(
+      `push: ${all.length} songs, showing the first ${pushSongs.length} — ` +
+        `raise PUSH_SONG_MAX in bridge.ts`,
+    );
+  }
   // Confirms this half of the chain independent of Push hardware: if this
   // never prints, the song list isn't the problem — the walk or the derive
   // step is. See Options > Max > Open Max Window.
   Max.post(
-    `push: ${pushSongs.length} song(s) on the bank strip` +
+    `push: ${pushSongs.length} song(s) on the encoder` +
       (pushSongs.length ? ` — ${pushSongs.map((s) => s.name).join(', ')}` : ''),
   );
+  // The range is about to change under it, so nothing the encoder said before
+  // now describes a song in the new list.
+  pushSongIndex = -1;
   refreshPushBankStrip();
 }
 
@@ -601,17 +666,22 @@ function requestInternalSnapshot(): void {
 }
 
 // Routed around lom.ts, same as device_state_get/set — see tools/build-device.ts.
-Max.addHandler('push_pool', (i: number, value: number) => {
-  if (!value) return; // the patch resets itself to 0 after outletting this
+Max.addHandler('push_song', (i: number) => {
+  // Setting the range can make live.menu restate its value, and a set that
+  // re-selects the song you are already on should not move Live's selection
+  // out from under a running song. Only a change is a turn.
+  if (i === pushSongIndex) return;
+  pushSongIndex = i;
+  labelPushSong(i);
   const song = pushSongs[i];
   // Confirms this half of the chain independent of whether the jump visibly
-  // did anything: if this never prints, the encoder press isn't reaching
-  // bridge.ts at all — the pool wiring or live.banks is the place to look.
+  // did anything: if this never prints, the encoder isn't reaching bridge.ts
+  // at all — the parameter wiring or live.banks is the place to look.
   if (song) {
-    Max.post(`push: position ${i} -> "${song.name}" (scene ${song.scene})`);
+    Max.post(`push: song ${i} -> "${song.name}" (scene ${song.scene})`);
     selectSceneOnLive(song.scene);
   } else {
-    Max.post(`push: position ${i} fired with no song mapped there`);
+    Max.post(`push: song ${i} selected with no song mapped there`);
   }
 });
 

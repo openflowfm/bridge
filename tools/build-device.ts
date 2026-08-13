@@ -265,8 +265,8 @@ const sToLom = obj('s ---bsv-to-lom', [20, 202, 120, 22], 1, 0);
 
 const rToLom = obj('r ---bsv-to-lom', [370, 58, 120, 22], 0, 1);
 const routeStatus = obj(
-  'route status device_state_get device_state_set push_shortname',
-  [370, 90, 300, 22],
+  'route status device_state_get device_state_set push_label',
+  [370, 90, 340, 22],
   1,
   5,
 );
@@ -391,132 +391,151 @@ connect(pluginIn, 0, pluginOut, 0);
 connect(pluginIn, 1, pluginOut, 1);
 
 // ---------------------------------------------------------------------
-// Push song browser — a pool of hidden parameters live.banks can show on a
-// connected Push's 8-encoder strip, and the plumbing that connects them to
-// bridge.ts. Song *names* live entirely in bridge.ts and change with the
-// set; this patcher owns only the fixed structure below — POOL_SIZE
-// positions, wired once. See bridge/src/bridge.ts's "Push song browser"
-// section and the plan for how the halves fit together and what's still
-// unverified against real hardware — most load-bearingly, whether setting
-// `parameter_shortname` this way actually reaches Push's display without
-// reloading the device.
+// Push song browser — one Int parameter on a connected Push's encoder strip
+// (via live.banks) whose *value* is a position in the running order and whose
+// *label* is the song sitting at that position. Turn it and the name under
+// your hand changes; the scene selection in Live follows.
 //
-// Two banks of eight rather than one loop of arbitrary width: Push pages
-// between live.banks banks itself, and each page needs its own backing
-// parameters — see the plan. Raising POOL_SIZE is a constant change in both
-// this file and bridge.ts (kept as two literals, not a shared import — this
-// isn't wire protocol, it's internal to a channel that already bypasses it).
+// Two dead ends got us here, both worth not repeating:
+//
+//   - **Sixteen parameters, one song named into each `_parameter_shortname`.**
+//     Capped the set at sixteen, spent eight encoders and two live.banks pages,
+//     and came up generic on hardware — though with a song list that may never
+//     have been built, so the label mechanism itself was never really on trial.
+//
+//   - **One Enum parameter whose values are the songs.** An Enum's items are
+//     `parameter_enum`, which is *saved* metadata: Max has no `_parameter_enum`
+//     runtime message at all, and `_parameter_range` on an Enum is taken as the
+//     numeric min/max, so a two-song set rendered as `0` and `1`. The item list
+//     of a live.menu cannot be changed while the device is loaded.
+//
+// What that second attempt did prove is that runtime parameter metadata reaches
+// Push — the range changed under it, live. So the name travels as
+// `_parameter_shortname` and only the *current* one is ever set, which is the
+// one thing that doesn't need a list. No cap, one encoder, no paging.
+//
+// This patcher owns no size constant: the range arrives from bridge.ts sized to
+// the set. See its "Push song browser" section.
 // ---------------------------------------------------------------------
 
-const POOL_SIZE = 16;
-const BANK_SIZE = 8;
+/** Positions on the encoder. Must match PUSH_SONG_MAX in bridge/src/bridge.ts. */
+const PUSH_SONG_MAX = 128;
+/** Stale banks to clear on load; more than any build has ever defined. */
+const PUSH_BANK_CLEAR = 8;
 
-comment('Push song browser — see plan; unverified against real hardware', [20, 536, 460, 20], {
-  fontsize: 10.0,
-});
+comment('Push song browser — one Enum parameter, named by bridge.ts', [
+  20, 536, 460, 20,
+], { fontsize: 10.0 });
 
-// Dispatches an incoming `push_shortname <i> <text>` (routed here from
-// routeStatus above) to pool position i's parameter short name. The saved
-// patcher metadata key is `parameter_shortname`, but Max's runtime parameter-
-// inspector message has a leading underscore: `_parameter_shortname`.
-const dispatchIndex = obj(
-  `route ${Array.from({ length: POOL_SIZE }, (_, i) => i).join(' ')}`,
-  [700, 536, 90, 22],
-  1,
-  POOL_SIZE + 1,
-);
-connect(routeStatus, 3, dispatchIndex, 0); // push_shortname <i> <text>
 connect(routeStatus, 4, deferlow, 0); // everything else -> LOM
 
-const poolParams: Record<string, [string, string, number]> = {};
-
-for (let i = 0; i < POOL_SIZE; i++) {
-  const y = 560 + i * 26;
-  const longname = `bsv-push-${i}`;
-
-  // A real Live-visible parameter — that's what makes it addressable by
-  // live.banks (by name) and what makes Live route encoder turns to it. Range
-  // 0-1 rather than something wider: the goal is that the *first* detent of
-  // turning the encoder already reads as nonzero, not that the value means
-  // anything past that.
-  const numbox = box('live.numbox', null, [20, y, 50, 15], {
-    numinlets: 1,
-    numoutlets: 1,
-    outlettype: [''],
-    varname: longname,
-    saved_object_attributes: { parameter_enable: 1 },
-    saved_attribute_attributes: {
-      valueof: {
-        parameter_type: 1,
-        parameter_mmin: 0.0,
-        parameter_mmax: 1.0,
-        parameter_steps: 2,
-        parameter_initial_enable: 1,
-        parameter_initial: [0.0],
-        parameter_longname: longname,
-        // Overwritten at runtime by bridge.ts once songs are known — see the
-        // incoming `prependShort` wiring below. '-' is what an empty
-        // position (past the real song count) keeps showing.
-        parameter_shortname: '-',
-        parameter_annotation_name: `Push song ${i}`,
-        parameter_info:
-          "Set by bridge.ts as the set's songs change — not a value to set by hand.",
-        parameter_order: 1 + i,
-        parameter_linknames: 0,
-        parameter_modmode: 0,
-        parameter_defer: 0,
-        parameter_speedlim: 0.0,
-        parameter_unitstyle: 0,
-        parameter_units: '',
-      },
+// A real Live-visible parameter — that's what makes it addressable by
+// live.banks (by name) and what makes Live route encoder turns to it.
+//
+// **`live.menu` rather than `live.numbox`, and the object is load-bearing.**
+// Both declare a Live parameter and both appear in the bank, but on Push only
+// this one has ever *bound* to an encoder. As a `live.numbox` typed Int the
+// encoder sat at 0 and a touch fell straight through to the armed track as a
+// MIDI note — which is what Push does with a control it hasn't claimed. As a
+// `live.menu` the same encoder turned, moved and reported. Whatever the reason,
+// don't swap the object back without a Push in front of you.
+//
+// The Enum's items are vestigial: `parameter_enum` is *saved* metadata that
+// cannot be rewritten at runtime, and bridge.ts's `_parameter_range` replaces
+// the whole thing with a numeric span sized to the set. Which is fine — the
+// value is a position and the *name* is the song, and the name is the one piece
+// of metadata that does travel. One item is declared here only because a
+// parameter of this type must have at least one before it is sized.
+//
+// `parameter_longname` is the one piece of metadata that must never change:
+// live.banks addresses this parameter by that name, and it is the identity Live
+// maps automation and MIDI to.
+const songMenu = box('live.menu', null, [20, 570, 120, 15], {
+  numinlets: 1,
+  numoutlets: 3,
+  outlettype: ['', '', 'float'],
+  varname: 'Song',
+  parameter_enable: 1,
+  saved_attribute_attributes: {
+    valueof: {
+      parameter_type: 2,
+      // One item per position, fixed at build time, because that is the only
+      // time an Enum's items can be set. The item text is the position number:
+      // the *name* of what is there travels separately and changes with the set,
+      // but how many places there are to stand cannot.
+      parameter_enum: Array.from({ length: PUSH_SONG_MAX }, (_, i) => String(i + 1)),
+      // **Never a zero-width range.** A control surface normalizes a value to
+      // draw it, which divides by `mmax - mmin` and by `steps - 1`; declared
+      // 0…0 with one step, this crashed Push the instant it tried to draw the
+      // device, before a single message had arrived. Two positions is the
+      // narrowest this may ever legally be — see the floors in bridge.ts, which
+      // hold the same line for the runtime range.
+      parameter_mmax: PUSH_SONG_MAX - 1,
+      parameter_steps: PUSH_SONG_MAX,
+      parameter_initial_enable: 1,
+      parameter_initial: [0.0],
+      // **Push displays the long name, not the short one.** It read `bsv-song`
+      // on hardware while the short name said something else entirely — which
+      // also settles what v1 was chasing: `_parameter_shortname` never had a
+      // chance of being seen. So this is a word rather than an identifier, and
+      // it is what the live.banks message below has to address the parameter by.
+      parameter_longname: 'Song',
+      parameter_shortname: 'Song',
+      parameter_annotation_name: 'Song',
+      // Unlinked deliberately: the scripting name is the patcher's handle on
+      // this object and should not follow the display name around.
+      parameter_linknames: 0,
+      parameter_info:
+        "The set's songs, in running order. Turning this selects that song's " +
+        'first scene in Live — it does not fire anything.',
+      parameter_order: 1,
+      parameter_modmode: 0,
+      parameter_defer: 0,
     },
-  });
-  poolParams[numbox] = [longname, longname, 1 + i];
+  },
+});
 
-  // Outgoing: any nonzero value — an encoder turn — is the jump signal.
-  // `set 0` resets the display without re-triggering the object's own
-  // outlet, which is what keeps this from re-firing itself in a loop.
-  const neq = obj('!= 0', [80, y, 36, 22], 1, 1);
-  const prependPool = obj(`prepend push_pool ${i}`, [126, y, 110, 22], 1, 1);
-  const resetMsg = msg('set 0', [246, y, 44, 22]);
-  connect(numbox, 0, neq, 0);
-  connect(neq, 0, prependPool, 0);
-  connect(prependPool, 0, sToNode, 0);
-  connect(neq, 0, resetMsg, 0);
-  connect(resetMsg, 0, numbox, 0);
+// Outgoing: the selected index. Unlike v1's pool this parameter holds a
+// meaningful value, so there is nothing to reset — the encoder's position *is*
+// where you are in the set, and it should stay there between turns.
+const prependSong = obj('prepend push_song', [160, 570, 110, 22], 1, 1);
+connect(songMenu, 0, prependSong, 0); // outlet 0 is the item index
+connect(prependSong, 0, sToNode, 0);
 
-  // Incoming: bridge.ts naming this position's song.
-  const prependShort = obj('prepend _parameter_shortname', [700, y, 150, 22], 1, 1);
-  connect(dispatchIndex, i, prependShort, 0);
-  connect(prependShort, 0, numbox, 0);
-}
+// Incoming, naming: `push_label <name>` — the song at the current position.
+// Only ever one name, which is why this survives where a whole list could not.
+const prependLabel = obj('prepend _parameter_shortname', [700, 536, 170, 22], 1, 1);
+connect(routeStatus, 3, prependLabel, 0);
+connect(prependLabel, 0, songMenu, 0);
 
-// Static and fired once at init — song *names* change constantly, but which
-// eight parameters occupy which bank never does, so there is nothing here
-// for bridge.ts to construct at runtime.
-comment('live.banks — two static pages, fired once at init', [
-  20,
-  560 + POOL_SIZE * 26 + 10,
-  300,
-  20,
-], { fontsize: 10.0 });
-const banksY = 560 + POOL_SIZE * 26 + 34;
-const banks = obj('live.banks', [20, banksY, 90, 22], 1, 1);
-const banksNewA = msg(
-  `new 0 "Songs A" ${Array.from({ length: BANK_SIZE }, (_, i) => `bsv-push-${i}`).join(' ')}`,
-  [130, banksY, 460, 22],
-);
-const banksNewB = msg(
-  `new 1 "Songs B" ${Array.from(
-    { length: BANK_SIZE },
-    (_, i) => `bsv-push-${BANK_SIZE + i}`,
-  ).join(' ')}`,
-  [130, banksY + 32, 460, 22],
-);
-connect(thisdevice, 0, banksNewA, 0);
-connect(thisdevice, 0, banksNewB, 0);
-connect(banksNewA, 0, banks, 0);
-connect(banksNewB, 0, banks, 0);
+// **The range is not sized at runtime, because it can't be.** On hardware
+// `_parameter_range` propagated and `_parameter_steps` did not, which left a
+// 34-song set spanning 0…33 in two detents. So the span and the detent count
+// are both baked above at PUSH_SONG_MAX and never touched again: one detent is
+// always one position, and positions past the end of the set read `no songs`
+// and jump nowhere. That also means no metadata write can resize this
+// parameter while Push is drawing it, which is the thing that crashed it.
+comment('live.banks — cleared, then one page, fired once at init', [20, 610, 340, 20], {
+  fontsize: 10.0,
+});
+const banks = obj('live.banks', [20, 634, 90, 22], 1, 1);
+
+// **Banks are saved with the device, and `new` inserts rather than replaces.**
+// Firing `new 0` on every load pushes the previous bank to index 1, then 2 —
+// which is where the empty "bank 2" on hardware came from, a fossil of the two
+// pages an older build defined. Deleting index 0 repeatedly empties the list
+// however many are stacked up, because a delete decrements everything above it.
+const banksReset = msg('delete 0', [130, 666, 80, 22]);
+const banksClear = obj(`uzi ${PUSH_BANK_CLEAR}`, [130, 698, 70, 22], 2, 3);
+const banksNew = msg('new 0 Songs Song', [130, 634, 260, 22]);
+// Right to left: clear every stale bank, and only then define ours.
+const banksOrder = obj('t b b', [20, 602, 50, 22], 1, 2);
+connect(thisdevice, 0, banksOrder, 0);
+connect(banksOrder, 1, banksClear, 0);
+connect(banksClear, 0, banksReset, 0);
+connect(banksReset, 0, banks, 0);
+connect(banksOrder, 0, banksNew, 0);
+connect(banksNew, 0, banks, 0);
 
 // --- patcher ----------------------------------------------------------
 const patcher = {
@@ -566,7 +585,11 @@ const patcher = {
     // device, so there is nothing for the .als to save.
     parameters: {
       [deviceState]: ['bsv-state', 'bsv-state', 0],
-      ...poolParams,
+      // The name here is the one Live registers the parameter under, and Push
+      // reads it from Live — so it has to agree with `parameter_longname` on
+      // the object. Left saying `bsv-song` after the object was renamed, it is
+      // what Push kept displaying.
+      [songMenu]: ['Song', 'Song', 1],
     },
     dependency_cache: [],
     autosave: 0,
