@@ -964,13 +964,13 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'saveSetConfig': {
       const roles = cleanRoles(m.roles);
       const defaultArtist = cleanDefaultArtist(m.defaultArtist);
-      const held = deviceState ?? { version: 1 as const, defaultArtist: '', roles: [] };
+      const stored = deviceState ?? { version: 1 as const, defaultArtist: '', roles: [] };
       // Omitted means "this client isn't saying" — an older UI still saving the
       // rest of the form must not turn a playback-affecting setting off.
       const writeSceneTempo =
-        m.writeSceneTempo === undefined ? held.writeSceneTempo : m.writeSceneTempo === true;
+        m.writeSceneTempo === undefined ? stored.writeSceneTempo : m.writeSceneTempo === true;
       await publishDeviceState({
-        ...held,
+        ...stored,
         defaultArtist,
         roles,
         writeSceneTempo,
