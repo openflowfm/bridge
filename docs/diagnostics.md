@@ -86,9 +86,20 @@ The `live.banks` page is defined at `live.thisdevice`, which is before `node.scr
 even running, so a label always reaches the parameter *after* Push was told what is on
 the encoder. Cycling '74 documents that banks "can be modified in real-time to cause
 updates on the Push display", and re-asserting the page did make names appear that a
-plain write didn't — which is why `refreshPushBankStrip` fires it every time. `bank` is
-that message on its own, for telling a label that never arrived apart from one sitting
-behind the cache.
+plain write didn't — which is why `refreshPushBankStrip` fires it every time the labels
+change. `bank` is that message on its own, for telling a label that never arrived apart
+from one sitting behind the cache.
+
+**Every time they *change*.** A relabel whose rendered list matches the last one written
+is skipped outright, and the reason is that one rename reaches the encoder twice: once
+when the held set is patched from the `apply`, and again when Live's own scene-name
+observer answers with a delta saying the same thing. Rewriting the second time pulls the
+cache lever on a list Push already has and resets `pushSongIndex` out from under whoever
+is turning the encoder. The log still prints on the skipped path — `push: labels
+unchanged` — because a silent skip and a broken derive look identical from the Max window,
+and telling those two apart is what these lines are for. `diag labels` sets the cache back
+to `null` after writing labels of its own, so the next real relabel can't decide it has
+nothing to do.
 
 Two questions the labels left open, and which of these settles each: where Push truncates
 a name longer than `PUSH_LABEL_MAX` — `labels` with names built to find the edge — and

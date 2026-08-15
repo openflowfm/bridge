@@ -691,6 +691,12 @@ interface PushSong {
 let pushSongs: PushSong[] = [];
 /** Last index seen from the encoder, to tell a real turn from a re-send. */
 let pushSongIndex = -1;
+/**
+ * The label list last written to the device, joined — what makes a relabel that
+ * would change nothing a no-op. `null` means "unknown, write regardless", which
+ * is what the label diagnostics leave behind after writing labels of their own.
+ */
+let pushLabels: string | null = null;
 
 /**
  * Strip characters Max message syntax treats specially, then fit the budget.
@@ -748,14 +754,35 @@ const PUSH_BANK_SETTLE_MS = 50;
  * updates on the Push display", which is the only lever there is on that cache,
  * so every write pulls it. Redefining a page that already exists is otherwise a
  * no-op: same index, same name, same parameter.
+ *
+ * **A relabel that would change nothing is skipped entirely**, and that isn't
+ * only thrift. One rename reaches here twice — once when the held set is
+ * patched from the `apply`, and again when Live's own scene-name observer
+ * answers with a delta saying the same thing — so without this the second write
+ * pulls the cache lever on a list Push already has, and resets the encoder's
+ * position out from under whoever is turning it. The list is the whole state,
+ * so comparing the rendered labels is the honest test; `pushSongIndex` survives
+ * because a position still pointing at the same song is still a valid one.
  */
 function refreshPushBankStrip(): void {
   const labels = Array.from({ length: PUSH_SONG_MAX }, (_, i) => {
     const song = pushSongs[i];
     return song ? sanitizePushLabel(song.name) : PUSH_EMPTY_SLOT;
   });
+  const rendered = labels.join(' ');
+  if (rendered === pushLabels) {
+    // Still printed: this line is how the chain is confirmed without Push
+    // hardware, and a silent skip would look exactly like a broken derive.
+    Max.post(`push: labels unchanged (${labels.length}) — not rewritten`);
+    return;
+  }
+  pushLabels = rendered;
   Max.post(`push: labels -> ${labels.slice(0, 4).join(' | ')} … (${labels.length})`);
   Max.outlet('push_songs', ...labels);
+  // The range is about to change under it, so nothing the encoder said before
+  // now describes a song in the new list. Only on a real change: resetting it
+  // for a rewrite of the same labels would drop the position mid-turn.
+  pushSongIndex = -1;
   setTimeout(() => Max.outlet('push_bank'), PUSH_BANK_SETTLE_MS);
 }
 
@@ -793,6 +820,10 @@ function diagPushLabels(count: number, spaces: boolean): void {
     `push: diag labels -> ${n} item(s)` + (n ? ` — ${labels.join(' | ')}` : ' (cleared)'),
   );
   Max.outlet('push_songs', ...labels);
+  // The device no longer holds what the song list last wrote, so the next real
+  // relabel must not decide it has nothing to do. A diagnostic that quietly
+  // disabled the next write would be the confounder this one exists to remove.
+  pushLabels = null;
   // Live is not asked what it thinks until it has had a scheduler tick to
   // notice: read back in the same breath and a stale answer looks like a
   // refused write.
@@ -841,9 +872,6 @@ function refreshPushSongs(model: BSV.SetModel): void {
     `push: ${pushSongs.length} song(s) on the encoder` +
       (pushSongs.length ? ` — ${pushSongs.map((s) => s.name).join(', ')}` : ''),
   );
-  // The range is about to change under it, so nothing the encoder said before
-  // now describes a song in the new list.
-  pushSongIndex = -1;
   refreshPushBankStrip();
 }
 
