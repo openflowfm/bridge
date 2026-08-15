@@ -18,6 +18,10 @@
 //   npm run dev:diag -- scroll 1       scroll Session down one step
 //   npm run dev:diag -- scroll -1      scroll Session up one step
 //   npm run dev:diag -- selectscene 42 select scene 42 directly (zero-based)
+//   npm run dev:diag -- param          what Live thinks this device's parameters are
+//   npm run dev:diag -- labels 8       write 8 synthetic value labels, then re-read
+//   npm run dev:diag -- labelspaces    write two-word labels, spaced and non-breaking
+//   npm run dev:diag -- bank           redefine the live.banks page, after a write
 
 import type { Request } from '../protocol/index.ts';
 
@@ -31,8 +35,14 @@ const WHAT = new Set([
   'detach',
   'scroll',
   'selectscene',
+  'param',
+  'labels',
+  'labelspaces',
+  'bank',
 ]);
 const SCROLL_MAX = 2000;
+/** Matches the clamp in `diagPushLabels`; both are only there to bound a typo. */
+const LABELS_MAX = 64;
 
 const what = process.argv[2];
 const arg = Number(process.argv[3] ?? 0);
@@ -53,6 +63,12 @@ if (what === 'scroll' && Math.abs(arg) > SCROLL_MAX) {
 }
 if (what === 'selectscene' && (!Number.isSafeInteger(arg) || arg < 0)) {
   console.error('usage: npm run dev:diag -- selectscene <zero-based scene index>');
+  process.exit(1);
+}
+if (what === 'labels' && (!Number.isSafeInteger(arg) || arg < 0 || arg > LABELS_MAX)) {
+  console.error(`usage: npm run dev:diag -- labels <0..${LABELS_MAX}>`);
+  console.error('0 clears the list; any other count is sent whether or not the');
+  console.error('parameter has room for it — that is the thing being measured');
   process.exit(1);
 }
 
@@ -104,5 +120,12 @@ if (failure) {
   }
   if (what === 'selectscene') {
     console.log(`Watch whether Live selects and reveals zero-based scene ${arg}.`);
+  }
+  if (what === 'labels' || what === 'labelspaces') {
+    console.log(
+      'Two lines follow in the Max window: what was sent, then what Live reports ' +
+        'back. Compare min/max against items — a range that moved with a frozen ' +
+        'item list means Max took the write and Live did not.',
+    );
   }
 }

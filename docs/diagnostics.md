@@ -12,6 +12,8 @@ npm run dev:diag -- sel
 npm run dev:diag -- watch 1     # then drag a clip in Live
 npm run dev:diag -- scroll 1    # one Session-view step down; -1 goes up
 npm run dev:diag -- selectscene 42  # select scene 42 directly; zero-based
+npm run dev:diag -- param       # what Live thinks this device's parameters are
+npm run dev:diag -- labels 8    # write 8 synthetic value labels, then re-read
 ```
 
 **The answers land in the Max window, not on the wire**, which is why this message has
@@ -28,6 +30,10 @@ Live open, so the readout has to be somewhere you can watch without leaving Live
 | `attach <n>` / `detach` | what N slot observers cost to install, and whether they slow *Live* down |
 | `scroll <signed steps>` | does one `Application.View.scroll_view` call move Session by exactly one scene row? Positive is down; negative is up |
 | `selectscene <index>` | does assigning an exact `Song.View.selected_scene` also reveal and center that scene? The index is zero-based |
+| `param` | what does Live expose for this device's own parameters — name, range, and the `value_items` Push draws its value text from? |
+| `labels <n>` | write `n` synthetic value labels to the Push song parameter, then re-read. `0` clears the list |
+| `labelspaces` | the same write, with one two-word label spaced normally and one joined by a non-breaking space |
+| `bank` | redefine the `live.banks` page, so a label written after the page appeared gets a second chance to be seen |
 
 `scroll` established that one call moves the selected scene exactly one row and centers
 it in Session View. A synchronous loop of calls produced only one move, so the probe now
@@ -53,6 +59,44 @@ a resync driven by it would leave the source stale, drawing the clip in both pla
 normally — delete a scene, undo something — and see whether *Live* got slower. Observer
 callbacks run on Live's main thread, so the cost lands on Live's own operations, which
 is what a user would notice and blame the device for.
+
+### The Push labels
+
+The last four were built for one question — the song names had never appeared on a Push,
+and everything else about that encoder worked — and they answered it. They take the set
+out of the frame: the labels are `L1`, `L2`, … and come from nowhere but
+`diagPushLabels`, so what is under test is the message and the parameter alone.
+
+**The names are on the display now.** A runtime `_parameter_range` does reach
+`value_items`, so Live re-reads an Enum's item list after the device has loaded. Push
+does not — it keeps the labels it held when the bank page appeared, and a plain write
+stayed invisible until Push was restarted. Redefining the page after every write is what
+closed that gap.
+
+`labels` writes and then re-reads, so one command produces both halves. Read the second
+line against the first:
+
+| `min`/`max` | `value_items` | what it means |
+|---|---|---|
+| moved | moved | Live has the names — the case that now holds. Anything still blank on hardware is Push's own caching, and `bank` is the lever |
+| moved | unchanged | Max took the item list; Live's copy is frozen at device load. **The labels cannot arrive this way at all** |
+| unchanged | unchanged | Max refused the message. Vary the shape — the count with `labels <n>`, the spaces with `labelspaces` |
+
+The `live.banks` page is defined at `live.thisdevice`, which is before `node.script` is
+even running, so a label always reaches the parameter *after* Push was told what is on
+the encoder. Cycling '74 documents that banks "can be modified in real-time to cause
+updates on the Push display", and re-asserting the page did make names appear that a
+plain write didn't — which is why `refreshPushBankStrip` fires it every time. `bank` is
+that message on its own, for telling a label that never arrived apart from one sitting
+behind the cache.
+
+Two questions the labels left open, and which of these settles each: where Push truncates
+a name longer than `PUSH_LABEL_MAX` — `labels` with names built to find the edge — and
+whether the non-breaking space `sanitizePushLabel` substitutes is doing anything at all,
+which is `labelspaces`.
+
+What Cycling '74 documents about the write itself, and what it doesn't, is in the Push
+section of [`../../tools/build-device.ts`](../../tools/build-device.ts).
 
 ## Snapshot phases
 

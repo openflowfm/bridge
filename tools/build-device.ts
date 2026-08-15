@@ -265,10 +265,10 @@ const sToLom = obj('s ---bsv-to-lom', [20, 202, 120, 22], 1, 0);
 
 const rToLom = obj('r ---bsv-to-lom', [370, 58, 120, 22], 0, 1);
 const routeStatus = obj(
-  'route status device_state_get device_state_set push_label',
-  [370, 90, 340, 22],
+  'route status device_state_get device_state_set push_songs push_bank',
+  [370, 90, 400, 22],
   1,
-  5,
+  6,
 );
 const deferlow = obj('deferlow', [440, 124, 70, 22], 1, 1);
 const v8 = obj('v8 lom.js', [440, 156, 100, 22], 1, 1);
@@ -391,35 +391,59 @@ connect(pluginIn, 0, pluginOut, 0);
 connect(pluginIn, 1, pluginOut, 1);
 
 // ---------------------------------------------------------------------
-// Push song browser — one Int parameter on a connected Push's encoder strip
+// Push song browser — one Enum parameter on a connected Push's encoder strip
 // (via live.banks) whose *value* is a position in the running order and whose
-// *label* is the song sitting at that position. Turn it and the name under
-// your hand changes; the scene selection in Live follows.
+// *value labels* are the songs. Turn it and the name under your hand changes;
+// the scene selection in Live follows.
 //
-// Two dead ends got us here, both worth not repeating:
+// Verified on a Push 3: one bank, one encoder, one detent per position, the
+// song names on the display, the right index in the log, Live's selection
+// following.
 //
-//   - **Sixteen parameters, one song named into each `_parameter_shortname`.**
-//     Capped the set at sixteen, spent eight encoders and two live.banks pages,
-//     and came up generic on hardware — though with a song list that may never
-//     have been built, so the label mechanism itself was never really on trial.
+// What the documentation says (Max 9, bundled with Live 12 —
+// `docs/refpages/m4l-ref/parameters.maxref.xml` and `paraminspector.maxref.xml`):
 //
-//   - **One Enum parameter whose values are the songs.** An Enum's items are
-//     `parameter_enum`, which is *saved* metadata: Max has no `_parameter_enum`
-//     runtime message at all, and `_parameter_range` on an Enum is taken as the
-//     numeric min/max, so a two-song set rendered as `0` and `1`. The item list
-//     of a live.menu cannot be changed while the device is loaded.
+//   - A parameter has one **Range/Enum** field. For Int and Float it holds the
+//     min and max; **for Enum it holds the item list itself**, space-delimited.
+//     One field, two meanings, chosen by the parameter's type.
+//   - Its message name is `_parameter_range`, and it is marked settable. There
+//     is no `_parameter_enum` message — `parameter_enum` is only the key this
+//     patcher's JSON is saved under, and `live.menu` carries no attribute for
+//     the item list of its own.
+//   - "If list items contain a space or special characters, the name should be
+//     enclosed in double quotes." Written about the Inspector's text field; what
+//     it means for a list handed over as atoms is not stated anywhere.
 //
-// What that second attempt did prove is that runtime parameter metadata reaches
-// Push — the range changed under it, live. So the name travels as
-// `_parameter_shortname` and only the *current* one is ever set, which is the
-// one thing that doesn't need a list. No cap, one encoder, no paging.
+// So `_parameter_range` is not one of several ways to name an Enum's values at
+// runtime. It is the only one, and this is it.
 //
-// This patcher owns no size constant: the range arrives from bridge.ts sized to
-// the set. See its "Push song browser" section.
+// What the documentation does not say, and what the hardware answered:
+//
+//   - **Live does re-read the item list after the device has loaded.** Push
+//     draws its value text from `DeviceParameter.value_items`, and a runtime
+//     `_parameter_range` reaches it. This is the whole feature.
+//   - **Push, on the other side of that, does not.** It keeps the labels it was
+//     given, and names written while it was already showing the device did not
+//     appear until Push itself was restarted. Redefining the `live.banks` page
+//     after each write is the lever on that — see `push_bank` below.
+//   - Whether the new list may be a different length from the old one is still
+//     open, and deliberately not relied on: the list sent is always exactly as
+//     long as the one declared here.
+//
+// `npm run dev:diag -- labels <n>` re-runs any of this with synthetic names,
+// with no song list in the frame. See `diagPushLabels` in bridge.ts.
+//
+// One dead end worth not repeating: **sixteen parameters, one song named into
+// each `_parameter_shortname`.** It capped the set at sixteen, spent eight
+// encoders and two live.banks pages, and came up generic on hardware — Push
+// displays the *long* name, and reads it from Live's registration rather than
+// from the object, so the short name never had a chance of being seen.
 // ---------------------------------------------------------------------
 
 /** Positions on the encoder. Must match PUSH_SONG_MAX in bridge/src/bridge.ts. */
 const PUSH_SONG_MAX = 128;
+/** A position with no song at it. Matches bridge.ts. */
+const PUSH_EMPTY_SLOT = '-';
 /** Stale banks to clear on load; more than any build has ever defined. */
 const PUSH_BANK_CLEAR = 8;
 
@@ -427,7 +451,7 @@ comment('Push song browser — one Enum parameter, named by bridge.ts', [
   20, 536, 460, 20,
 ], { fontsize: 10.0 });
 
-connect(routeStatus, 4, deferlow, 0); // everything else -> LOM
+connect(routeStatus, 5, deferlow, 0); // everything else -> LOM
 
 // A real Live-visible parameter — that's what makes it addressable by
 // live.banks (by name) and what makes Live route encoder turns to it.
@@ -440,12 +464,9 @@ connect(routeStatus, 4, deferlow, 0); // everything else -> LOM
 // `live.menu` the same encoder turned, moved and reported. Whatever the reason,
 // don't swap the object back without a Push in front of you.
 //
-// The Enum's items are vestigial: `parameter_enum` is *saved* metadata that
-// cannot be rewritten at runtime, and bridge.ts's `_parameter_range` replaces
-// the whole thing with a numeric span sized to the set. Which is fine — the
-// value is a position and the *name* is the song, and the name is the one piece
-// of metadata that does travel. One item is declared here only because a
-// parameter of this type must have at least one before it is sized.
+// The items declared here are placeholders that bridge.ts overwrites with song
+// names. They are dashes rather than song-shaped text so that a Push showing
+// them is unmistakably a Push that never received the write.
 //
 // `parameter_longname` is the one piece of metadata that must never change:
 // live.banks addresses this parameter by that name, and it is the identity Live
@@ -459,17 +480,23 @@ const songMenu = box('live.menu', null, [20, 570, 120, 15], {
   saved_attribute_attributes: {
     valueof: {
       parameter_type: 2,
-      // One item per position, fixed at build time, because that is the only
-      // time an Enum's items can be set. The item text is the position number:
-      // the *name* of what is there travels separately and changes with the set,
-      // but how many places there are to stand cannot.
-      parameter_enum: Array.from({ length: PUSH_SONG_MAX }, (_, i) => String(i + 1)),
+      // One placeholder per position. This is the same field bridge.ts writes
+      // at runtime as `_parameter_range`, under the name the patcher file saves
+      // it as, so what is declared here is exactly what a successful write
+      // replaces — which is why `diag param` reading these back unchanged is a
+      // clean negative.
+      parameter_enum: Array.from({ length: PUSH_SONG_MAX }, () => PUSH_EMPTY_SLOT),
       // **Never a zero-width range.** A control surface normalizes a value to
       // draw it, which divides by `mmax - mmin` and by `steps - 1`; declared
       // 0…0 with one step, this crashed Push the instant it tried to draw the
-      // device, before a single message had arrived. Two positions is the
-      // narrowest this may ever legally be — see the floors in bridge.ts, which
-      // hold the same line for the runtime range.
+      // device, before a single message had arrived.
+      //
+      // Max's own Enum objects save neither of these — an item list is a length,
+      // and the span and the detent count follow from it. They are written by
+      // hand anyway because this parameter's shape must never move: Push caches
+      // what it was told about a control, and a runtime resize is what once left
+      // a 34-song set spanning 0…33 in two detents. Declared, they are what
+      // hardware was told at load and what a same-length write leaves alone.
       parameter_mmax: PUSH_SONG_MAX - 1,
       parameter_steps: PUSH_SONG_MAX,
       parameter_initial_enable: 1,
@@ -502,20 +529,37 @@ const prependSong = obj('prepend push_song', [160, 570, 110, 22], 1, 1);
 connect(songMenu, 0, prependSong, 0); // outlet 0 is the item index
 connect(prependSong, 0, sToNode, 0);
 
-// Incoming, naming: `push_label <name>` — the song at the current position.
-// Only ever one name, which is why this survives where a whole list could not.
-const prependLabel = obj('prepend _parameter_shortname', [700, 536, 170, 22], 1, 1);
-connect(routeStatus, 3, prependLabel, 0);
-connect(prependLabel, 0, songMenu, 0);
+// Incoming, naming: `push_songs <name> …` — the value labels, one per position,
+// arriving as one message because the field they set is one list.
+//
+// `prepend` is what makes the list a *message* again: the atoms cross from Node
+// as a list, and an attribute is only set by a message whose selector is the
+// attribute's name. Nothing here re-parses the names as text, so whatever Node
+// hands over as one atom stays one atom.
+//
+// The parameter's *name* stays `Song` — Live registers that when the device
+// loads and a runtime rename is both invisible to Push and enough to unbind the
+// live.banks entry that addresses it. These are the values, which is the other
+// meaning of the same field. See the section header for what is documented
+// about that and what isn't.
+const prependNames = obj('prepend _parameter_range', [700, 536, 170, 22], 1, 1);
+connect(routeStatus, 3, prependNames, 0);
+connect(prependNames, 0, songMenu, 0);
 
-// **The range is not sized at runtime, because it can't be.** On hardware
+// **The span and the detent count are never written at runtime.** On hardware
 // `_parameter_range` propagated and `_parameter_steps` did not, which left a
-// 34-song set spanning 0…33 in two detents. So the span and the detent count
-// are both baked above at PUSH_SONG_MAX and never touched again: one detent is
-// always one position, and positions past the end of the set read `no songs`
-// and jump nowhere. That also means no metadata write can resize this
-// parameter while Push is drawing it, which is the thing that crashed it.
-comment('live.banks — cleared, then one page, fired once at init', [20, 610, 340, 20], {
+// 34-song set spanning 0…33 in two detents — so one of the two halves of a
+// resize lands and the other doesn't, and the result is an encoder that skips.
+// Both are baked into the declaration above instead: one detent is always one
+// position, and positions past the end of the set jump nowhere.
+//
+// That earlier observation is also the strongest evidence for the labels, and
+// worth reading carefully: something about `_parameter_range` did reach Push
+// after load. What it reached Push *as* was a numeric span — which is what that
+// field means on an Int, and this parameter was one at the time.
+comment('live.banks — cleared, then one page, at init and on push_bank', [
+  20, 610, 400, 20,
+], {
   fontsize: 10.0,
 });
 const banks = obj('live.banks', [20, 634, 90, 22], 1, 1);
@@ -528,9 +572,25 @@ const banks = obj('live.banks', [20, 634, 90, 22], 1, 1);
 const banksReset = msg('delete 0', [130, 666, 80, 22]);
 const banksClear = obj(`uzi ${PUSH_BANK_CLEAR}`, [130, 698, 70, 22], 2, 3);
 const banksNew = msg('new 0 Songs Song', [130, 634, 260, 22]);
+
 // Right to left: clear every stale bank, and only then define ours.
+//
+// Nothing here tells Node the device is up, because it cannot: `node.script`
+// is not running yet when `live.thisdevice` fires — it answers
+// "Node script not ready can't handle message". Which also settles a question
+// worth not re-asking: the labels are never written *before* the device exists,
+// because Node starts after it.
+//
+// **The bank is therefore always defined before the labels are written**, and
+// Push keeps the labels it was handed when the page appeared — new names did
+// not show up until Push was restarted. Cycling '74 says banks "can be modified
+// in real-time to cause updates on the Push display", so `push_bank` redefines
+// this page and `refreshPushBankStrip` fires it after every write. Same index,
+// same name, same parameter: the redefinition exists only to make Push look
+// again.
 const banksOrder = obj('t b b', [20, 602, 50, 22], 1, 2);
 connect(thisdevice, 0, banksOrder, 0);
+connect(routeStatus, 4, banksOrder, 0);
 connect(banksOrder, 1, banksClear, 0);
 connect(banksClear, 0, banksReset, 0);
 connect(banksReset, 0, banks, 0);

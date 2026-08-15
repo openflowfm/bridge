@@ -518,21 +518,25 @@ function rearmWatches(): void {
 
 // --- Push song browser -------------------------------------------------
 //
-// One Int parameter on Push's encoder strip — see `tools/build-device.ts` for
-// the parameter and its single live.banks page, and for the two designs this
-// replaced. Its value is a position in the running order and its label is the
-// song at that position, so turning the encoder walks the set with the name
-// under your hand. It selects that song's first scene in Live and fires
-// nothing, so scrubbing mid-song is safe.
+// One Enum parameter on Push's encoder strip — see `tools/build-device.ts` for
+// the parameter, its live.banks page, and what Cycling '74 documents about
+// naming an Enum's values at runtime. Its value is a position in the running
+// order and its value labels are the songs, so turning the encoder walks the
+// set with the name under your hand. It selects that song's first scene in
+// Live and fires nothing, so scrubbing mid-song is safe.
 //
 // The song list is held here rather than only derived in the browser
 // (`useSongLayout`), because the point of the feature is jumping to a song
 // with no browser tab open at all.
 //
-// Only ever one name goes to the device — the one under the encoder. That's
-// what makes this work where a whole list didn't: an enum's items are fixed
-// when the device loads, but a parameter's short name can be rewritten as often
-// as you like.
+// **The names are on the display.** Live does re-read an Enum's item list after
+// the device has loaded, so a runtime `_parameter_range` reaches Push. Push
+// itself does not re-read: it keeps whatever it held when the bank page
+// appeared, which is why every write here is followed by a redefinition of that
+// page. What is still unmeasured is narrower — where Push truncates a long
+// name, and whether the non-breaking space below is doing anything at all.
+// `diag labels` / `diag labelspaces` / `diag bank` measure those one at a time,
+// with no song list in the frame.
 
 /**
  * Cycling '74's guidance for a `parameter_shortname` is "5 to 7 characters",
@@ -543,14 +547,22 @@ function rearmWatches(): void {
 const PUSH_LABEL_MAX = 12;
 
 /**
- * Enough for the hundred-song set the app is built for, with room over. A cap
- * at all only so a pathological set can't hand Live a parameter with thousands
- * of steps, which is a detent count no encoder is usable at.
+ * Positions on the encoder, and the number of placeholders the parameter is
+ * declared with in `tools/build-device.ts`. The two must agree.
+ *
+ * **Fixed, and deliberately larger than any set.** Sizing the parameter to the
+ * running order is the obvious design and it is the one that failed: on
+ * hardware `_parameter_range` propagated while `_parameter_steps` did not,
+ * leaving a 34-song set spanning 0…33 in two detents. Push also caches what it
+ * was told about a control, so a parameter that changes shape underneath it
+ * goes wrong in a way that outlives the write. Only the *text* moves at
+ * runtime; the span and the detent count are baked in and never touched.
+ *
+ * The cost is a tail of empty positions past the end of the set, which costs
+ * nothing because nobody turns into it. The cap exists only so a pathological
+ * set can't ask Live for a parameter with thousands of detents.
  */
 const PUSH_SONG_MAX = 128;
-
-/** What the encoder reads before a walk has produced anything. */
-const NO_SONGS = 'no songs';
 
 interface PushSong {
   name: string;
@@ -567,51 +579,121 @@ let pushSongIndex = -1;
 /**
  * Strip characters Max message syntax treats specially, then fit the budget.
  *
- * Spaces are kept. Each name crosses to Max as one symbol atom and is passed
- * object to object without being re-parsed as text, so a two-word title stays
- * one enum item — but this is the assumption to check first if the encoder
- * shows a set of half-titles.
+ * **The non-breaking space is a guess, and `diag labelspaces` is how it stops
+ * being one.** Cycling '74 says an item containing a space "should be enclosed
+ * in double quotes", but says it about the Inspector's text field — a name
+ * handed over as an atom was never parsed as text, so there may be nothing to
+ * quote. `lom.ts` measured the same question for LiveAPI writes and found that
+ * a JS string with a space crosses as one symbol (see `setName`); whether Node
+ * for Max agrees is a different path and unmeasured. If it does, this
+ * substitution is solving a problem that doesn't exist and should go — it is
+ * the one thing here that quietly changes what the user typed.
  */
 function sanitizePushLabel(name: string): string {
-  const clean = name.replace(/[,;"]/g, '').replace(/\s+/g, ' ').trim();
+  const clean = name
+    // Max message syntax: separators, quoting, and `$` argument substitution.
+    .replace(/[,;"$\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (clean === '') return '(untitled)';
-  return clean.length > PUSH_LABEL_MAX ? clean.slice(0, PUSH_LABEL_MAX) : clean;
+  const fitted =
+    clean.length > PUSH_LABEL_MAX ? clean.slice(0, PUSH_LABEL_MAX).trim() : clean;
+  return fitted.replace(/ /g, '\u00a0');
 }
 
+/** A position with no song at it. Matches tools/build-device.ts. */
+const PUSH_EMPTY_SLOT = '-';
+
 /**
- * How long the encoder has to settle before its name is rewritten.
+ * How long the labels are given to land before the bank is redefined over them.
  *
- * Renaming a parameter is not like sending it a value: a control surface re-reads
- * the parameter when its metadata changes, and a spun encoder would ask Push to
- * do that dozens of times a second. Trailing rather than leading, so a slow turn
- * still names each song as you reach it, and a fast sweep names only where you
- * stopped.
+ * The write and the re-read are two messages through the same patch cord, so
+ * this only has to outlast Max's own scheduling — it is not waiting on Live.
  */
-const PUSH_LABEL_SETTLE_MS = 80;
-
-let pushLabelTimer: NodeJS.Timeout | undefined;
-
-/** Name the position the encoder is on. The only name Push ever has to hold. */
-function labelPushSong(i: number): void {
-  if (pushLabelTimer) clearTimeout(pushLabelTimer);
-  pushLabelTimer = setTimeout(() => {
-    pushLabelTimer = undefined;
-    const song = pushSongs[i];
-    Max.outlet('push_label', song ? sanitizePushLabel(song.name) : NO_SONGS);
-  }, PUSH_LABEL_SETTLE_MS);
-}
+const PUSH_BANK_SETTLE_MS = 50;
 
 /**
- * Name wherever the encoder is currently standing.
+ * Hand Push every value label at once — the whole running order, one message.
  *
- * The encoder is *not* resized to the set: its span and detent count are baked
- * into the device at `PUSH_SONG_MAX`, because on hardware `_parameter_range`
- * propagated and `_parameter_steps` did not, which left a 34-song set spanning
- * 0…33 in two detents. Positions past the end of the running order name
- * themselves `no songs` and jump nowhere, which is the whole handling they need.
+ * **Once per set change, and never while anyone is playing.** Turning the
+ * encoder only moves between labels that are already on the device, so there is
+ * nothing to write, nothing to debounce, and no metadata churn at the moment it
+ * would matter most.
+ *
+ * **Exactly `PUSH_SONG_MAX` items, padded with `PUSH_EMPTY_SLOT`.** The list
+ * sets the same field the parameter's positions were declared with, so sending
+ * the declared length is what keeps the span and the detent count the ones Push
+ * was told about at load.
+ *
+ * **Then the bank is redefined, because Push keeps what it read.** Names
+ * written while Push was already looking at the device did not appear until it
+ * was restarted — it caches a control's value labels rather than re-reading
+ * them. Cycling '74 documents banks as modifiable in real time "to cause
+ * updates on the Push display", which is the only lever there is on that cache,
+ * so every write pulls it. Redefining a page that already exists is otherwise a
+ * no-op: same index, same name, same parameter.
  */
 function refreshPushBankStrip(): void {
-  labelPushSong(0);
+  const labels = Array.from({ length: PUSH_SONG_MAX }, (_, i) => {
+    const song = pushSongs[i];
+    return song ? sanitizePushLabel(song.name) : PUSH_EMPTY_SLOT;
+  });
+  Max.post(`push: labels -> ${labels.slice(0, 4).join(' | ')} … (${labels.length})`);
+  Max.outlet('push_songs', ...labels);
+  setTimeout(() => Max.outlet('push_bank'), PUSH_BANK_SETTLE_MS);
+}
+
+/** How long Live is given to notice a metadata write before it is read back. */
+const DIAG_LABEL_READBACK_MS = 300;
+
+/**
+ * Send labels no song in the set could have produced. Developer diagnostic.
+ *
+ * The song list has been the confounder in every attempt at this: a label that
+ * never appears on Push proves nothing while the walk, the derive step, the
+ * sanitizer and the parameter are all still in the frame. These names come from
+ * nowhere but here, so what reaches the hardware is the message and the
+ * parameter alone.
+ *
+ * `count` is deliberately free of `PUSH_SONG_MAX`. Whether an Enum's item list
+ * may change length at runtime is unrecorded in Cycling '74's docs — the
+ * parameters reference says only that the Range/Enum field *is* the item list
+ * for an Enum — so sending the wrong number on purpose is how that gets
+ * settled. A count Max rejects and a count it accepts look identical from here;
+ * the `diag param` readback afterwards is what tells them apart.
+ */
+function diagPushLabels(count: number, spaces: boolean): void {
+  const n = spaces ? PUSH_SONG_MAX : Math.max(0, Math.min(count, 64));
+  const labels = Array.from({ length: n }, (_, i) => `L${i + 1}`);
+  if (spaces) {
+    // The two forms a two-word title can take. Max message syntax splits on the
+    // ASCII space, so if the list arrives one atom too long per space, only the
+    // second of these survives — and if both survive, `sanitizePushLabel` is
+    // solving a problem that doesn't exist.
+    if (n > 1) labels[1] = 'Two Words';
+    if (n > 2) labels[2] = 'Two\u00a0Words';
+  }
+  Max.post(
+    `push: diag labels -> ${n} item(s)` + (n ? ` — ${labels.join(' | ')}` : ' (cleared)'),
+  );
+  Max.outlet('push_songs', ...labels);
+  // Live is not asked what it thinks until it has had a scheduler tick to
+  // notice: read back in the same breath and a stale answer looks like a
+  // refused write.
+  setTimeout(() => Max.outlet('diag', 'param', 0), DIAG_LABEL_READBACK_MS);
+}
+
+/**
+ * Rebuild the live.banks page on demand. Developer diagnostic.
+ *
+ * `refreshPushBankStrip` already does this after every write. This is the same
+ * message on its own, for telling a label that never arrived apart from one
+ * that arrived and is sitting behind Push's cache — which is a distinction that
+ * cost a Push restart per test to make before the two were separable.
+ */
+function diagPushBank(): void {
+  Max.post('push: diag bank -> clearing and redefining the live.banks page');
+  Max.outlet('push_bank');
 }
 
 /** Re-derive the song list from whatever scene rows are currently held. */
@@ -672,7 +754,6 @@ Max.addHandler('push_song', (i: number) => {
   // out from under a running song. Only a change is a turn.
   if (i === pushSongIndex) return;
   pushSongIndex = i;
-  labelPushSong(i);
   const song = pushSongs[i];
   // Confirms this half of the chain independent of whether the jump visibly
   // did anything: if this never prints, the encoder isn't reaching bridge.ts
@@ -853,6 +934,17 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     // instead. See the `diag` note in protocol/global.d.ts for why.
     case 'diag': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      // Two of them are answered here rather than in lom.ts, because the thing
+      // under test is the Node→patcher→parameter path itself — forwarding them
+      // would route the probe around the code it is probing.
+      if (m.what === 'labels' || m.what === 'labelspaces') {
+        diagPushLabels(Number(m.arg ?? 0), m.what === 'labelspaces');
+        break;
+      }
+      if (m.what === 'bank') {
+        diagPushBank();
+        break;
+      }
       Max.outlet('diag', String(m.what), Number(m.arg ?? 0));
       break;
     }

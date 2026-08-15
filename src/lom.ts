@@ -3874,6 +3874,58 @@ var diagSelectSceneTask = new Task(function () {
   }
 });
 
+/**
+ * What Live — and therefore Push — believes this device's parameters are.
+ *
+ * Push draws an encoder's value text from `DeviceParameter.value_items`, so
+ * that list is the only thing worth measuring when a label doesn't appear: it
+ * is the last place the name exists before it becomes pixels on hardware. Max's
+ * own state doesn't settle it, because the question is precisely whether Live
+ * re-read Max after the device loaded.
+ *
+ * Read it once before writing anything, and again after `diag labels`. The two
+ * readings together say which half is at fault:
+ *
+ *   - `min`/`max` move and `value_items` doesn't → Max took the new item list
+ *     and Live's copy is frozen at load. The labels can never arrive this way.
+ *   - neither moves → Max rejected the message; the atoms or the count are
+ *     wrong and the shape is worth varying.
+ *   - both move → Live has the names and anything still missing is Push's own
+ *     caching, which is a different search.
+ */
+function diagParam(): void {
+  const dev = at('this_device');
+  if (!exists(dev)) {
+    post('bsv diag param: this_device did not resolve\n');
+    return;
+  }
+  const count = dev.getcount('parameters');
+  post('bsv diag param: ' + count + ' parameter(s) on this device\n');
+  // Canonical paths, not `id N` — [`LOM.md`](../LOM.md) records `goto('id N')`
+  // as not resolving here, and a probe that silently addresses nothing would
+  // read as "Live has no labels" no matter what Live actually holds.
+  for (let i = 0; i < count; i++) {
+    const p = at('this_device parameters ' + i);
+    if (!exists(p)) {
+      post('bsv diag param: [' + i + '] did not resolve\n');
+      continue;
+    }
+    const items = p.get('value_items');
+    // Reported as a count *and* as text: a name carrying a space arrives as
+    // several atoms, so a list that reads right when joined can still be the
+    // wrong length, and the length is what Push indexes into.
+    const list = Array.isArray(items) ? items : items === undefined ? [] : [items];
+    post(
+      'bsv diag param: [' + i + '] "' + gstr(p, 'name') + '"' +
+        ' quantized=' + (gbool(p, 'is_quantized') ? 1 : 0) +
+        ' min=' + gnum(p, 'min') + ' max=' + gnum(p, 'max') +
+        ' value=' + gnum(p, 'value') +
+        ' items=' + list.length + '\n',
+    );
+    if (list.length) post('bsv diag param:      ' + list.map(String).join(' | ') + '\n');
+  }
+}
+
 function diag(what: string, arg: number): void {
   if (!deviceReady) {
     post('bsv diag: device not ready\n');
@@ -3890,11 +3942,12 @@ function diag(what: string, arg: number): void {
     else if (w === 'detach') diagDetach();
     else if (w === 'scroll') diagScroll(arg);
     else if (w === 'selectscene') diagSelectScene(arg);
+    else if (w === 'param') diagParam();
     else {
       post(
         'bsv diag: unknown "' + w + '". Try: ids | slot | sel | watch 0|1 | ' +
           'scan <track> | attach <n> | detach | scroll <signed steps> | ' +
-          'selectscene <index>\n',
+          'selectscene <index> | param\n',
       );
     }
   } catch (e) {
