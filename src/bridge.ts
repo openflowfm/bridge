@@ -145,7 +145,12 @@ function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
   if (!value || typeof value !== 'object' || (value as { version?: unknown }).version !== 1) {
     return null;
   }
-  const source = value as { defaultArtist?: unknown; roles?: unknown; allowedColors?: unknown };
+  const source = value as {
+    defaultArtist?: unknown;
+    roles?: unknown;
+    allowedColors?: unknown;
+    writeSceneTempo?: unknown;
+  };
   const state: BSV.DeviceState = {
     version: 1,
     defaultArtist: cleanDefaultArtist(source.defaultArtist),
@@ -154,6 +159,9 @@ function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
   if (Object.prototype.hasOwnProperty.call(source, 'allowedColors')) {
     state.allowedColors = cleanAllowedColors(source.allowedColors);
   }
+  // Only when it's on. Absent already means off, so writing `false` would grow
+  // the stored blob for nothing — and this is a Max symbol with a size limit.
+  if (source.writeSceneTempo === true) state.writeSceneTempo = true;
   return state;
 }
 
@@ -956,14 +964,21 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'saveSetConfig': {
       const roles = cleanRoles(m.roles);
       const defaultArtist = cleanDefaultArtist(m.defaultArtist);
+      const held = deviceState ?? { version: 1 as const, defaultArtist: '', roles: [] };
+      // Omitted means "this client isn't saying" — an older UI still saving the
+      // rest of the form must not turn a playback-affecting setting off.
+      const writeSceneTempo =
+        m.writeSceneTempo === undefined ? held.writeSceneTempo : m.writeSceneTempo === true;
       await publishDeviceState({
-        ...(deviceState ?? { version: 1 as const, defaultArtist: '', roles: [] }),
+        ...held,
         defaultArtist,
         roles,
+        writeSceneTempo,
       });
       Max.post(
         `device state: ${roles.length} role(s), ` +
-          `${defaultArtist === '' ? 'no default artist' : `default artist ${defaultArtist}`}`,
+          `${defaultArtist === '' ? 'no default artist' : `default artist ${defaultArtist}`}` +
+          `${writeSceneTempo ? ', scene tempo on rename' : ''}`,
       );
       send(ws, {
         type: 'setConfigSaved',
