@@ -10,12 +10,12 @@ touched at all. That is the difference between a second tab that opens instantly
 that waits out a walk of every clip slot in the set: ~1s at 243 clips, ~8.8s projected at
 848 scenes, all of it on Live's main thread while someone is playing.
 
-`fresh: true` on the request is how a client asks for the walk anyway. Two send it, and
-only two: the **Snapshot** button, and the client's staleness backstop. Both are asking
+`fresh: true` on the request is how a client asks for the walk anyway, and exactly one
+thing sends it: the **Snapshot** button. That is a person saying "go and look", which is
 the one question held state cannot answer — whether something with *no observer at all*
-changed underneath us (`Clip.length`, `Track.fold_state`, another M4L device). The
-automatic walk when a tab connects is deliberately **not** fresh; that case is the one
-this exists to make free.
+changed underneath us (`Clip.length`, `Track.fold_state`, another M4L device). Everything
+a client does automatically — connecting, coming back to the window, reconciling after a
+write — is deliberately **not** fresh. Those are the cases this exists to make free.
 
 ### What keeps it current
 
@@ -70,10 +70,13 @@ records `heldGeneration` when it starts and only becomes the held set if that nu
 moved; the client that asked still gets its answer, and re-reads on the structural change
 that follows. Push isn't relabelled from one either.
 
-Dropping deliberately does **not** start a walk of its own. Live's main thread is the scarce
-resource, and a walk nobody asked for could land mid-performance; the next client request
-pays for it instead. Until then Push keeps the song list it already had, which is stale
-rather than wrong-looking-right.
+Dropping does not itself start a walk — the *callers* decide, and they don't agree, on
+purpose. A structural change means the set is a different shape and knowing its shape is
+this process's job, so that one goes and looks. A write Live took only partly leaves us
+unsure rather than behind, and the client that made it is already re-reading; a second
+walk from here would be the same read twice. Live's main thread is the scarce resource in
+all of it, and until whatever walk is coming lands, Push keeps the song list it already
+had — stale rather than wrong-looking-right.
 
 ## Multiple clients
 
@@ -86,7 +89,7 @@ replies route to the client that asked. Terminal replies (`snapshot`, `applied`,
 `palette`) go to the requester; `changed`, `delta`, `deviceState` and `reload` broadcast.
 Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-client.
 
-**Watches are refcounted**, which they had to become the moment `useBridge` started
+**Client watches are refcounted**, which they had to become the moment `useBridge` started
 following Live. Every watch is one global observer list in `lom.ts`, including the fixed
 control-bar list, so a client sending `watch_play 0` on unmount used to stop play state for
 every other client too — and a client that closed its tab never sent `off` at all, holding
@@ -94,37 +97,56 @@ the watch open forever.
 `bridge.ts` keeps a `Set` of sockets per watch kind, releases them on socket close, and
 re-arms from that record when the LOM reports ready again after a device reload.
 
-**`on` is forwarded for every watch but one, and only `off` is edge-triggered.** That
-looks like a bug and mostly isn't: `watch_play`, `watch_meters` and `watch_sends` install
-observers per *track* (and meters also on Master), so a client re-sends `on` to rebuild
-them when a snapshot finds a different track count; suppressing that because another
-client already held the watch would leave the observers addressing a set that no longer
-exists. Forwarding costs nothing, because every `watch_*` handler in `lom.ts` clears or
-rebuilds before it installs. Sets rather than counters, so a client sending `on` twice
-doesn't need two `off`s to release.
+**Two watches belong to the device, and five to whoever is looking.**
 
-**`observe` is the exception, and it was a real bug.** Re-arming it re-installs the
-`live_set tracks` and `live_set scenes` observers, and installing a LiveAPI property
-observer makes Live call back once with the value it already had. That callback arrives
-here as `changed structure`, which dropped the held set and was broadcast to every client
-as "go and re-walk". So **every browser connect invalidated the bridge's copy of the set
-and then paid for a full walk to rebuild it** — the entire cache, defeated by opening the
-page. Worse at device start, where the echo landed in the middle of the walk the device
-had kicked off for itself, so that walk was discarded and a second one ran: two full
-passes over every clip slot, back to back, to learn nothing had changed.
+`observe` (the set restructured) and `watch_selection` (the Session cursor, which is how a
+clip edited in Live reaches the held copy) are how the bridge keeps the set it holds
+current. They are armed once when the LOM reports ready and never released, because
+**a client connecting or disconnecting must not change what the device knows**. Clients
+cannot subscribe to them at all; the messages no longer exist in the protocol.
 
-`observe` is therefore armed only on the 0→1 transition, and there is nothing to seed by
-re-arming it: unlike the frame-pushing watches it has no reply at all, it reports
-*changes*. `REARM_ON_JOIN` in `bridge.ts` is that distinction, one row per watch, so the
-next watch added has to answer the question rather than inherit an answer.
+They used to be client subscriptions, and that was the mistake underneath a long run of
+symptoms. Arming `observe` re-installs the `live_set tracks` and `live_set scenes`
+observers, and installing a LiveAPI property observer makes Live call back once with the
+value it already had. That callback arrives here as `changed structure`, which dropped the
+held set and was broadcast to every client as "go and re-walk". So opening the page
+invalidated the cache the page was about to read; closing the last tab tore the observers
+down entirely and left the bridge blind; and under React StrictMode, which mounts,
+unmounts and mounts again, one page load did it twice. The workaround at the time was to
+hoist `BridgeProvider` above `App` so a hot update wouldn't re-arm — which treated the
+cost as a fact of life rather than a bug.
 
-The echo still happens whenever `observe` genuinely is armed — a first client, or
-`rearmWatches` after a device reload — so `expectStructureEcho` braces for it there.
-**Counted and time-boxed together**, because either alone fails badly: a count alone would
-silently eat the next real structural change if Live ever stopped echoing, and a window
-alone would eat every structural edit made in the first ten seconds. Two observers, ten
-seconds, whichever runs out first. The window is generous because the echo queues behind
-whatever Live is doing, and at device start that is a full walk.
+The remaining five — `watch_play`, `watch_meters`, `watch_status`, `watch_sends`,
+`watch_transport` — are viewport concerns. Meters at 30 Hz with nothing on screen is pure
+waste, and several install observers per *track*, so a client re-sends `on` to rebuild
+them when a snapshot finds a different track count. For those, **`on` is forwarded on
+every subscribe and only `off` is edge-triggered**: they answer with a frame, and a client
+joining an already-watched stream would otherwise wait for the next change before it had
+any state at all. Forwarding costs nothing, because every `watch_*` handler in `lom.ts`
+clears or rebuilds before it installs. Sets of sockets rather than counters, so a client
+sending `on` twice doesn't need two `off`s to release.
+
+The install echo still happens where `observe` genuinely is armed — once per device start
+— so `expectStructureEcho` braces for it there. **Counted and time-boxed together**,
+because either alone fails badly: a count alone would silently eat the next real
+structural change if Live ever stopped echoing, and a window alone would eat every
+structural edit made in the first ten seconds. It also *accumulates* rather than resets,
+since two arms can be outstanding before either echo is delivered.
+
+## Nobody walks but the bridge
+
+A client asking for the set is a message and a payload. It never causes a walk except in
+one case it cannot avoid — the bridge holds nothing yet — and one the user asked for
+explicitly, the **Snapshot** button, which is what `fresh` on the request means.
+
+The staleness backstop moved here for the same reason the watches did. It covers what no
+observer can report: properties Live exposes with no `observe` at all (`Clip.length`,
+`Track.fold_state`) plus another M4L device or a remote script. Deciding the set has gone
+stale, and spending Live's main thread to find out, belongs to the process that owns the
+set — not to N tabs each with their own clock, reaching the same conclusion at the same
+moment and asking for the same walk. `shouldWalk` is still the same function in `core/`
+with the same tests; only the caller moved. Only a walk that was *kept* resets its clock:
+one answered but not held proves nothing about what we know now.
 
 **Not yet guaranteed.** Three things to fix before a second *kind* of client exists:
 

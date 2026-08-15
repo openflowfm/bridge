@@ -14,6 +14,7 @@ import fs = require('node:fs');
 import os = require('node:os');
 import path = require('node:path');
 import { WebSocketServer, WebSocket } from 'ws';
+import { MIN_INTERVAL_MS, STALE_MS, shouldWalk } from '../../core/src/backstop';
 import { applyClipMove } from '../../core/src/clipMove';
 import { derive } from '../../core/src/derive';
 import { LIVE_PALETTE } from '../../core/src/livePalette';
@@ -529,36 +530,44 @@ const watchers: Record<WatchKind, Set<WebSocket>> = {
 };
 
 /**
- * Watches that must **not** be re-armed for a subscriber who is merely joining.
+ * Watches the **device** owns, for its own sake, from the moment the LOM is
+ * ready until it goes away. Never refcounted, never released.
  *
- * `observe` re-installs `live_set tracks` / `live_set scenes` observers, and
- * installing a LiveAPI property observer makes Live call back once with the
- * current value — which arrives here as `changed structure` and drops the held
- * set. So an unconditional re-arm meant **every browser connect invalidated the
- * bridge's copy of the set**, and the tab that had just connected then paid for
- * a full walk. That is the whole cache, defeated by opening the page.
+ * These two are not features a browser subscribes to — they are how the bridge
+ * keeps the set it holds current. `observe` says the set restructured;
+ * `watch_selection` is how a clip edited in Live reaches the held copy. Without
+ * them running, the thing this process exists to maintain goes stale, whether
+ * or not anyone is looking at it.
  *
- * The other watches are re-armed on every subscribe deliberately: they answer
- * with a frame, and a client joining an already-watched stream would otherwise
- * wait for the next change before it had any state at all. `observe` has no
- * such reply — it reports *changes*, and there is nothing to seed.
+ * Refcounting them against sockets was the mistake underneath a string of
+ * symptoms. Every connect re-installed the LOM observers, and installing a
+ * LiveAPI property observer makes Live call back once with the value it already
+ * had — which arrives as `changed structure` and drops the held set. So opening
+ * the page invalidated the cache the page was about to read, and closing the
+ * last tab tore down the observers entirely, leaving the bridge blind until
+ * someone connected again. **A client connecting or disconnecting must not
+ * change what the device knows.**
  */
-const REARM_ON_JOIN: Record<WatchKind, boolean> = {
-  observe: false,
-  selection: true,
-  play: true,
-  meters: true,
-  status: true,
-  sends: true,
-  transport: true,
-};
+const DEVICE_WATCHES = ['observe', 'selection'] as const;
 
+function isDeviceWatch(kind: WatchKind): boolean {
+  return (DEVICE_WATCHES as readonly string[]).includes(kind);
+}
+
+/**
+ * Client-owned watches are re-armed on every subscribe deliberately: they answer
+ * with a frame, and a client joining an already-watched stream would otherwise
+ * wait for the next change before it had any state at all. They also install
+ * observers per *track*, so a client re-sends `on` to rebuild them when a
+ * snapshot finds a different track count.
+ */
 function setWatch(ws: WebSocket, kind: WatchKind, on: boolean): void {
+  // A client can neither claim nor release these; they are already running.
+  if (isDeviceWatch(kind)) return;
   const subs = watchers[kind];
   if (on) {
-    const first = subs.size === 0;
     subs.add(ws);
-    if (first || REARM_ON_JOIN[kind]) armWatch(kind);
+    Max.outlet(WATCH_MESSAGE[kind], 1);
     return;
   }
   // Nothing to release, or someone else still wants it.
@@ -567,14 +576,16 @@ function setWatch(ws: WebSocket, kind: WatchKind, on: boolean): void {
 }
 
 /**
- * Turn a watch on in `lom.ts`, and brace for what installing it echoes back.
+ * Start the watches the device owns. Called once per LOM lifetime.
  *
- * Every path that arms `observe` goes through here, so the echo is expected
- * exactly where it is caused rather than guessed at from timing.
+ * `observe` echoes on install — see `expectStructureEcho` — and because this is
+ * now the only path that arms it, that echo happens once per device start
+ * rather than once per browser connect.
  */
-function armWatch(kind: WatchKind): void {
-  if (kind === 'observe') expectStructureEcho();
-  Max.outlet(WATCH_MESSAGE[kind], 1);
+function armDeviceWatches(): void {
+  expectStructureEcho();
+  for (const kind of DEVICE_WATCHES) Max.outlet(WATCH_MESSAGE[kind], 1);
+  Max.post('watching Live for the device: structural changes and the Session cursor');
 }
 
 /** A vanished client never sends `off`. Release whatever it was holding. */
@@ -592,7 +603,7 @@ function releaseWatches(ws: WebSocket): void {
  */
 function rearmWatches(): void {
   for (const kind of Object.keys(watchers) as WatchKind[]) {
-    if (watchers[kind].size > 0) armWatch(kind);
+    if (watchers[kind].size > 0) Max.outlet(WATCH_MESSAGE[kind], 1);
   }
 }
 
@@ -1008,7 +1019,64 @@ function trackInternal(type: BSV.RequestType): number {
  */
 function requestInternalSnapshot(): void {
   if (!lomReady || snapshotFlight) return;
+  lastAttemptAt = Date.now();
   startFlight(trackInternal('snapshot'));
+}
+
+/**
+ * When a walk last succeeded, and when one was last tried. The backstop's clock.
+ *
+ * On this side rather than in each browser tab, because the set is this
+ * process's to know. N tabs each running their own staleness timer reached the
+ * same conclusion at the same moment and asked N times for the same walk, and a
+ * tab that was merely *open* was what decided Live should spend ~2.6s.
+ */
+let lastSnapshotAt: number | null = null;
+let lastAttemptAt: number | null = null;
+
+/**
+ * Look at Live again when what we hold has gone stale enough to distrust.
+ *
+ * For what no observer can report: properties Live exposes with no `observe` at
+ * all — `Clip.length`, `Track.fold_state` — plus another M4L device or a remote
+ * script. Nothing announces those, so the only way to find out is to look.
+ *
+ * `shouldWalk` is the same function the client used to call, still in `core/`
+ * with its tests; only the caller moved. **Holding nothing is not staleness** —
+ * that case belongs to `ready`, and answering false here is what stops a walk
+ * that failed from being retried in a loop.
+ */
+function backstopTick(): void {
+  if (!lomReady || snapshotFlight) return;
+  if (
+    !shouldWalk({
+      now: Date.now(),
+      lastSnapshotAt,
+      lastAttemptAt,
+      staleMs: STALE_MS,
+      minIntervalMs: MIN_INTERVAL_MS,
+    })
+  ) {
+    return;
+  }
+  Max.post('backstop: the held set is stale enough to re-read — walking Live');
+  requestInternalSnapshot();
+}
+
+let backstopTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Check for staleness on a fixed tick rather than on some event.
+ *
+ * The tick is `MIN_INTERVAL_MS`, which is also the floor `shouldWalk` enforces,
+ * so at most one walk per interval however often this fires. Idempotent: a
+ * device reload calls it again and it replaces the timer rather than stacking a
+ * second one.
+ */
+function startBackstop(): void {
+  if (backstopTimer) clearInterval(backstopTimer);
+  backstopTimer = setInterval(backstopTick, MIN_INTERVAL_MS);
+  backstopTimer.unref?.();
 }
 
 // Routed around lom.ts, same as device_state_get/set — see tools/build-device.ts.
@@ -1271,9 +1339,6 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       send(ws, { type: 'allowedColorsSaved', id: m.id, colors });
       break;
     }
-    case 'observe':
-      setWatch(ws, 'observe', m.on);
-      break;
     // Playback is fire-and-forget: no reqId, no pending entry, no reply. The
     // caller's feedback is the play_state push, and awaiting an ack would only
     // add latency to the one thing that has to feel instant. Both wire types
@@ -1467,10 +1532,6 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'transport', m.on);
       break;
-    case 'watchSelection':
-      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      setWatch(ws, 'selection', m.on);
-      break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -1538,12 +1599,17 @@ Max.addHandler('ready', () => {
   broadcast({ type: 'status', lomReady: true });
   showConnections(); // off the -1 holding state and onto a real count
 
+  // Follow Live for our own sake, before anyone asks and whether or not anyone
+  // ever does. This is what makes the held set a thing the device maintains
+  // rather than a thing the first browser pays to create.
+  armDeviceWatches();
+  startBackstop();
   // A reloaded device has empty observer lists but our record of who wants what
   // survived, so put back whatever clients were already holding.
   rearmWatches();
   // Only needed when the pattr is empty and an old bsv.json may need importing.
   Max.outlet('set_info');
-  // Populates the Push song list even if no browser tab ever connects.
+  // Read the set once, here. Every later client is answered from this.
   requestInternalSnapshot();
 });
 
@@ -1590,6 +1656,9 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   // not relabelled from it either, for the same reason.
   if (walkedGeneration === heldGeneration) {
     held = { snapshot: data, model, dictMs, hostMs };
+    // Only a walk we kept resets the clock. One we answered but couldn't hold
+    // proves nothing about what we know now — see `backstopTick`.
+    lastSnapshotAt = Date.now();
     refreshPushSongs(model);
   } else {
     Max.post('snapshot: the set changed while this walk ran — answering it, but not holding it');
