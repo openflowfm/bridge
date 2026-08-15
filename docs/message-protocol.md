@@ -30,8 +30,16 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_sends <0\|1>` | add / remove the optional per-track send observers and return-track observer |
 | `watch_transport <0\|1>` | install / remove the seven fixed control-bar observers |
-| `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live* |
+| `observe <0\|1>` | install / remove the `live_set tracks` and `scenes` observers. **Device-owned** |
+| `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live*. **Device-owned** |
 | `ping` | |
+
+**The two marked device-owned are sent once, when the LOM reports ready, and never
+turned off.** They are how `bridge.ts` keeps the set it holds current, so they run for
+as long as the device is loaded whether or not a browser is open — no client can
+subscribe to them, and there are no wire messages for them. The other four are armed
+and released against connected clients, because they are viewport concerns. Which is
+which, and what it cost to get wrong, is under *multiple clients*.
 
 | → node | |
 |---|---|

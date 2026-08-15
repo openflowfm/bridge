@@ -130,16 +130,17 @@ the same object. A rename is the case that matters: `apply` broadcasts `changed 
 rather than `structure`, so a delta is the only thing that says scene names moved.
 
 A `prevRev` that doesn't line up drops the held set rather than merging — see
-[*Dropped on any doubt at all*](multiple-clients.md). The next client request walks and
-restores it; nothing walks on the bridge's own initiative for this.
+[*Dropped on any doubt at all*](multiple-clients.md). The next request walks and restores
+it; a missed message is not on its own worth interrupting Live for.
 
 ### What it still does not catch
 
 `Clip.length` and `Track.fold_state` have **no `observe` at all** — a loop length changed
 in Live, or a group folded there, is invisible to every observer this file can install.
 Nor is there any way to hear about another M4L device or a remote script. Those are what
-the client's staleness backstop is for, and why it wasn't deleted along with the
-focus-triggered walk.
+the staleness backstop is for, and why it wasn't deleted along with the focus-triggered
+walk. It runs **here**, in `bridge.ts`, on a fixed tick — the observers in this file are
+the device's, so the periodic look that covers their blind spots is the device's too.
 
 They are also the whole reason `snapshot` still has a `fresh` flag now that the bridge
 holds the set: held state is exactly as current as the signals that maintain it, and

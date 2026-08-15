@@ -7,7 +7,8 @@ completely different JavaScript environments.
                     ┌─────────────────────────────────────┐
   browser ──WS/JSON─┤ bridge.js   (Node for Max)          │
                     │   HTTP + WebSocket, serves the UI   │
-                    │   knows nothing about Live          │
+                    │   holds the set + the song mapping  │
+                    │   makes no LiveAPI call itself      │
                     └──────────────┬──────────────────────┘
                                    │ Max messages + Dicts
                     ┌──────────────▼──────────────────────┐
@@ -17,6 +18,16 @@ completely different JavaScript environments.
                                    │ Live Object Model
                               Ableton Live
 ```
+
+**`bridge.js` is where the current state of the set lives.** It reads the set once when
+the LOM is ready, watches Live's structure and Session cursor for as long as the device is
+loaded, patches what it holds from every delta and every write, and derives the song
+mapping from it. A browser asking for the set gets a payload, not a walk — and a browser
+opening, closing or reloading changes none of it. That invariant is rule 5, and the
+reasoning is under [multiple clients](docs/multiple-clients.md).
+
+It still makes no LiveAPI call of its own; that distinction is what rule 2 is about, and
+it is not the same claim as knowing nothing about Live.
 
 | source | emits | runtime |
 |---|---|---|
