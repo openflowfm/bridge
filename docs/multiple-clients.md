@@ -2,6 +2,76 @@
 
 What the bridge does and does not guarantee when more than one UI is connected.
 
+## A second client is free
+
+**The bridge holds the current set, so joining costs no walk.** A `snapshot` request is
+answered from memory — the snapshot and the `SetModel` read from it — and Live is not
+touched at all. That is the difference between a second tab that opens instantly and one
+that waits out a walk of every clip slot in the set: ~1s at 243 clips, ~8.8s projected at
+848 scenes, all of it on Live's main thread while someone is playing.
+
+`fresh: true` on the request is how a client asks for the walk anyway. Two send it, and
+only two: the **Snapshot** button, and the client's staleness backstop. Both are asking
+the one question held state cannot answer — whether something with *no observer at all*
+changed underneath us (`Clip.length`, `Track.fold_state`, another M4L device). The
+automatic walk when a tab connects is deliberately **not** fresh; that case is the one
+this exists to make free.
+
+### What keeps it current
+
+Everything that can change the set already passes through this process, so the held copy
+is patched from the same signals the clients get, with the same functions from `core/`:
+
+| | held state |
+|---|---|
+| `delta` from Live | merged — `mergeTrackDelta` for clips by scope, `mergeRows` for scene and track rows, plus tempo and Master color |
+| `apply`, all ops taken | patched with `applyOps` / `applySceneOps`, from the batch the request carried |
+| `moveClips`, nothing failed | patched with `applyClipMove` |
+| everything else below | **dropped** |
+
+The model is rebuilt only when the **scene rows** moved — a delta carrying `sceneRows`, or
+an apply carrying `sceneOps`. Everything in a `SetModel` is a function of scene names and
+`Scene.tempo`, so a clip-only change cannot alter it, and re-sending the whole song list to
+say nothing changed is exactly the chatty design the coarse-grained rule exists to prevent.
+When it is rebuilt after a delta it rides along on the broadcast `delta` event; Push's
+encoder list is rebuilt from the same model in the same breath.
+
+### Dropped on any doubt at all
+
+A held snapshot that has silently drifted from Live is **far worse than a walk**: the grid
+disagrees with Live, with no hint which of the two is lying and nothing to say it happened.
+A walk is slow and visible. So every uncertain case takes the walk:
+
+- **A `delta` whose `prevRev` doesn't match.** A message was missed and there is no way to
+  know what was in it.
+- **An `apply` where `applied !== total`.** Live answers with counts and never says *which*
+  ops it skipped, so the patch would be a guess. The client reasons identically.
+- **A `moveClips` with any failure.** `lom.ts` skips the whole delete pass, so the set holds
+  both copies — a state the plan doesn't describe.
+- **A write whose request is no longer in `pending`.** Without the batch there is nothing to
+  patch with.
+- **`move` and `addScenes`, always.** Both renumber the set; that isn't a patch, it's a
+  different set. Each already broadcasts one structural change and asks for a walk of its
+  own, which restores the held copy.
+- **`changed structure` from Live's own observer** — a track or scene added, removed or
+  reordered by the user, for the same reason.
+- **The LOM reporting ready again.** `rev` is a counter inside `lom.ts` and a reloaded
+  device starts it at zero, so anything held is from a sequence that no longer runs.
+
+One more, and it is the one that isn't obvious: **a walk that started before an
+invalidation is answered but not held.** `snapshot()` runs inside one Max message, but a
+scene move is a chunked `Task`, so a walk can land between two chunks and read a set that
+is halfway rearranged. Dropping on `move_done` doesn't cover it — the drop happens first
+and the stale payload arrives afterwards with nothing left to say it was stale. Every walk
+records `heldGeneration` when it starts and only becomes the held set if that number hasn't
+moved; the client that asked still gets its answer, and re-reads on the structural change
+that follows. Push isn't relabelled from one either.
+
+Dropping deliberately does **not** start a walk of its own. Live's main thread is the scarce
+resource, and a walk nobody asked for could land mid-performance; the next client request
+pays for it instead. Until then Push keeps the song list it already had, which is stale
+rather than wrong-looking-right.
+
 ## Multiple clients
 
 The bridge is meant to serve more than one client; the session manager UI is just the
@@ -57,12 +127,15 @@ Sets rather than counters, so a client sending `on` twice doesn't need two `off`
    a worse failure than the one that started it. `takeFlight(reqId)` is the single place
    that closes one out.
 
-   A short reuse window on top of this was considered and dropped. It would have to live
-   in `bridge.ts`, which deliberately imports nothing from the repo so it can emit to a
-   flat file outside its own `rootDir` — so the rule could not go in `core/` where it
-   would have tests. Single-flight already absorbs the storm it was aimed at, and serving
-   a set from memory trades that for the risk of serving one that changed with no event
-   to say so. Not a good trade for what was left.
+   Single-flight is now the *walk* path only — held state answers most requests before
+   it is reached. It still matters, because the requests that do walk arrive together:
+   one structural change sends every connected client for a fresh read at the same moment.
+
+   A time-based reuse window was considered here once and rejected, on the grounds that
+   serving a set from memory risks serving one that changed with no event to say so. What
+   changed is that the memory is no longer a *cache with an age* — it is maintained state,
+   patched by every signal that can change the set and dropped the moment one of them
+   can't be applied. Age was never the right question; provenance is.
 
    Related and narrower: **`bsv_delta` is a fixed dict name like the rest**, and a delta
    is pushed rather than requested, so two flushes 100ms apart could in principle have
@@ -70,8 +143,8 @@ Sets rather than counters, so a client sending `on` twice doesn't need two `off`
    failure is a garbled delta rather than a wrong grid — `prevRev` won't line up and the
    client re-walks — but it's one more instance of item 1.
 
-`changed` still carries only a `kind`, so it remains a full re-walk for the receiver —
-but that is now the *structural* path only, where a re-walk is the honest answer because
+`changed` still carries only a `kind`, so it remains a full re-read for the receiver —
+but that is now the *structural* path only, where re-reading is the honest answer because
 every index changed meaning. Content changes travel as `delta`, which carries its scope
 and its `rev`, and that is what makes following Live cheap rather than merely correct.
 See *Following Live* below.

@@ -14,10 +14,14 @@ import fs = require('node:fs');
 import os = require('node:os');
 import path = require('node:path');
 import { WebSocketServer, WebSocket } from 'ws';
+import { applyClipMove } from '../../core/src/clipMove';
 import { derive } from '../../core/src/derive';
+import { LIVE_PALETTE } from '../../core/src/livePalette';
 import { SCENE_PATTERNS } from '../../core/src/namePattern';
+import { applyOps } from '../../core/src/ops';
+import { applySceneOps } from '../../core/src/roles';
 import { buildSetModel } from '../../core/src/setModel';
-import { canApplyDelta, mergeRows } from '../../core/src/snapshotDelta';
+import { canApplyDelta, mergeRows, mergeTrackDelta } from '../../core/src/snapshotDelta';
 
 const PORT = Number(process.env.BSV_PORT) || 17800;
 const HOST = '127.0.0.1';
@@ -254,12 +258,26 @@ function migrateLegacyDeviceState(): void {
     .catch((e) => Max.post(`device state migration failed — ${describe(e)}`));
 }
 
+/**
+ * What a write will do to the set if Live takes all of it.
+ *
+ * Kept on the pending entry because the answer from `lom.ts` is a set of
+ * *counts* — it never says which ops it skipped — so the only way to patch the
+ * held snapshot is to have the request that produced them still in hand. This
+ * is the same batch or plan the client patches its own copy with; see
+ * `ui/docs/snapshot-lifecycle.md` under *A write patches the snapshot*.
+ */
+type Written =
+  | { kind: 'apply'; ops: BSV.ApplyOp[]; sceneOps: BSV.SceneOp[] }
+  | { kind: 'clips'; plan: BSV.ClipMovePlan };
+
 interface Pending {
   /** Absent for a request the bridge made of itself — see `trackInternal`. */
   ws: WebSocket | undefined;
   type: BSV.RequestType;
   clientId?: number;
   started: number;
+  written?: Written;
 }
 
 let lomReady = false;
@@ -280,8 +298,24 @@ const pending = new Map<number, Pending>();
  * with **its own** `clientId`, because that id is what resolves the waiter on
  * the other end.
  */
-let snapshotFlight: { reqId: number; joined: Array<{ ws: WebSocket; clientId?: number }> } | null =
-  null;
+let snapshotFlight: {
+  reqId: number;
+  joined: Array<{ ws: WebSocket; clientId?: number }>;
+  /** `heldGeneration` when the walk started — see `startFlight`. */
+  generation: number;
+} | null = null;
+
+/**
+ * Begin a walk, remembering which set it is a walk *of*.
+ *
+ * The generation is the whole reason this isn't an inline assignment: a walk
+ * that started before an invalidation describes a set that no longer exists,
+ * and it must not become the held copy when it lands. See `heldGeneration`.
+ */
+function startFlight(reqId: number): void {
+  snapshotFlight = { reqId, joined: [], generation: heldGeneration };
+  Max.outlet('snapshot', reqId);
+}
 
 /**
  * Close out the flight `reqId` belongs to and hand back who was riding on it.
@@ -444,9 +478,9 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-function track(ws: WebSocket, m: BSV.Request): number {
+function track(ws: WebSocket, m: BSV.Request, written?: Written): number {
   const reqId = nextReqId++;
-  pending.set(reqId, { ws, type: m.type, clientId: m.id, started: Date.now() });
+  pending.set(reqId, { ws, type: m.type, clientId: m.id, started: Date.now(), written });
   return reqId;
 }
 
@@ -525,6 +559,81 @@ function rearmWatches(): void {
   }
 }
 
+// --- the set we hold ---------------------------------------------------
+//
+// The bridge keeps the last snapshot and the model read from it, and keeps both
+// current from the same signals every client already gets: deltas from Live, and
+// the writes we send there ourselves. A client asking for the set is then a
+// payload rather than a walk of every clip slot in it — which is the difference
+// between a second tab that opens instantly and one that waits out ~8.8s on a
+// full-size set. See `bridge/docs/multiple-clients.md`.
+//
+// **Held state is dropped on any doubt at all.** A snapshot that has silently
+// drifted from Live is far worse than a walk: the grid disagrees with Live with
+// no hint which of the two is lying, and nothing ever says so. A walk is slow
+// and visible, so every uncertain case takes it.
+
+interface HeldSet {
+  snapshot: BSV.Snapshot;
+  /** Read from `snapshot`. See `core/docs/setModel.md`. */
+  model: BSV.SetModel;
+  /**
+   * The two host-side costs of the walk this was first read by.
+   *
+   * Kept and re-sent rather than zeroed on a cached answer: `Snapshot.ms` and
+   * `timings` inside the payload describe that same walk and can't honestly be
+   * rewritten, so zeroing only these two would make one answer disagree with
+   * itself. `cached: true` is what says the numbers are a walk that already
+   * happened — see `protocol/README.md` on timing fields.
+   */
+  dictMs: number;
+  hostMs: number;
+}
+
+let held: HeldSet | null = null;
+
+/**
+ * Bumped by every invalidation, and recorded by a walk when it starts.
+ *
+ * **A walk that began before an invalidation must not become the held set**,
+ * even though it finishes after one. `snapshot()` in `lom.ts` runs inside one
+ * Max message but a scene move is a chunked `Task`, so a walk can land between
+ * two chunks and read a set that is halfway rearranged. Dropping on `move_done`
+ * doesn't cover that: the drop happens first and the stale payload arrives
+ * after it, with nothing left to say it was stale. This counter is what says so.
+ */
+let heldGeneration = 0;
+
+/**
+ * Forget the set we hold, so the next request walks Live instead of guessing.
+ *
+ * Deliberately does **not** start a walk of its own. Live's main thread is the
+ * scarce resource here and a walk we asked for ourselves could land in the
+ * middle of a performance; the next client request pays for it instead, and
+ * until then Push keeps the song list it already has.
+ */
+function dropHeld(why: string): void {
+  // Before the `held` check, not after: with nothing held and a walk in flight,
+  // the bump is the entire point of the call.
+  heldGeneration++;
+  if (!held) return;
+  held = null;
+  Max.post(`held set dropped — ${why}. The next snapshot request walks Live.`);
+}
+
+/**
+ * Re-read the mapping from scene rows we have just patched, and re-label Push.
+ *
+ * For the two paths that change the held set in place. A *walk* does the same
+ * two steps separately, because it may turn out not to be holdable at all and
+ * the encoder must not be relabelled from a set that no longer exists.
+ */
+function rereadModel(rev: number, scenes: readonly BSV.Scene[]): BSV.SetModel {
+  const model = buildSetModel(derive(scenes, SCENE_PATTERNS), rev);
+  refreshPushSongs(model);
+  return model;
+}
+
 // --- Push song browser -------------------------------------------------
 //
 // One Enum parameter on Push's encoder strip — see `tools/build-device.ts` for
@@ -579,10 +688,6 @@ interface PushSong {
   scene: number;
 }
 
-let heldScenes: BSV.Scene[] = [];
-let heldRev = -1;
-/** The mapping, read once per revision. See `core/docs/setModel.md`. */
-let heldModel: BSV.SetModel = { rev: -1, songs: [], songByScene: {}, unmapped: [] };
 let pushSongs: PushSong[] = [];
 /** Last index seen from the encoder, to tell a real turn from a re-send. */
 let pushSongIndex = -1;
@@ -707,10 +812,19 @@ function diagPushBank(): void {
   Max.outlet('push_bank');
 }
 
-/** Re-derive the song list from whatever scene rows are currently held. */
-function refreshPushSongs(scenes: readonly BSV.Scene[]): void {
-  const all = derive(scenes, SCENE_PATTERNS)
-    .songs.map((s) => ({ name: s.name, scene: s.scenes[0] }))
+/**
+ * Rebuild the encoder's song list from the set we hold.
+ *
+ * Reads the model rather than running its own `derive()`. It used to do the
+ * latter, which made the mapping computed twice in this one process and a third
+ * time in every browser tab — the drift `core/docs/setModel.md` exists to close.
+ */
+function refreshPushSongs(model: BSV.SetModel): void {
+  const all = model.songs
+    // "First scene carrying this song" — `blocks` is ascending and a reprise is
+    // a later block, so this is the start of the first run rather than of the
+    // last one the walk happened to see.
+    .map((s) => ({ name: s.name, scene: s.blocks[0]?.from ?? s.scenes[0]! }))
     .sort((a, b) => a.scene - b.scene);
   pushSongs = all.slice(0, PUSH_SONG_MAX);
   // A cap that silently drops songs would read as "this set has 128 songs".
@@ -753,9 +867,7 @@ function trackInternal(type: BSV.RequestType): number {
  */
 function requestInternalSnapshot(): void {
   if (!lomReady || snapshotFlight) return;
-  const reqId = trackInternal('snapshot');
-  snapshotFlight = { reqId, joined: [] };
-  Max.outlet('snapshot', reqId);
+  startFlight(trackInternal('snapshot'));
 }
 
 // Routed around lom.ts, same as device_state_get/set — see tools/build-device.ts.
@@ -781,21 +893,35 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
   switch (m.type) {
     case 'snapshot': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      // The whole point of holding the set: answer from memory and let Live get
+      // on with whatever it is doing. `fresh` is the client saying it suspects
+      // something no observer reports — the Snapshot button and the staleness
+      // backstop — and that is the only thing worth a walk.
+      if (!m.fresh && held) {
+        Max.post(`snapshot: answered from the held set (rev ${held.snapshot.rev}) — no walk`);
+        return send(ws, {
+          type: 'snapshot',
+          id: m.id,
+          dictMs: held.dictMs,
+          hostMs: held.hostMs,
+          data: held.snapshot,
+          model: held.model,
+          cached: true,
+        });
+      }
       // A walk is already running. Wait for it instead of starting a second.
       if (snapshotFlight) {
         snapshotFlight.joined.push({ ws, clientId: m.id });
         return;
       }
-      const reqId = track(ws, m);
-      snapshotFlight = { reqId, joined: [] };
-      Max.outlet('snapshot', reqId);
+      startFlight(track(ws, m));
       break;
     }
     case 'apply': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       const ops = Array.isArray(m.ops) ? m.ops : [];
       const sceneOps = Array.isArray(m.sceneOps) ? m.sceneOps : [];
-      const reqId = track(ws, m);
+      const reqId = track(ws, m, { kind: 'apply', ops, sceneOps });
       try {
         await Max.setDict('bsv_ops', { ops, sceneOps });
       } catch (e) {
@@ -921,7 +1047,7 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
             `${remove.length} — the plan is malformed`,
         });
       }
-      const reqId = track(ws, m);
+      const reqId = track(ws, m, { kind: 'clips', plan: { steps, remove } });
       try {
         await Max.setDict('bsv_ops', { clipPlan: { steps, remove } });
       } catch (e) {
@@ -1257,6 +1383,10 @@ Max.addHandler('device_state', (...atoms: unknown[]) => {
 Max.addHandler('ready', () => {
   lomReady = true;
   Max.post('LOM ready');
+  // `rev` is a counter inside `lom.ts` and a reloaded device starts it again at
+  // zero, so anything we hold is from a sequence that no longer runs — every
+  // later delta would line up against it by accident rather than by agreement.
+  dropHeld('the LOM restarted, so its revision counter began again');
   broadcast({ type: 'status', lomReady: true });
   showConnections(); // off the -1 holding state and onto a real count
 
@@ -1293,24 +1423,35 @@ Max.addHandler('set_info_done', async (dictName: string) => {
 Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
+  // Read before `takeFlight` clears it. A `snapshot_done` with no flight is a
+  // stray or a duplicate, and -1 refuses to hold what it carries.
+  const walkedGeneration = snapshotFlight?.reqId === reqId ? snapshotFlight.generation : -1;
   const flight = takeFlight(reqId);
   const t0 = Date.now();
   const data: BSV.Snapshot = await Max.getDict(dictName);
   const hostMs = Date.now() - t0;
-  heldScenes = data.scenes;
-  heldRev = data.rev;
   // Read the mapping once, here, and ship it. Every client used to run the same
   // `derive()` over the same scene names to draw its own grid — see
   // `core/docs/setModel.md`.
-  heldModel = buildSetModel(derive(heldScenes, SCENE_PATTERNS), heldRev);
-  refreshPushSongs(heldScenes);
+  const model = buildSetModel(derive(data.scenes, SCENE_PATTERNS), data.rev);
+  // The whole payload is kept, not just its scenes: it is what the next client
+  // to ask is answered with — but only if the set is still the one this walk
+  // read. A walk that started before an invalidation still answers whoever
+  // asked for it, and they re-read on the structural change that follows;
+  // holding it would outlive that and be handed to everyone after them. Push is
+  // not relabelled from it either, for the same reason.
+  if (walkedGeneration === heldGeneration) {
+    held = { snapshot: data, model, dictMs, hostMs };
+    refreshPushSongs(model);
+  } else {
+    Max.post('snapshot: the set changed while this walk ran — answering it, but not holding it');
+  }
   const t = data.timings;
   Max.post(
     `snapshot: ${data.clipCount} clips in ${data.ms}ms lom ` +
       `(tracks ${t.tracks} · scenes ${t.scenes} · ${t.slotsScanned} slots ${t.slots} · clips ${t.clips}) ` +
       `+ ${dictMs}ms dict + ${hostMs}ms host`,
   );
-  const model = heldModel;
   const event: BSV.Event = {
     type: 'snapshot',
     id: req?.clientId,
@@ -1354,10 +1495,41 @@ Max.addHandler('apply_progress', (reqId: number, done: number, total: number) =>
   send(req?.ws, { type: 'progress', id: req?.clientId, done, total });
 });
 
+/**
+ * Patch the held set with a write Live has just taken in full.
+ *
+ * The same bargain the client makes: **everything landed, or nothing is
+ * assumed.** `apply` answers with counts and never says *which* ops it skipped,
+ * so a partial write cannot be reproduced here and doesn't try to be — the held
+ * set goes instead, and the next request walks Live.
+ */
+function patchHeldWithApply(req: Pending | undefined, result: BSV.ApplyResult): void {
+  if (!held) return;
+  if (req?.written?.kind !== 'apply') {
+    dropHeld('an apply finished with no record of what it wrote');
+    return;
+  }
+  if (result.applied !== result.total) {
+    dropHeld(`Live took ${result.applied} of ${result.total} ops and did not say which`);
+    return;
+  }
+  const { ops, sceneOps } = req.written;
+  const scenes = applySceneOps(held.snapshot.scenes, sceneOps);
+  held.snapshot = {
+    ...held.snapshot,
+    clips: applyOps(held.snapshot.clips, ops, (i) => LIVE_PALETTE[i]),
+    scenes,
+  };
+  // A scene name *is* the mapping, so a rename changes the songs. Clip writes
+  // never do.
+  if (sceneOps.length > 0) held.model = rereadModel(held.snapshot.rev, scenes);
+}
+
 Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
   const result: BSV.ApplyResult = await Max.getDict(dictName);
+  patchHeldWithApply(req, result);
   Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
   send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
   broadcast({ type: 'changed', kind: 'applied' });
@@ -1374,7 +1546,9 @@ Max.addHandler('add_scenes_done', async (reqId: number, dictName: string, ms: nu
   );
   send(req?.ws, { type: 'scenesAdded', id: req?.clientId, lomMs: ms, ...r });
   // Every scene index at or below the insertion point changed. Other clients
-  // must discard their snapshots before another click can address the old row.
+  // must discard their snapshots before another click can address the old row,
+  // and so must we — this renumbers the set rather than editing it.
+  dropHeld('scenes were inserted, which renumbers the set');
   broadcast({ type: 'changed', kind: 'structure' });
   requestInternalSnapshot();
 });
@@ -1389,6 +1563,22 @@ Max.addHandler('move_clips_done', async (reqId: number, dictName: string, ms: nu
   pending.delete(reqId);
   const r: { copied: number; removed: number; failed: number; undoStep: boolean } =
     await Max.getDict(dictName);
+  // Every index still means what it meant, so the plan alone says where each
+  // clip ended up — unless something failed, because `lom.ts` then skips the
+  // whole delete pass and the set holds both copies, which the plan does not
+  // describe. Slots only: no scene name moved, so the model still stands.
+  if (held) {
+    if (req?.written?.kind !== 'clips' || r.failed > 0) {
+      dropHeld(
+        r.failed > 0
+          ? `${r.failed} of ${r.copied + r.failed} clip copies failed, so nothing was deleted`
+          : 'a clip move finished with no record of what it moved',
+      );
+    } else {
+      const clips = applyClipMove(held.snapshot.clips, req.written.plan);
+      held.snapshot = { ...held.snapshot, clips, clipCount: clips.length };
+    }
+  }
   Max.post(
     `moveClips: ${r.copied} copied, ${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
       (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
@@ -1422,6 +1612,7 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
   // about it. What actually recovered other clients was the observer burst
   // during the move — which had them walking a set that was halfway rearranged.
   // That burst is muted in `lom.ts` now, and this is the one event in its place.
+  dropHeld('scenes were reordered, which renumbers the set');
   broadcast({ type: 'changed', kind: 'structure' });
   requestInternalSnapshot();
 });
@@ -1434,7 +1625,13 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   send(req?.ws, { type: 'palette', id: req?.clientId, ...p });
 });
 
-Max.addHandler('changed', (kind: string) => broadcast({ type: 'changed', kind }));
+Max.addHandler('changed', (kind: string) => {
+  // A track or scene was added, removed or reordered *in Live*, so every index
+  // means something different and nothing we hold can be patched into the set
+  // that now exists. Every client re-walks on this; so do we.
+  if (kind === 'structure') dropHeld('Live reported a structural change');
+  broadcast({ type: 'changed', kind });
+});
 
 // A partial re-read, pushed because the user changed something in Live rather
 // than because anyone asked. Broadcast: every client holds the same set, and a
@@ -1448,23 +1645,46 @@ Max.addHandler('delta', async (dictName: string) => {
       `delta: ${data.clips.length} clip(s) across track(s) ` +
         `${data.clipScope.join(', ')} in ${data.ms}ms (rev ${data.prevRev} -> ${data.rev})`,
     );
-    // A rename is exactly this: `apply` broadcasts `changed: 'applied'`, not
-    // `'structure'`, so this delta is the only signal that scene names — and
-    // therefore the Push song list — may have changed. `rev` advances on
-    // every delta regardless of what it touched, so it's tracked whenever the
-    // check passes, not only on the deltas with scene rows to merge — else a
-    // clip-only delta between two scene-bearing ones would permanently strand
-    // `heldRev` one revision behind. A mismatch means a message was missed;
-    // the next full snapshot (`requestInternalSnapshot`'s triggers) recovers
-    // rather than merging against the wrong revision.
-    if (canApplyDelta(heldRev, data.prevRev)) {
-      heldRev = data.rev;
-      if (data.sceneRows) {
-        heldScenes = mergeRows(heldScenes, data.sceneRows);
-        refreshPushSongs(heldScenes);
+    // The same merge every client runs, over the copy this process holds — one
+    // set of arithmetic in `core/` with tests, not two. `rev` advances on every
+    // delta regardless of what it touched, so it is taken whenever the check
+    // passes and not only on the deltas with rows to merge.
+    //
+    // A mismatch means a message was missed, and there is no way to tell what
+    // was in it. Drop everything rather than merge against the wrong revision:
+    // the next request walks Live, and until then Push keeps the song list it
+    // has. A rename is exactly this path — `apply` broadcasts
+    // `changed: 'applied'` rather than `'structure'`, so a delta is what says
+    // scene names, and therefore the song list, moved under us.
+    let model: BSV.SetModel | undefined;
+    if (held) {
+      if (!canApplyDelta(held.snapshot.rev, data.prevRev)) {
+        dropHeld(`a delta computed against rev ${data.prevRev} arrived while ` +
+          `holding rev ${held.snapshot.rev}, so a message was missed`);
+      } else {
+        const s = held.snapshot;
+        const clips = mergeTrackDelta(s.clips, data.clipScope, data.clips);
+        held.snapshot = {
+          ...s,
+          rev: data.rev,
+          clips,
+          clipCount: clips.length,
+          scenes: mergeRows(s.scenes, data.sceneRows ?? []),
+          tracks: mergeRows(s.tracks, data.trackRows ?? []),
+          tempo: data.tempo ?? s.tempo,
+          masterColor: data.masterColor === undefined ? s.masterColor : data.masterColor,
+        };
+        // Only when the scene rows moved. Everything in the model is a function
+        // of scene names and `Scene.tempo`, so a clip-only delta cannot change
+        // it — and re-sending the whole song list to say nothing changed is the
+        // chatty design the coarse-grained rule exists to prevent.
+        if (data.sceneRows) {
+          model = rereadModel(data.rev, held.snapshot.scenes);
+          held.model = model;
+        }
       }
     }
-    broadcast({ type: 'delta', data });
+    broadcast(model ? { type: 'delta', data, model } : { type: 'delta', data });
   } catch (e) {
     // A delta that can't be read is not worth failing a client over — the
     // client re-walks whenever a rev doesn't line up, so the worst case here

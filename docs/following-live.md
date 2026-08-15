@@ -116,6 +116,23 @@ disagreeing with itself depending on which path last wrote a row. `readTrackRow`
 the reason the two-pass map exists at all: grouping cannot change without adding or
 removing a track, and that is structural.
 
+### The bridge follows Live too, not only the clients
+
+A delta is broadcast, and `bridge.ts` is one of the things reading it. It holds the last
+snapshot and the `SetModel` read from it, and merges each delta into that copy with the
+same `core/` functions the browser uses — one set of arithmetic with tests, not two.
+
+**The model is rebuilt only when the delta carried `sceneRows`.** Everything in a
+`SetModel` is a function of scene names and `Scene.tempo`, which is exactly what those rows
+carry, so a clip-only delta cannot change a single song. When it *is* rebuilt it rides
+along on the broadcast `delta` event as `model`, and Push's encoder list is relabelled from
+the same object. A rename is the case that matters: `apply` broadcasts `changed applied`
+rather than `structure`, so a delta is the only thing that says scene names moved.
+
+A `prevRev` that doesn't line up drops the held set rather than merging — see
+[*Dropped on any doubt at all*](multiple-clients.md). The next client request walks and
+restores it; nothing walks on the bridge's own initiative for this.
+
 ### What it still does not catch
 
 `Clip.length` and `Track.fold_state` have **no `observe` at all** — a loop length changed
@@ -123,6 +140,11 @@ in Live, or a group folded there, is invisible to every observer this file can i
 Nor is there any way to hear about another M4L device or a remote script. Those are what
 the client's staleness backstop is for, and why it wasn't deleted along with the
 focus-triggered walk.
+
+They are also the whole reason `snapshot` still has a `fresh` flag now that the bridge
+holds the set: held state is exactly as current as the signals that maintain it, and
+these have no signal at all. `fresh: true` is a client saying "don't tell me what you
+hold, go and look".
 
 ### An unchanged re-read publishes nothing
 
