@@ -528,16 +528,53 @@ const watchers: Record<WatchKind, Set<WebSocket>> = {
   transport: new Set(),
 };
 
+/**
+ * Watches that must **not** be re-armed for a subscriber who is merely joining.
+ *
+ * `observe` re-installs `live_set tracks` / `live_set scenes` observers, and
+ * installing a LiveAPI property observer makes Live call back once with the
+ * current value — which arrives here as `changed structure` and drops the held
+ * set. So an unconditional re-arm meant **every browser connect invalidated the
+ * bridge's copy of the set**, and the tab that had just connected then paid for
+ * a full walk. That is the whole cache, defeated by opening the page.
+ *
+ * The other watches are re-armed on every subscribe deliberately: they answer
+ * with a frame, and a client joining an already-watched stream would otherwise
+ * wait for the next change before it had any state at all. `observe` has no
+ * such reply — it reports *changes*, and there is nothing to seed.
+ */
+const REARM_ON_JOIN: Record<WatchKind, boolean> = {
+  observe: false,
+  selection: true,
+  play: true,
+  meters: true,
+  status: true,
+  sends: true,
+  transport: true,
+};
+
 function setWatch(ws: WebSocket, kind: WatchKind, on: boolean): void {
   const subs = watchers[kind];
   if (on) {
+    const first = subs.size === 0;
     subs.add(ws);
-    Max.outlet(WATCH_MESSAGE[kind], 1);
+    if (first || REARM_ON_JOIN[kind]) armWatch(kind);
     return;
   }
   // Nothing to release, or someone else still wants it.
   if (!subs.delete(ws) || subs.size > 0) return;
   Max.outlet(WATCH_MESSAGE[kind], 0);
+}
+
+/**
+ * Turn a watch on in `lom.ts`, and brace for what installing it echoes back.
+ *
+ * Every path that arms `observe` goes through here, so the echo is expected
+ * exactly where it is caused rather than guessed at from timing.
+ */
+function armWatch(kind: WatchKind): void {
+  if (kind === 'observe') expectStructureEcho();
+  Max.outlet(WATCH_MESSAGE[kind], 1);
 }
 
 /** A vanished client never sends `off`. Release whatever it was holding. */
@@ -555,7 +592,7 @@ function releaseWatches(ws: WebSocket): void {
  */
 function rearmWatches(): void {
   for (const kind of Object.keys(watchers) as WatchKind[]) {
-    if (watchers[kind].size > 0) Max.outlet(WATCH_MESSAGE[kind], 1);
+    if (watchers[kind].size > 0) armWatch(kind);
   }
 }
 
@@ -605,20 +642,84 @@ let held: HeldSet | null = null;
 let heldGeneration = 0;
 
 /**
- * Forget the set we hold, so the next request walks Live instead of guessing.
+ * Forget the set we hold, because something happened that we cannot patch.
  *
- * Deliberately does **not** start a walk of its own. Live's main thread is the
- * scarce resource here and a walk we asked for ourselves could land in the
- * middle of a performance; the next client request pays for it instead, and
- * until then Push keeps the song list it already has.
+ * Deliberately does **not** start a walk of its own — the *callers* decide that,
+ * and they don't agree, on purpose. A structural change means the set is a
+ * different shape and the bridge's job is to know it, so those callers go and
+ * look. A write Live took only partly leaves us unsure rather than behind, and
+ * the client that made it is already re-walking; a second walk from here would
+ * be the same read twice.
+ *
+ * Live's main thread is the scarce resource in all of this. Until whatever walk
+ * is coming lands, Push keeps the song list it already has rather than going
+ * blank.
  */
 function dropHeld(why: string): void {
   // Before the `held` check, not after: with nothing held and a walk in flight,
   // the bump is the entire point of the call.
   heldGeneration++;
-  if (!held) return;
+  const inFlight = held === null && snapshotFlight !== null;
   held = null;
-  Max.post(`held set dropped — ${why}. The next snapshot request walks Live.`);
+  // Logged even with nothing held, which it did not used to be. That silence
+  // hid this exact bug for a release: a drop landing on an empty `held` during
+  // the device's own first walk still discards that walk through the
+  // generation, and the only visible trace was a walk that ran twice.
+  Max.post(
+    `held set dropped — ${why}.` +
+      (inFlight
+        ? ' A walk is running and will be answered but not held.'
+        : ' The next snapshot request walks Live.'),
+  );
+}
+
+/**
+ * How long a `changed structure` may still be the echo of arming `observe`.
+ *
+ * Generous because the echo queues behind whatever Live is doing, and on a
+ * device that has just started that is a full walk of the set — seconds, not
+ * milliseconds. The window costs nothing when it is wrong in the quiet
+ * direction (no echo arrives, it lapses) and the counter is what stops it being
+ * wrong in the loud one.
+ */
+const STRUCTURE_ECHO_MS = 10_000;
+
+/**
+ * One structural change is expected, and is not a structural change.
+ *
+ * Installing a LiveAPI property observer makes Live call back immediately with
+ * the current value, so arming `observe` always produces one `changed
+ * structure` per observer that means nothing happened. Swallowing it is what
+ * keeps a browser connecting — or a device starting — from throwing away the
+ * held set and re-walking every clip slot to learn what it already knew.
+ *
+ * **Counted and time-boxed, because the alternative failure is worse.** A count
+ * alone would silently eat the next real structural change if Live ever stopped
+ * echoing; a window alone would eat every structural edit made in the first ten
+ * seconds. Together, at most `STRUCTURE_ECHO_MS` of grace for at most the
+ * number of observers being installed, and a set genuinely restructured in that
+ * window is still caught by the client's own re-walk on `changed`.
+ */
+const STRUCTURE_OBSERVERS = 2;
+let structureEchoesDue = 0;
+let structureEchoTimer: NodeJS.Timeout | null = null;
+
+function expectStructureEcho(): void {
+  structureEchoesDue = STRUCTURE_OBSERVERS;
+  if (structureEchoTimer) clearTimeout(structureEchoTimer);
+  structureEchoTimer = setTimeout(() => {
+    structureEchoTimer = null;
+    structureEchoesDue = 0;
+  }, STRUCTURE_ECHO_MS);
+  // `unref` so a pending window can never hold the Node for Max process open.
+  structureEchoTimer.unref?.();
+}
+
+/** True when this `changed structure` is the echo of arming the observers. */
+function takeStructureEcho(): boolean {
+  if (structureEchoesDue <= 0) return false;
+  structureEchoesDue--;
+  return true;
 }
 
 /**
@@ -1654,10 +1755,25 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
 });
 
 Max.addHandler('changed', (kind: string) => {
-  // A track or scene was added, removed or reordered *in Live*, so every index
-  // means something different and nothing we hold can be patched into the set
-  // that now exists. Every client re-walks on this; so do we.
-  if (kind === 'structure') dropHeld('Live reported a structural change');
+  if (kind === 'structure') {
+    // Arming `observe` installs two LiveAPI observers and each calls back once
+    // with the value it already had. That is not a structural change, and
+    // treating it as one threw away the held set every time a browser
+    // connected — including the walk the device had started for itself.
+    if (takeStructureEcho()) {
+      Max.post('changed: structure — the echo of arming the observers, ignored');
+      return;
+    }
+    // A track or scene was added, removed or reordered *in Live*, so every index
+    // means something different and nothing we hold can be patched into the set
+    // that now exists. Every client re-walks on this; so do we.
+    dropHeld('Live reported a structural change');
+    // And then go and look, rather than leaving the next client to pay for it.
+    // The set is the bridge's job to know; a tab that opens after a track was
+    // added should still be a payload. The walk coalesces with any client
+    // request that arrives while it runs.
+    requestInternalSnapshot();
+  }
   broadcast({ type: 'changed', kind });
 });
 

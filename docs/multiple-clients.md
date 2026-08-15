@@ -54,7 +54,10 @@ A walk is slow and visible. So every uncertain case takes the walk:
   different set. Each already broadcasts one structural change and asks for a walk of its
   own, which restores the held copy.
 - **`changed structure` from Live's own observer** — a track or scene added, removed or
-  reordered by the user, for the same reason.
+  reordered by the user, for the same reason. This one asks for a walk of its own
+  afterwards: the set is a different shape and knowing it is the bridge's job, so a tab
+  opened after a track was added should still be a payload rather than a stall. The
+  install echo is *not* this — see the `observe` note below.
 - **The LOM reporting ready again.** `rev` is a counter inside `lom.ts` and a reloaded
   device starts it at zero, so anything held is from a sequence that no longer runs.
 
@@ -91,13 +94,37 @@ the watch open forever.
 `bridge.ts` keeps a `Set` of sockets per watch kind, releases them on socket close, and
 re-arms from that record when the LOM reports ready again after a device reload.
 
-**`on` is always forwarded and only `off` is edge-triggered**, which looks like a bug and
-isn't. `watch_play`, `watch_meters` and `watch_sends` install observers per *track* (and
-meters also on Master), so a client re-sends `on` to rebuild them when a snapshot finds a
-different track count; suppressing that because another client already held the watch
-would leave the observers addressing a set that no longer exists. Forwarding it costs
-nothing, because every `watch_*` handler in `lom.ts` clears or rebuilds before it installs.
-Sets rather than counters, so a client sending `on` twice doesn't need two `off`s to release.
+**`on` is forwarded for every watch but one, and only `off` is edge-triggered.** That
+looks like a bug and mostly isn't: `watch_play`, `watch_meters` and `watch_sends` install
+observers per *track* (and meters also on Master), so a client re-sends `on` to rebuild
+them when a snapshot finds a different track count; suppressing that because another
+client already held the watch would leave the observers addressing a set that no longer
+exists. Forwarding costs nothing, because every `watch_*` handler in `lom.ts` clears or
+rebuilds before it installs. Sets rather than counters, so a client sending `on` twice
+doesn't need two `off`s to release.
+
+**`observe` is the exception, and it was a real bug.** Re-arming it re-installs the
+`live_set tracks` and `live_set scenes` observers, and installing a LiveAPI property
+observer makes Live call back once with the value it already had. That callback arrives
+here as `changed structure`, which dropped the held set and was broadcast to every client
+as "go and re-walk". So **every browser connect invalidated the bridge's copy of the set
+and then paid for a full walk to rebuild it** — the entire cache, defeated by opening the
+page. Worse at device start, where the echo landed in the middle of the walk the device
+had kicked off for itself, so that walk was discarded and a second one ran: two full
+passes over every clip slot, back to back, to learn nothing had changed.
+
+`observe` is therefore armed only on the 0→1 transition, and there is nothing to seed by
+re-arming it: unlike the frame-pushing watches it has no reply at all, it reports
+*changes*. `REARM_ON_JOIN` in `bridge.ts` is that distinction, one row per watch, so the
+next watch added has to answer the question rather than inherit an answer.
+
+The echo still happens whenever `observe` genuinely is armed — a first client, or
+`rearmWatches` after a device reload — so `expectStructureEcho` braces for it there.
+**Counted and time-boxed together**, because either alone fails badly: a count alone would
+silently eat the next real structural change if Live ever stopped echoing, and a window
+alone would eat every structural edit made in the first ten seconds. Two observers, ten
+seconds, whichever runs out first. The window is generous because the echo queues behind
+whatever Live is doing, and at device start that is a full walk.
 
 **Not yet guaranteed.** Three things to fix before a second *kind* of client exists:
 

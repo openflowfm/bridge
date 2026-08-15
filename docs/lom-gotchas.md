@@ -152,3 +152,12 @@ behaves the way its name suggests.
   calls plain `fire()`.
 - **`notifydeleted()`** must clear observers and cancel tasks, or a reloaded device
   leaks them. That now includes the play-state observers, which are a separate list.
+- **Installing an observer fires it.** Assigning `LiveAPI.property` calls the handler once
+  with the value the object already had, so *arming* a watch is indistinguishable from the
+  thing it watches changing — unless the caller braces for it. This cost a release: arming
+  `observe` emitted a `changed structure` per observer, which the bridge read as "the set
+  was restructured", so every browser connect threw away the held set and re-walked every
+  clip slot to rediscover an unchanged set. The echo is now expected on the Node side,
+  where the arm happens; see *multiple clients*. Assume any new observer does this, and
+  note that the echo does **not** arrive promptly — it queues behind whatever Live is
+  doing, which at device start is a multi-second walk.
