@@ -701,11 +701,23 @@ const STRUCTURE_ECHO_MS = 10_000;
  * window is still caught by the client's own re-walk on `changed`.
  */
 const STRUCTURE_OBSERVERS = 2;
+/**
+ * Ceiling on outstanding echoes, in case something arms in a loop. Four arms is
+ * already more than any real sequence — a browser reload under StrictMode is
+ * two — and past that the window lapsing is the safer failure.
+ */
+const STRUCTURE_ECHO_MAX = STRUCTURE_OBSERVERS * 4;
 let structureEchoesDue = 0;
 let structureEchoTimer: NodeJS.Timeout | null = null;
 
 function expectStructureEcho(): void {
-  structureEchoesDue = STRUCTURE_OBSERVERS;
+  // **Accumulates rather than resets**, and that is not a detail. React
+  // StrictMode mounts, unmounts and mounts again, so one page load in dev arms
+  // this twice before the first pair of echoes has even been delivered — they
+  // queue behind whatever Live is doing. Resetting to two meant four echoes
+  // arrived, two were swallowed and two dropped the held set, which is the
+  // whole bug over again with a smaller window.
+  structureEchoesDue = Math.min(structureEchoesDue + STRUCTURE_OBSERVERS, STRUCTURE_ECHO_MAX);
   if (structureEchoTimer) clearTimeout(structureEchoTimer);
   structureEchoTimer = setTimeout(() => {
     structureEchoTimer = null;
@@ -1043,6 +1055,13 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
         snapshotFlight.joined.push({ ws, clientId: m.id });
         return;
       }
+      // Says which of the two reasons this is, because from the outside a walk
+      // that had to happen and a walk that shouldn't have look identical — and
+      // telling them apart is the difference between the cache working and the
+      // cache being quietly defeated.
+      Max.post(
+        `snapshot: walking Live — ${m.fresh ? 'the client asked for a fresh read' : 'nothing is held'}`,
+      );
       startFlight(track(ws, m));
       break;
     }
@@ -1603,7 +1622,15 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
     send(j.ws, { type: 'snapshot', id: j.clientId, dictMs, hostMs, data, model, cached: false });
   }
   if (flight.length > 0) {
-    Max.post(`snapshot: one walk answered ${flight.length + 1} clients`);
+    // The originator counts only when it was a client. A walk the bridge asked
+    // for itself has no socket behind it, and reporting it as a client is how
+    // "one walk answered 2 clients" appeared with a single tab open — which
+    // reads as a phantom connection rather than as the bridge doing its job.
+    const asked = flight.length + (req?.ws ? 1 : 0);
+    Max.post(
+      `snapshot: one walk answered ${asked} client(s)` +
+        (req?.ws ? '' : ', plus the bridge’s own request'),
+    );
   }
 });
 
