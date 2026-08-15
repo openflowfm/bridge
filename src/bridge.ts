@@ -16,6 +16,7 @@ import path = require('node:path');
 import { WebSocketServer, WebSocket } from 'ws';
 import { derive } from '../../core/src/derive';
 import { SCENE_PATTERNS } from '../../core/src/namePattern';
+import { buildSetModel } from '../../core/src/setModel';
 import { canApplyDelta, mergeRows } from '../../core/src/snapshotDelta';
 
 const PORT = Number(process.env.BSV_PORT) || 17800;
@@ -572,6 +573,8 @@ interface PushSong {
 
 let heldScenes: BSV.Scene[] = [];
 let heldRev = -1;
+/** The mapping, read once per revision. See `core/docs/setModel.md`. */
+let heldModel: BSV.SetModel = { rev: -1, songs: [], songByScene: {}, unmapped: [] };
 let pushSongs: PushSong[] = [];
 /** Last index seen from the encoder, to tell a real turn from a re-send. */
 let pushSongIndex = -1;
@@ -1281,6 +1284,10 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   const hostMs = Date.now() - t0;
   heldScenes = data.scenes;
   heldRev = data.rev;
+  // Read the mapping once, here, and ship it. Every client used to run the same
+  // `derive()` over the same scene names to draw its own grid — see
+  // `core/docs/setModel.md`.
+  heldModel = buildSetModel(derive(heldScenes, SCENE_PATTERNS), heldRev);
   refreshPushSongs(heldScenes);
   const t = data.timings;
   Max.post(
@@ -1288,7 +1295,16 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
       `(tracks ${t.tracks} · scenes ${t.scenes} · ${t.slotsScanned} slots ${t.slots} · clips ${t.clips}) ` +
       `+ ${dictMs}ms dict + ${hostMs}ms host`,
   );
-  const event: BSV.Event = { type: 'snapshot', id: req?.clientId, dictMs, hostMs, data };
+  const model = heldModel;
+  const event: BSV.Event = {
+    type: 'snapshot',
+    id: req?.clientId,
+    dictMs,
+    hostMs,
+    data,
+    model,
+    cached: false,
+  };
   // `req` is always set (`pending` always held an entry) except on a stray or
   // duplicate `snapshot_done`; a request this bridge made of itself (no `ws`,
   // see `requestInternalSnapshot`) has already gotten what it needed above and
@@ -1298,7 +1314,9 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   // Everyone who asked while this was running. Each needs the payload under its
   // own request id — that id is what resolves the waiter on the other end, so
   // one shared event object would answer exactly one of them.
-  for (const j of flight) send(j.ws, { type: 'snapshot', id: j.clientId, dictMs, hostMs, data });
+  for (const j of flight) {
+    send(j.ws, { type: 'snapshot', id: j.clientId, dictMs, hostMs, data, model, cached: false });
+  }
   if (flight.length > 0) {
     Max.post(`snapshot: one walk answered ${flight.length + 1} clients`);
   }
