@@ -32,7 +32,7 @@ Live open, so the readout has to be somewhere you can watch without leaving Live
 | `selectscene <index>` | does assigning an exact `Song.View.selected_scene` also reveal and center that scene? The index is zero-based |
 | `param` | what does Live expose for this device's own parameters — name, range, and the `value_items` Push draws its value text from? |
 | `labels <n>` | write `n` synthetic value labels to the Push song parameter, then re-read. `0` clears the list |
-| `labelspaces` | the same write, with one two-word label spaced normally and one joined by a non-breaking space |
+| `labelspaces` | the same write, with one two-word label spaced normally and one joined by a non-breaking space — the shipped form against the retired one |
 | `bank` | redefine the `live.banks` page, so a label written after the page appeared gets a second chance to be seen |
 
 `scroll` established that one call moves the selected scene exactly one row and centers
@@ -101,10 +101,20 @@ and telling those two apart is what these lines are for. `diag labels` sets the 
 to `null` after writing labels of its own, so the next real relabel can't decide it has
 nothing to do.
 
-Two questions the labels left open, and which of these settles each: where Push truncates
-a name longer than `PUSH_LABEL_MAX` — `labels` with names built to find the edge — and
-whether the non-breaking space `sanitizePushLabel` substitutes is doing anything at all,
-which is `labelspaces`.
+One question the labels left open, and one hardware answered. Where Push truncates a name
+longer than `PUSH_LABEL_MAX` is still open — `labels`, with names built to find the edge.
+
+**The non-breaking space is settled, and it was the wrong guess.** `sanitizePushLabel`
+used to swap every space in a title for U+00A0, insuring against a space splitting the
+atom. Push has no glyph for that character and drew each one as `?`, so a two-word song
+reached the display as `Two?Words` — the insurance was more visible than the risk. Labels
+now carry their spaces exactly as typed.
+
+That leaves the other half: a plain space has to survive `Max.outlet` as one atom. That's
+what `labelspaces` is for now — it writes both forms side by side, so position 2 is the
+shipped spelling and position 3 the retired one. Position 2 landing on one detent confirms
+it; position 2 splitting across two means the list is one atom too long per space and every
+later song is on the wrong detent, which is loud enough to catch immediately.
 
 What Cycling '74 documents about the write itself, and what it doesn't, is in the Push
 section of [`../../tools/build-device.ts`](../../tools/build-device.ts).

@@ -823,17 +823,37 @@ let pushSongIndex = -1;
 let pushLabels: string | null = null;
 
 /**
+ * What joins those labels into that key.
+ *
+ * A NUL, because no song name can hold one and a label now *can* hold a space —
+ * so joining on anything a label could contain would let two different lists
+ * render identically and skip a write that was needed.
+ *
+ * Written as an escape rather than typed. A literal NUL in the source makes
+ * `grep` and `rg` classify this whole file as binary and answer every search
+ * with silence, which reads exactly like the code not being there.
+ */
+const PUSH_LABEL_JOIN = '\u0000';
+
+/**
  * Strip characters Max message syntax treats specially, then fit the budget.
  *
- * **The non-breaking space is a guess, and `diag labelspaces` is how it stops
- * being one.** Cycling '74 says an item containing a space "should be enclosed
- * in double quotes", but says it about the Inspector's text field — a name
- * handed over as an atom was never parsed as text, so there may be nothing to
- * quote. `lom.ts` measured the same question for LiveAPI writes and found that
- * a JS string with a space crosses as one symbol (see `setName`); whether Node
- * for Max agrees is a different path and unmeasured. If it does, this
- * substitution is solving a problem that doesn't exist and should go — it is
- * the one thing here that quietly changes what the user typed.
+ * **Spaces are left exactly as typed**, and used not to be. Every one was
+ * swapped for U+00A0 on the guess that an atom containing a space needed
+ * protecting — Cycling '74 says an item with a space "should be enclosed in
+ * double quotes", but says it about the Inspector's text field, and a name
+ * handed over as an atom is never parsed as text. On hardware the guess is what
+ * broke: **Push has no glyph for U+00A0 and draws every one as `?`**, so a
+ * two-word title reached the display as `Two?Words`. The insurance cost more
+ * than the risk it was taken out against.
+ *
+ * The other half of the question is `diag labelspaces`, which writes both forms
+ * at once — it is how "a plain space survives the outlet as one atom" stops
+ * being the *new* guess. `lom.ts` measured the same thing for LiveAPI writes and
+ * found one symbol (see `setName`), but Node for Max is a different path. If a
+ * plain space doesn't survive it the symptom is loud rather than subtle: the
+ * list arrives one atom too long per space, and every song after the first
+ * two-word title sits on the wrong detent.
  */
 function sanitizePushLabel(name: string): string {
   const clean = name
@@ -842,9 +862,7 @@ function sanitizePushLabel(name: string): string {
     .replace(/\s+/g, ' ')
     .trim();
   if (clean === '') return '(untitled)';
-  const fitted =
-    clean.length > PUSH_LABEL_MAX ? clean.slice(0, PUSH_LABEL_MAX).trim() : clean;
-  return fitted.replace(/ /g, '\u00a0');
+  return clean.length > PUSH_LABEL_MAX ? clean.slice(0, PUSH_LABEL_MAX).trim() : clean;
 }
 
 /** A position with no song at it. Matches tools/build-device.ts. */
@@ -893,7 +911,7 @@ function refreshPushBankStrip(): void {
     const song = pushSongs[i];
     return song ? sanitizePushLabel(song.name) : PUSH_EMPTY_SLOT;
   });
-  const rendered = labels.join(' ');
+  const rendered = labels.join(PUSH_LABEL_JOIN);
   if (rendered === pushLabels) {
     // Still printed: this line is how the chain is confirmed without Push
     // hardware, and a silent skip would look exactly like a broken derive.
@@ -933,10 +951,12 @@ function diagPushLabels(count: number, spaces: boolean): void {
   const n = spaces ? PUSH_SONG_MAX : Math.max(0, Math.min(count, 64));
   const labels = Array.from({ length: n }, (_, i) => `L${i + 1}`);
   if (spaces) {
-    // The two forms a two-word title can take. Max message syntax splits on the
-    // ASCII space, so if the list arrives one atom too long per space, only the
-    // second of these survives — and if both survive, `sanitizePushLabel` is
-    // solving a problem that doesn't exist.
+    // The two forms a two-word title can take, side by side on the encoder.
+    // Position 2 is what the labels use now; position 3 is the non-breaking
+    // space they used to, kept as the control — it draws as `Two?Words`, which
+    // is what retired it. If position 2 instead arrives split across two
+    // detents, the plain space does not survive the outlet and the substitution
+    // has to come back in some form Push can actually draw.
     if (n > 1) labels[1] = 'Two Words';
     if (n > 2) labels[2] = 'Two\u00a0Words';
   }
