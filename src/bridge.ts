@@ -1532,6 +1532,26 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       selectSceneOnLive(scene);
       break;
     }
+    // The footer already shows this track's chain. Tell Live to select the same
+    // one, so its own device view is looking at what we are.
+    case 'selectTrack': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const t = Number(m.t);
+      if (!Number.isInteger(t) || t < 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid track index' });
+      }
+      Max.outlet('select_track', t);
+      break;
+    }
+    case 'devices': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const t = Number(m.t);
+      if (!Number.isInteger(t) || t < 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid track index' });
+      }
+      Max.outlet('devices', track(ws, m), t);
+      break;
+    }
     case 'watchPlay':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'play', m.on);
@@ -2091,6 +2111,87 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
     });
   }
   broadcast({ type: 'mixerState', state: { sendCount, masterVolume, masterPan, tracks } });
+});
+
+/**
+ * One device out of a chain, checked field by field.
+ *
+ * `undefined` means "lom sent something that isn't a device" and fails the whole
+ * payload, the way a bad mixer strip does. The recursion is bounded on the other
+ * side of the wire — `DEVICE_DEPTH_MAX` in `lom.ts` — but this walks whatever
+ * arrives, so it carries its own floor rather than trusting that one.
+ */
+function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
+  if (!raw || typeof raw !== 'object' || depth > 8) return undefined;
+  const source = raw as Partial<BSV.ChainDevice>;
+  if (
+    typeof source.name !== 'string' ||
+    typeof source.className !== 'string' ||
+    typeof source.on !== 'boolean' ||
+    typeof source.folded !== 'boolean'
+  ) {
+    return undefined;
+  }
+  const device: BSV.ChainDevice = {
+    name: source.name,
+    className: source.className,
+    on: source.on,
+    folded: source.folded,
+  };
+  if (source.chains === undefined) return device;
+  if (!Array.isArray(source.chains)) return undefined;
+  const chains: BSV.RackChain[] = [];
+  for (const rawChain of source.chains) {
+    if (!rawChain || typeof rawChain !== 'object') return undefined;
+    const chain = rawChain as Partial<BSV.RackChain>;
+    if (typeof chain.name !== 'string' || !Array.isArray(chain.devices)) return undefined;
+    const devices: BSV.ChainDevice[] = [];
+    for (const nested of chain.devices) {
+      const checked = chainDevice(nested, depth + 1);
+      if (!checked) return undefined;
+      devices.push(checked);
+    }
+    chains.push({ name: chain.name, devices });
+  }
+  device.chains = chains;
+  return device;
+}
+
+// One track's chain, answering a `devices` request. Sent to the client that
+// asked rather than broadcast: two clients can be looking at two different
+// tracks, and neither wants the other's footer.
+Max.addHandler('track_devices', (reqId: number, ...atoms: unknown[]) => {
+  const req = pending.get(Number(reqId));
+  pending.delete(Number(reqId));
+  const value = decodeMaxAtom(atoms.map(String).join(''));
+
+  // A track that no longer resolves answers null, which is a real answer.
+  if (value === null) {
+    return send(req?.ws, { type: 'trackDevices', id: req?.clientId, state: null });
+  }
+  if (!value || typeof value !== 'object') {
+    Max.post('track_devices: malformed payload from lom');
+    return;
+  }
+  const source = value as Partial<BSV.TrackDevices>;
+  if (!Number.isInteger(source.t) || source.t! < 0 || !Array.isArray(source.devices)) {
+    Max.post('track_devices: invalid top-level fields from lom');
+    return;
+  }
+  const devices: BSV.ChainDevice[] = [];
+  for (const raw of source.devices) {
+    const device = chainDevice(raw, 0);
+    if (!device) {
+      Max.post('track_devices: invalid device fields from lom');
+      return;
+    }
+    devices.push(device);
+  }
+  send(req?.ws, {
+    type: 'trackDevices',
+    id: req?.clientId,
+    state: { t: source.t!, devices },
+  });
 });
 
 // Kept separate from play_state: current_song_time changes continuously, and

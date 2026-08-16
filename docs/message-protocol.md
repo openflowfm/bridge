@@ -24,6 +24,8 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
 | `select_scene <scene>` | select an exact scene and reveal it in Live's Session View |
+| `select_track <track>` | select an exact track, so Live's device view shows the chain the footer is showing |
+| `devices <reqId> <track>` | read one track's device chain — shells only, no parameters. A read, not a watch |
 | `set_transport <encodedPatch>` | set tempo, metronome, launch quantization, Arrangement Record or current scale controls as one patch |
 | `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm, volume, pan and/or one indexed send on one mixer strip |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
@@ -57,6 +59,7 @@ which, and what it cost to get wrong, is under *multiple clients*.
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording> <inSeconds> <sigNum> <sigDen> …` | nine atoms per *playing* track; silent tracks are absent |
 | `mixer_state <encodedState>` | complete cached mixer-control state |
+| `track_devices <reqId> <encodedState>` | one track's chain, or `null` where the index no longer resolves |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `transport_state <encodedState>` | complete tempo, metronome, launch-quantization, Arrangement Record and scale state |
 | `err <reqId> <msg>` | |

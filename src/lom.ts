@@ -16,8 +16,9 @@
 //      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
-//      select_scene <scene> | set_fold <track> <0|1> | set_transport <encodedPatch>
-//      set_mixer <encodedTargetAndPatch>
+//      select_scene <scene> | select_track <track> | set_fold <track> <0|1>
+//      set_transport <encodedPatch> | set_mixer <encodedTargetAndPatch>
+//      devices <reqId> <track>
 //      watch_play <0|1> | watch_meters <0|1> | watch_sends <0|1> | watch_transport <0|1>
 //      watch_status <0|1> | watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
@@ -34,6 +35,7 @@
 //      clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording>
 //        <inSeconds> <sigNum> <sigDen> … (nine atoms per *playing* track)
 //      mixer_state <encodedState>
+//      track_devices <reqId> <encodedState>
 //      pong
 
 autowatch = 1;
@@ -1617,6 +1619,156 @@ function select_scene(index: number): void {
     setSelectedScene(index);
   } catch (e) {
     fail(-1, e);
+  }
+}
+
+// The same move along the other axis, and the reason it exists is the device
+// chain: Live's device view shows the *selected track's* devices, so a footer
+// in this app showing one track and Live showing another is two answers to one
+// question. `selected_track` takes a Track object rather than an index, exactly
+// like `selected_scene`.
+
+function setSelectedTrack(index: number): number {
+  const trackIndex = Number(index);
+  const trackCount = at('live_set').getcount('tracks');
+  if (
+    !isFinite(trackIndex) ||
+    Math.floor(trackIndex) !== trackIndex ||
+    trackIndex < 0 ||
+    trackIndex >= trackCount
+  ) {
+    throw new Error(
+      'track index ' + index + ' is outside 0–' + Math.max(0, trackCount - 1),
+    );
+  }
+
+  const track = at('live_set tracks ' + trackIndex);
+  if (!exists(track)) throw new Error('track ' + trackIndex + ' did not resolve');
+  const trackId = Number(track.id);
+
+  at('live_set view').set('selected_track', 'id', trackId);
+  return trackId;
+}
+
+function select_track(index: number): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    setSelectedTrack(index);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+// --- device chain -----------------------------------------------------
+// One track's devices, as much of each as a shell can draw: its name, whether
+// it is on, whether it is folded, and a rack's chains. No parameters — see
+// `ChainDevice` in the protocol for why that is a later field rather than a
+// later redesign.
+//
+// **`at()` is one cursor**, and this is the deepest recursion in the file, so
+// the rule matters more here than anywhere: every scalar comes off a device
+// before anything descends into its chains, because the first `at()` inside the
+// recursion re-points the same object out from under the caller.
+//
+// Both limits below are runaway guards rather than opinions about sets. Racks
+// nest arbitrarily in Live and a set is data we didn't write; a walk with no
+// floor is one malformed answer away from hanging Live's main thread.
+
+/** How far a rack in a rack in a rack is followed before the walk stops. */
+const DEVICE_DEPTH_MAX = 4;
+
+/** More devices than this in one run is a bad answer, not a big set. */
+const DEVICE_COUNT_MAX = 64;
+
+function readChainDevice(path: string, depth: number): BSV.ChainDevice | null {
+  const device = at(path);
+  if (!exists(device)) return null;
+
+  // Every scalar off this object first — `at()` below re-points the cursor.
+  const name = gstr(device, 'name');
+  const className = gstr(device, 'class_name');
+  const on = gbool(device, 'is_active');
+  const canHaveChains = gbool(device, 'can_have_chains');
+
+  // Its own child object, so it costs a second goto. A device whose view does
+  // not resolve is drawn open rather than skipped: an unreadable fold state is
+  // no reason to hide a device that is plainly there.
+  const view = at(path + ' view');
+  const folded = exists(view) ? gbool(view, 'is_collapsed') : false;
+
+  const node: BSV.ChainDevice = {
+    name: name,
+    className: className,
+    on: on,
+    folded: folded,
+  };
+
+  if (canHaveChains && depth < DEVICE_DEPTH_MAX) {
+    const chains = readRackChains(path, depth);
+    if (chains.length > 0) node.chains = chains;
+  }
+  return node;
+}
+
+function readRackChains(path: string, depth: number): BSV.RackChain[] {
+  let count = 0;
+  try {
+    count = at(path).getcount('chains');
+  } catch (e) {
+    post('bsv devices: chains unavailable at ' + path + ': ' + describe(e) + '\n');
+    return [];
+  }
+  const chains: BSV.RackChain[] = [];
+  for (let i = 0; i < count; i++) {
+    const chainPath = path + ' chains ' + i;
+    const chain = at(chainPath);
+    if (!exists(chain)) continue;
+    const name = gstr(chain, 'name');
+    chains.push({ name: name, devices: readDeviceRun(chainPath, depth + 1) });
+  }
+  return chains;
+}
+
+/**
+ * The devices hanging off one holder — a track, or a chain inside a rack. Both
+ * expose the same `devices` child list, which is why a rack nests for free.
+ */
+function readDeviceRun(path: string, depth: number): BSV.ChainDevice[] {
+  let count = 0;
+  try {
+    count = at(path).getcount('devices');
+  } catch (e) {
+    post('bsv devices: devices unavailable at ' + path + ': ' + describe(e) + '\n');
+    return [];
+  }
+  const limit = Math.min(count, DEVICE_COUNT_MAX);
+  if (count > limit) {
+    post('bsv devices: ' + count + ' devices at ' + path + ', reading ' + limit + '\n');
+  }
+  const devices: BSV.ChainDevice[] = [];
+  for (let i = 0; i < limit; i++) {
+    const device = readChainDevice(path + ' devices ' + i, depth);
+    if (device) devices.push(device);
+  }
+  return devices;
+}
+
+function devices(reqId: number, t: number): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  try {
+    const index = Number(t);
+    const trackPath = 'live_set tracks ' + index;
+    // A track index that no longer resolves is a set that shrank under a client
+    // still holding the old count. Answer null rather than raising: the client
+    // asked a reasonable question about a track that has since gone.
+    if (!isFinite(index) || index < 0 || !exists(at(trackPath))) {
+      outlet(0, 'track_devices', reqId, encodeMaxAtom(null));
+      return;
+    }
+    const state: BSV.TrackDevices = { t: index, devices: readDeviceRun(trackPath, 0) };
+    outlet(0, 'track_devices', reqId, encodeMaxAtom(state));
+  } catch (e) {
+    fail(reqId, e);
   }
 }
 

@@ -267,9 +267,10 @@ Answered questions, recorded so they stay answered.
 | `ControlSurface` | `control_surfaces N` | 0 | 0 | 9 |
 | `this_device` | `live_set tracks N devices M` | 0 | 0 | 0 |
 
-Most device classes are listed for completeness only. `lom.ts` reaches the documented
-MixerDevice → DeviceParameter volume path; that exact subset is expanded below. Members
-of every other device class remain one `strings` away if that ever changes.
+Most device classes are listed for completeness only. `lom.ts` reaches two paths and both
+are expanded below: the MixerDevice → DeviceParameter volume path, and the Device →
+Device.View → Chain shell read behind the device-chain footer. Members of every other
+device class remain one `strings` away if that ever changes.
 
 ---
 
@@ -513,6 +514,51 @@ Canonical path: `live_set tracks N view`
 | function | notes |
 |---|---|
 | `select_instrument` | Returns: bool 0 = there are no devices to select Selects track's instrument or first device, makes it visible and focuses on it. |
+
+## Device
+
+One device in a track's chain. Better Session View reads only what a shell draws — no
+parameters — for the device-chain footer. See
+[`ui/docs/device-chain.md`](../ui/docs/device-chain.md).
+
+Canonical path: `live_set tracks N devices M`
+
+### Properties used here
+
+| property | type | access | notes |
+|---|---|---|---|
+| `name` | string | get, set | The user's name for it. Needn't match `class_name` — a renamed EQ Eight is still an `Eq8`. |
+| `class_name` | string | get | What kind of device it is, e.g. `Eq8`, `AudioEffectGroupDevice`, `PluginDevice`. |
+| `is_active` | bool | get | Live's device activator. **Not** the same as the track's. |
+| `can_have_chains` | bool | get | True for racks, which is how the read decides whether to descend. Cheaper and more honest than matching `class_name` against a list of rack classes. |
+
+### Children used here
+
+| child | type | access | notes |
+|---|---|---|---|
+| `view` | Device.View | get | Where the fold state lives; a second `goto`, since `at()` is one cursor. |
+| `chains` | list of Chain | get, observe | Only on a device where `can_have_chains` is 1. |
+
+## Device.View
+
+Canonical path: `live_set tracks N devices M view`
+
+| property | type | access | notes |
+|---|---|---|---|
+| `is_collapsed` | bool | get, set | Whether the device is folded to a strip. A view that doesn't resolve is drawn open rather than skipped. |
+
+## Chain
+
+One chain inside a rack — a device run with a name of its own. It exposes the same
+`devices` child list a Track does, which is why a rack nests for free rather than needing
+a second walk.
+
+Canonical path: `live_set tracks N devices M chains L`
+
+| member | type | access | notes |
+|---|---|---|---|
+| `name` | string | get, set | |
+| `devices` | list of Device | get, observe | Same list shape as `Track.devices`; a rack inside it recurses. |
 
 ## MixerDevice
 
