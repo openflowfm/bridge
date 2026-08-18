@@ -2180,6 +2180,49 @@ Max.addHandler('chain_state', (...atoms: unknown[]) => {
   broadcast({ type: 'chainState', state: { chains } });
 });
 
+/**
+ * Controls that moved since the last frame.
+ *
+ * Validated per change and **dropped individually** rather than rejecting the
+ * batch, which is the opposite of how `chain_state` is treated and deliberately
+ * so: that one describes structure, where a half-drawn chain is a lie, while
+ * this is a stream of independent values where one bad entry costs one stale
+ * knob until the next time it moves.
+ */
+Max.addHandler('chain_values', (...atoms: unknown[]) => {
+  const value = decodeMaxAtom(atoms.map(String).join(''));
+  const raw = (value as { changes?: unknown })?.changes;
+  if (!Array.isArray(raw)) {
+    Max.post('chain_values: malformed payload from lom');
+    return;
+  }
+  const changes: BSV.ChainValueChange[] = [];
+  for (const entry of raw) {
+    const change = entry as Partial<BSV.ChainValueChange>;
+    if (
+      !Number.isInteger(change.t) ||
+      !Array.isArray(change.path) ||
+      !change.path.every((n) => Number.isInteger(n) && n >= 0) ||
+      !Number.isInteger(change.i) ||
+      !Number.isInteger(change.p) ||
+      typeof change.value !== 'number' ||
+      !Number.isFinite(change.value)
+    ) {
+      continue;
+    }
+    changes.push({
+      t: change.t as number,
+      path: change.path as number[],
+      i: change.i as number,
+      p: change.p as number,
+      value: change.value,
+      display: typeof change.display === 'string' ? change.display : '',
+    });
+  }
+  if (changes.length === 0) return;
+  broadcast({ type: 'chainValues', changes });
+});
+
 Max.addHandler('mixer_state', (...atoms: unknown[]) => {
   const value = decodeMaxAtom(atoms.map(String).join(''));
   if (!value || typeof value !== 'object') {
@@ -2239,6 +2282,48 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
  * side of the wire — `DEVICE_DEPTH_MAX` in `lom.ts` — but this walks whatever
  * arrives, so it carries its own floor rather than trusting that one.
  */
+/**
+ * One control, checked.
+ *
+ * `defaultValue` and `items` are each absent for a real reason — Live exposes a
+ * default only for continuous parameters and members only for quantized ones —
+ * so absence passes and only a wrong *type* is refused.
+ */
+function deviceParameter(raw: unknown): BSV.DeviceParameterState | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const source = raw as Partial<BSV.DeviceParameterState>;
+  const number = (n: unknown) => typeof n === 'number' && Number.isFinite(n);
+  if (
+    typeof source.name !== 'string' ||
+    !number(source.value) || !number(source.min) || !number(source.max) ||
+    typeof source.quantized !== 'boolean' ||
+    typeof source.display !== 'string' ||
+    !number(source.state)
+  ) {
+    return undefined;
+  }
+  const parameter: BSV.DeviceParameterState = {
+    name: source.name,
+    value: source.value as number,
+    min: source.min as number,
+    max: source.max as number,
+    quantized: source.quantized,
+    display: source.display,
+    state: source.state as number,
+  };
+  if (source.defaultValue !== undefined) {
+    if (!number(source.defaultValue)) return undefined;
+    parameter.defaultValue = source.defaultValue;
+  }
+  if (source.items !== undefined) {
+    if (!Array.isArray(source.items) || !source.items.every((i) => typeof i === 'string')) {
+      return undefined;
+    }
+    parameter.items = source.items;
+  }
+  return parameter;
+}
+
 function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
   if (!raw || typeof raw !== 'object' || depth > 8) return undefined;
   const source = raw as Partial<BSV.ChainDevice>;
@@ -2256,6 +2341,16 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
     on: source.on,
     folded: source.folded,
   };
+  if (source.parameters !== undefined) {
+    if (!Array.isArray(source.parameters)) return undefined;
+    const parameters: BSV.DeviceParameterState[] = [];
+    for (const rawParameter of source.parameters) {
+      const parameter = deviceParameter(rawParameter);
+      if (!parameter) return undefined;
+      parameters.push(parameter);
+    }
+    device.parameters = parameters;
+  }
   if (source.chains === undefined) return device;
   if (!Array.isArray(source.chains)) return undefined;
   const chains: BSV.RackChain[] = [];

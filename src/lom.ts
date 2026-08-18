@@ -2005,8 +2005,31 @@ function readDeviceRun(path: string): BSV.ChainDevice[] {
 // callback, and re-attaching observers is close enough to that line to keep off
 // it entirely.
 
-/** Runaway stop. Three observers a device, so this is ~130 devices on screen. */
+/**
+ * Runaway stop across shells *and* parameters.
+ *
+ * Shells are three observers a device; an open device is one more per control,
+ * which is ~40 for an EQ Eight. So this is ~130 devices closed, or a handful
+ * open — and `rebuildChainObservers` attaches every shell before any parameter
+ * precisely so that hitting it costs knobs rather than the chain itself.
+ */
 const CHAIN_OBSERVER_MAX = 400;
+
+/** More controls than this on one device is a bad answer, not a big device. */
+const PARAM_COUNT_MAX = 128;
+
+/**
+ * How many members of a quantized parameter are spelled out.
+ *
+ * Each one costs a `str_for_value` call, and past a certain width the list
+ * stops being something a `Select` can show anyway — a 128-value MIDI note
+ * parameter is a number box, not a menu. Beyond this the members are omitted
+ * and the control falls back to the current value's `display`.
+ */
+const PARAM_ITEMS_MAX = 64;
+
+/** Coalesce a drag into one message a frame rather than one per callback. */
+const PARAM_DEBOUNCE_MS = 30;
 
 var chainWatches: BSV.ChainWatch[] = [];
 var chainObservers: LiveAPI[] = [];
@@ -2020,6 +2043,14 @@ var lastChainKey = '';
  * chain's own `devices` is the run. An odd length names half an address, which
  * is a malformed subscription rather than a shorter one.
  */
+function runPathOf(t: number, steps: readonly number[]): string {
+  let path = 'live_set tracks ' + t;
+  for (let i = 0; i < steps.length; i += 2) {
+    path += ' devices ' + steps[i] + ' chains ' + steps[i + 1];
+  }
+  return path;
+}
+
 function chainRunPath(w: BSV.ChainWatch): string | null {
   const steps = w.path || [];
   if (steps.length % 2 !== 0) return null;
@@ -2030,6 +2061,84 @@ function chainRunPath(w: BSV.ChainWatch): string | null {
     if (!exists(at(path))) return null;
   }
   return path;
+}
+
+/**
+ * Every control on one device.
+ *
+ * Read whole when the device opens, because all of it except `value`, `display`
+ * and `state` is fixed for as long as the device exists. That is the trade the
+ * whole tier rests on: one read of ~7 properties per control up front, then one
+ * observer per control forever after, rather than re-reading to find out what
+ * moved.
+ */
+function readDeviceParameters(devicePath: string): BSV.DeviceParameterState[] {
+  let count = 0;
+  try {
+    count = at(devicePath).getcount('parameters');
+  } catch (e) {
+    post('bsv params: unavailable at ' + devicePath + ': ' + describe(e) + '\n');
+    return [];
+  }
+  const limit = Math.min(count, PARAM_COUNT_MAX);
+  if (count > limit) {
+    post('bsv params: ' + count + ' at ' + devicePath + ', reading ' + limit + '\n');
+  }
+  const parameters: BSV.DeviceParameterState[] = [];
+  for (let i = 0; i < limit; i++) {
+    const parameter = at(devicePath + ' parameters ' + i);
+    if (!exists(parameter)) continue;
+    // Every scalar off this cursor before anything else calls `at()`.
+    const name = gstr(parameter, 'name');
+    const value = gnum(parameter, 'value');
+    const min = gnum(parameter, 'min');
+    const max = gnum(parameter, 'max');
+    const quantized = gbool(parameter, 'is_quantized');
+    const state = gnumOr(parameter, 'state', 0);
+    const entry: BSV.DeviceParameterState = {
+      name: name,
+      value: value,
+      min: min,
+      max: max,
+      quantized: quantized,
+      display: parameterDisplay(parameter, value),
+      state: state,
+    };
+    if (quantized) {
+      const items = parameterItems(parameter, min, max);
+      if (items.length > 0) entry.items = items;
+    } else {
+      // Live exposes a default only for continuous parameters. Asking a
+      // quantized one answers nothing useful, so don't claim it has a reset.
+      entry.defaultValue = gnumOr(parameter, 'default_value', value);
+    }
+    parameters.push(entry);
+  }
+  return parameters;
+}
+
+/**
+ * The members of a quantized parameter, spelled by Live.
+ *
+ * **Not `value_items`, and that is the point.** The property exists and looks
+ * like the obvious answer, but it comes back as Max atoms — so a member whose
+ * name contains a space arrives as two of them, and the list reads correctly
+ * when joined while being the wrong *length*. `diag param` exists partly
+ * because of that trap, and the length is exactly what an enum indexes by.
+ *
+ * `str_for_value` has no such problem: it is one call per member, it returns
+ * that member's text and nothing else, and it is the same function every other
+ * readout in this project already trusts to spell a value. It costs n calls
+ * instead of one, once, when a device opens.
+ */
+function parameterItems(parameter: LiveAPI, min: number, max: number): string[] {
+  const span = Math.round(max - min);
+  if (!isFinite(span) || span < 1 || span + 1 > PARAM_ITEMS_MAX) return [];
+  const items: string[] = [];
+  for (let i = 0; i <= span; i++) {
+    items.push(parameterDisplay(parameter, min + i));
+  }
+  return items;
 }
 
 /**
@@ -2047,13 +2156,19 @@ function chainRunPath(w: BSV.ChainWatch): string | null {
  * watched is then exactly what is on screen, which is the property the whole
  * scheme is for.
  */
-function readWatchedRun(path: string): BSV.ChainDevice[] {
+function readWatchedRun(path: string, open: readonly number[]): BSV.ChainDevice[] {
   const devices = readDeviceRun(path);
   for (let i = 0; i < devices.length; i++) {
     const device = devices[i];
     const devicePath = path + ' devices ' + i;
-    if (!gbool(at(devicePath), 'can_have_chains')) continue;
-    device.chains = readChainNames(devicePath);
+    if (gbool(at(devicePath), 'can_have_chains')) {
+      device.chains = readChainNames(devicePath);
+    }
+    // Parameters only for what someone has expanded. A closed device is a title
+    // bar, and forty reads plus forty observers is what it costs not to be.
+    if (open.indexOf(i) !== -1) {
+      device.parameters = readDeviceParameters(devicePath);
+    }
   }
   return devices;
 }
@@ -2100,7 +2215,7 @@ function sendChainState(): void {
     chains.push({
       t: w.t,
       path: w.path,
-      devices: path === null ? null : readWatchedRun(path),
+      devices: path === null ? null : readWatchedRun(path, w.open || []),
     });
   }
   const state: BSV.ChainState = { chains: chains };
@@ -2160,15 +2275,122 @@ function attachChainObservers(path: string): void {
   }
 }
 
+/**
+ * One `value` observer per control on every open device.
+ *
+ * **`value` only.** `state` is observable too and is deliberately not watched:
+ * it moves when a parameter becomes macro-controlled or automation is armed —
+ * roughly never, in the middle of a set — and watching it would double the
+ * budget of the most expensive tier here. It rides the structural re-read
+ * instead, so a control greys out on the next chain change rather than
+ * instantly. `automation_state` is the same trade.
+ */
+function attachParamObservers(w: BSV.ChainWatch, runPath: string): void {
+  const open = w.open || [];
+  for (let k = 0; k < open.length; k++) {
+    const i = open[k];
+    const devicePath = runPath + ' devices ' + i;
+    if (!exists(at(devicePath))) continue;
+    let count = 0;
+    try {
+      count = at(devicePath).getcount('parameters');
+    } catch (e) {
+      continue;
+    }
+    const limit = Math.min(count, PARAM_COUNT_MAX);
+    for (let index = 0; index < limit; index++) {
+      addParamObserver(w.t, w.path, i, index, devicePath + ' parameters ' + index);
+    }
+  }
+}
+
+function addParamObserver(
+  t: number, path: readonly number[], i: number, index: number, parameterPath: string,
+): void {
+  if (chainObservers.length >= CHAIN_OBSERVER_MAX) return;
+  const observer = new LiveAPI(
+    function (args: unknown[]) { onParamChange(t, path, i, index, args); },
+    parameterPath,
+  );
+  if (!exists(observer)) return;
+  observer.property = 'value';
+  chainObservers.push(observer);
+}
+
+/**
+ * A control moved. Record where and what, and flush on the next tick.
+ *
+ * `display` is left empty here on purpose. Spelling it costs a `str_for_value`
+ * call, and during a drag this fires many times between flushes — so the text
+ * is worked out once per parameter per *frame* rather than once per callback,
+ * against whichever value survived to the flush.
+ */
+function onParamChange(
+  t: number, path: readonly number[], i: number, index: number, args: unknown[],
+): void {
+  if (!chainWatching) return;
+  const value = mixerValue(args, 'value');
+  if (value === null) return;
+  paramDirty[t + '|' + path.join('.') + '|' + i + '|' + index] = {
+    t: t,
+    path: path as number[],
+    i: i,
+    p: index,
+    value: value,
+    display: '',
+  };
+  // A fixed-rate flush, not a debounce. Re-scheduling on every callback would
+  // mean a knob held still mid-drag never reports until the drag *ends*, which
+  // is the one moment its value is least interesting.
+  if (paramPending) return;
+  paramPending = true;
+  paramTask.schedule(PARAM_DEBOUNCE_MS);
+}
+
+var paramDirty: { [key: string]: BSV.ChainValueChange } = {};
+var paramPending = false;
+
+var paramTask = new Task(function () {
+  paramPending = false;
+  const keys = Object.keys(paramDirty);
+  const changes: BSV.ChainValueChange[] = [];
+  for (let k = 0; k < keys.length; k++) {
+    const change = paramDirty[keys[k]];
+    const parameter = at(
+      runPathOf(change.t, change.path) + ' devices ' + change.i + ' parameters ' + change.p,
+    );
+    change.display = exists(parameter) ? parameterDisplay(parameter, change.value) : '';
+    changes.push(change);
+  }
+  paramDirty = {};
+  if (!chainWatching || changes.length === 0) return;
+  outlet(0, 'chain_values', encodeMaxAtom({ changes: changes }));
+});
+
 function rebuildChainObservers(): void {
   clearChainObservers();
+  // Indexes just moved under us, so anything queued describes a parameter that
+  // may no longer be the one it names.
+  paramDirty = {};
   if (!chainWatching) return;
+  // **Shells for every run first, then parameters.** Both draw on one budget,
+  // and a chain that silently stopped updating is a worse failure than a knob
+  // that did — so when the cap bites, it takes knobs.
+  const paths: Array<string | null> = [];
   for (let i = 0; i < chainWatches.length; i++) {
     const path = chainRunPath(chainWatches[i]);
+    paths.push(path);
     if (path !== null) attachChainObservers(path);
   }
+  for (let i = 0; i < chainWatches.length; i++) {
+    const path = paths[i];
+    if (path !== null) attachParamObservers(chainWatches[i], path);
+  }
   if (chainObservers.length >= CHAIN_OBSERVER_MAX) {
-    post('bsv chains: hit the ' + CHAIN_OBSERVER_MAX + '-observer cap; some shells will not update\n');
+    post(
+      'bsv chains: hit the ' + CHAIN_OBSERVER_MAX + '-observer cap; ' +
+        'some controls will not follow Live\n',
+    );
   }
 }
 
@@ -2199,6 +2421,9 @@ function watch_chains(encoded: unknown): void {
   chainWatching = list.length > 0;
   lastChainKey = '';
   chainTask.cancel();
+  paramTask.cancel();
+  paramPending = false;
+  paramDirty = {};
   if (!chainWatching) {
     clearChainObservers();
     return;
@@ -4569,6 +4794,9 @@ function notifydeleted(): void {
   clearChainObservers();
   chainWatching = false;
   chainTask.cancel();
+  paramTask.cancel();
+  paramPending = false;
+  paramDirty = {};
   clearDiagObservers();
   diagDetach();
   diagScrollTask.cancel();

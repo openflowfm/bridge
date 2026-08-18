@@ -65,7 +65,8 @@ which, and what it cost to get wrong, is under *multiple clients*.
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording> <inSeconds> <sigNum> <sigDen> …` | nine atoms per *playing* track; silent tracks are absent |
 | `mixer_state <encodedState>` | complete cached mixer-control state |
-| `chain_state <encodedState>` | every watched device run, shells only. A run whose `devices` is null no longer resolves |
+| `chain_state <encodedState>` | every watched device run. A run whose `devices` is null no longer resolves; a device carries `parameters` only while it is open |
+| `chain_values <encodedChanges>` | controls that moved since the last frame, batched per tick and addressed `(t, path, i, p)` |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `transport_state <encodedState>` | complete tempo, metronome, launch-quantization, Arrangement Record and scale state |
 | `err <reqId> <msg>` | |
