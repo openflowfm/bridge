@@ -37,10 +37,22 @@ const OUT = path.join(root, 'node_modules', '.cache', 'lom-scraped.md');
 const CACHE = path.join(root, 'node_modules', '.cache', 'lom.html');
 const URL_ = 'https://docs.cycling74.com/legacy/max8/vignettes/live_object_model';
 
-/** Classes reachable from the session grid. Everything else is a device. */
+/**
+ * Classes `lom.ts` actually reaches. Everything else is scraped into the class
+ * index and no further.
+ *
+ * The device half sat outside this list for as long as nothing here touched a
+ * device. That stopped being true when the chain footer landed: it reads
+ * `Device` and `Chain`, and the parameter work reaches `DeviceParameter`. A
+ * class this project uses needs its full table checked in, because the
+ * alternative is guessing at access modes — and access modes are the one thing
+ * the Cycling '74 page is the only source for.
+ */
 const FULL = [
   'Song', 'Song.View', 'Track', 'Track.View',
   'ClipSlot', 'Clip', 'Clip.View', 'Scene', 'CuePoint', 'Application',
+  'Device', 'Device.View', 'RackDevice', 'RackDevice.View', 'Chain',
+  'MixerDevice', 'DeviceParameter', 'Eq8Device', 'Eq8Device.View',
 ];
 
 interface Member { name: string; type: string; access: string; desc: string }
@@ -168,8 +180,8 @@ function render(objects: LomClass[]): string {
     w(`| ${link} | ${o.path ? '`' + o.path + '`' : '—'} | ${o.children.length} | ${o.properties.length} | ${o.functions.length} |`);
   }
   w();
-  w('Device classes are listed for completeness only — `lom.ts` never reaches one, and');
-  w('their members are one `strings` away if that ever changes.');
+  w('A class with no link is listed for completeness only — nothing here reaches it,');
+  w('and its members are one `strings` away if that ever changes.');
   w();
   w('---');
   w();

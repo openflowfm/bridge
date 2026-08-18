@@ -19,6 +19,24 @@ second.
 for, what to do about a nullable property — live in [`README.md`](README.md) under
 *LOM gotchas*. Read that first; come here for the signature.
 
+## What a row here means, and what it doesn't
+
+A row means the member is **documented** — by Cycling '74's page, by Live's own docstring
+table, or by both. It does not mean anyone has watched it work.
+
+That distinction is why *Where the docs are wrong* exists three sections down.
+`Scene.color_index` is documented `get, set, observe` and refuses every write; the general
+form is that wherever Live's docstring says a value **can be None**, the page's `set` is a
+guess. Access modes are the column to distrust hardest, and also the column only one of the
+two sources states at all — so there is nothing to cross-check it against.
+
+**What has actually been watched lives beside the feature that watches it**, not here: a
+topic doc's *What's confirmed and what isn't*, the way
+[`ui/docs/device-chain.md`](../ui/docs/device-chain.md) does it. `tools/diag.ts` is the
+only thing that can move a claim from documented to confirmed, because it is the only
+thing that runs with Live open. Reaching for a member this project hasn't used yet means
+treating its row as a starting point and writing a probe.
+
 ## Two sources, and what each is good for
 
 | | covers | authoritative for |
@@ -234,13 +252,13 @@ Answered questions, recorded so they stay answered.
 | [`Clip`](#clip) | `live_set tracks N clip_slots M clip` | 1 | 46 | 28 |
 | [`Clip.View`](#clipview) | `live_set tracks N clip_slots M clip view` | 0 | 2 | 4 |
 | `Groove` | `live_set groove_pool grooves N` | 6 | 0 | 0 |
-| `Device` | `live_set tracks N devices M` | 2 | 9 | 1 |
-| `Device.View` | `live_set tracks N devices M view` | 0 | 1 | 0 |
+| [`Device`](#device) | `live_set tracks N devices M` | 2 | 9 | 1 |
+| [`Device.View`](#deviceview) | `live_set tracks N devices M view` | 0 | 1 | 0 |
 | [`DeviceParameter`](#deviceparameter) | `live_set tracks N devices M parameters L` | 0 | 11 | 3 |
-| `RackDevice` | — | 5 | 7 | 8 |
-| `RackDevice.View` | — | 2 | 2 | 0 |
+| [`RackDevice`](#rackdevice) | — | 5 | 7 | 8 |
+| [`RackDevice.View`](#rackdeviceview) | — | 2 | 2 | 0 |
 | `DrumPad` | `live_set tracks N devices M drum_pads L` | 1 | 4 | 1 |
-| `Chain` | `live_set tracks N devices M chains L` | 2 | 11 | 1 |
+| [`Chain`](#chain) | `live_set tracks N devices M chains L` | 2 | 11 | 1 |
 | `DrumChain` | — | 0 | 2 | 0 |
 | `ChainMixerDevice` | `live_set tracks N devices M chains L mixer_device` | 4 | 0 | 0 |
 | `ShifterDevice` | — | 0 | 2 | 0 |
@@ -252,8 +270,8 @@ Answered questions, recorded so they stay answered.
 | `PluginDevice` | — | 0 | 2 | 0 |
 | `MaxDevice` | — | 0 | 4 | 3 |
 | [`MixerDevice`](#mixerdevice) | `live_set tracks N mixer_device` | 9 | 2 | 0 |
-| `Eq8Device` | — | 0 | 3 | 0 |
-| `Eq8Device.View` | — | 0 | 1 | 0 |
+| [`Eq8Device`](#eq8device) | — | 0 | 3 | 0 |
+| [`Eq8Device.View`](#eq8deviceview) | — | 0 | 1 | 0 |
 | `DriftDevice` | — | 0 | 29 | 0 |
 | `DrumCellDevice` | — | 0 | 1 | 0 |
 | `HybridReverbDevice` | — | 0 | 8 | 0 |
@@ -267,10 +285,16 @@ Answered questions, recorded so they stay answered.
 | `ControlSurface` | `control_surfaces N` | 0 | 0 | 9 |
 | `this_device` | `live_set tracks N devices M` | 0 | 0 | 0 |
 
-Most device classes are listed for completeness only. `lom.ts` reaches two paths and both
-are expanded below: the MixerDevice → DeviceParameter volume path, and the Device →
-Device.View → Chain shell read behind the device-chain footer. Members of every other
-device class remain one `strings` away if that ever changes.
+**A linked class has its full table below; an unlinked one is a name and a count.** The
+link is the claim that this project reaches the class, so adding a member to `lom.ts`
+means expanding its section here first — `tools/lom-reference.ts` has the list, and
+everything outside it is one `strings` away.
+
+Device classes were all unlinked until the chain footer landed, on the reasoning that
+nothing here would ever touch one. Expanding them afterwards found two access modes this
+file had recorded wrongly, both because the section had been trimmed to what was used at
+the time. **Don't trim a class to the members you need**; the next reader has no way to
+tell a member Live lacks from one we didn't bother writing down.
 
 ---
 
@@ -517,35 +541,95 @@ Canonical path: `live_set tracks N view`
 
 ## Device
 
-One device in a track's chain. Better Session View reads only what a shell draws — no
-parameters — for the device-chain footer. See
-[`ui/docs/device-chain.md`](../ui/docs/device-chain.md).
+This class represents a MIDI or audio device in Live.
 
 Canonical path: `live_set tracks N devices M`
 
-### Properties used here
+**The whole table, not the part we use.** This section was trimmed to "properties used
+here" while the chain footer only drew shells, and the trim is what made the file wrong:
+`is_active` and `Device.View.is_collapsed` were both recorded as unobservable when the
+page says otherwise, and a design was reasoned out on top of that. Scope a section and
+the next person reads the scope as the LOM.
 
-| property | type | access | notes |
-|---|---|---|---|
-| `name` | string | get, set | The user's name for it. Needn't match `class_name` — a renamed EQ Eight is still an `Eq8`. |
-| `class_name` | string | get | What kind of device it is, e.g. `Eq8`, `AudioEffectGroupDevice`, `PluginDevice`. |
-| `is_active` | bool | get | Live's device activator. **Not** the same as the track's. |
-| `can_have_chains` | bool | get | True for racks, which is how the read decides whether to descend. Cheaper and more honest than matching `class_name` against a list of rack classes. |
-
-### Children used here
+### Children
 
 | child | type | access | notes |
 |---|---|---|---|
-| `view` | Device.View | get | Where the fold state lives; a second `goto`, since `at()` is one cursor. |
-| `chains` | list of Chain | get, observe | Only on a device where `can_have_chains` is 1. |
+| `parameters` | list of DeviceParameter | get, observe | Observable, so a rack whose macro count changes can be followed rather than re-read on a timer. |
+| `view` | Device.View | get | Its own object, so it costs a second `goto` — `at()` is one cursor. |
+
+### Properties
+
+| property | type | access | notes |
+|---|---|---|---|
+| `can_have_chains` | bool | get | 0 for a single device, 1 for a Rack. How the chain read decides whether to descend — cheaper and more honest than matching `class_name` against a list of rack classes. |
+| `can_have_drum_pads` | bool | get | 1 for Drum Racks. |
+| `class_display_name` | symbol | get | The device kind as a human reads it — `EQ Eight`, `Operator`. Distinct from both `class_name` and `name`, and the right label for a device with no face of its own. |
+| `class_name` | symbol | get | Live device type: `Eq8`, `MidiChord`, `Operator`, `Limiter`, `PluginDevice`, `MxDeviceAudioEffect`. What a face registry keys on. |
+| `is_active` | bool | get, **observe** | Live's device activator. 0 = either the device itself or its enclosing Rack is off. **Not** the same as the track's. |
+| `name` | symbol | get, set, observe | The string in the device's title bar. The user's name for it, which needn't match `class_name` — a renamed EQ Eight is still an `Eq8`. |
+| `type` | int | get | 0 = undefined, 1 = instrument, 2 = audio_effect, 4 = midi_effect. |
+| `latency_in_samples` | int | get, observe | |
+| `latency_in_ms` | float | get, observe | |
+
+### Functions
+
+| function | notes |
+|---|---|
+| `store_chosen_bank` | Parameters: script_index [int] bank_index [int]. Control-surface plumbing; not relevant here. |
 
 ## Device.View
+
+Representing the view aspects of a Device.
 
 Canonical path: `live_set tracks N devices M view`
 
 | property | type | access | notes |
 |---|---|---|---|
-| `is_collapsed` | bool | get, set | Whether the device is folded to a strip. A view that doesn't resolve is drawn open rather than skipped. |
+| `is_collapsed` | bool | get, set, **observe** | 1 = the device is shown collapsed in the device chain. **Observable** — this file previously recorded it as `get, set`, which is what the trim cost. A view that doesn't resolve is drawn open rather than skipped. |
+
+## RackDevice
+
+A Rack. Has everything `Device` has; below are the members unique to it.
+
+### Children
+
+| child | type | access | notes |
+|---|---|---|---|
+| `chains` | list of Chain | get, observe | Observable, so a chain added in Live can be followed. |
+| `return_chains` | list of Chain | get, observe | A rack's own return chains — a second run beside `chains`, not part of it. |
+| `chain_selector` | DeviceParameter | get | The Chain selector, as an ordinary parameter. |
+| `drum_pads` | list of DrumPad | get, observe | Drum Racks only. |
+| `visible_drum_pads` | list of DrumPad | get, observe | |
+
+### Properties
+
+| property | type | access | notes |
+|---|---|---|---|
+| `visible_macro_count` | int | get, observe | How many macros the rack is showing. Observable, so a macro face can follow Live rather than re-reading. |
+| `has_macro_mappings` | bool | get, observe | 1 = any macro is mapped. |
+| `can_show_chains` | bool | get | |
+| `is_showing_chains` | bool | get, set, observe | |
+| `has_drum_pads` | bool | get, observe | A nested Drum Rack is a Drum Rack *without* pads. |
+| `variation_count` | int | get, observe | Stored macro variations. Live 11.0+. |
+| `selected_variation_index` | int | get, set | Live 11.0+. |
+
+### Functions
+
+`add_macro`, `remove_macro`, `randomize_macros`, `store_variation`,
+`recall_selected_variation`, `recall_last_used_variation`,
+`delete_selected_variation` (all Live 11.0+), and `copy_pad` for Drum Racks.
+
+## RackDevice.View
+
+Has everything `Device.View` has; below are the members unique to it.
+
+| member | type | access | notes |
+|---|---|---|---|
+| `selected_chain` | Chain | get, set, **observe** | Which chain the rack is showing. Settable *and* observable, so this can be kept in step with Live rather than held as local UI state. Distinct from `Song.View.selected_chain`, which is the set-wide cursor. |
+| `selected_drum_pad` | DrumPad | get, set, observe | |
+| `is_showing_chain_devices` | bool | get, set, observe | |
+| `drum_pads_scroll_position` | int | get, set, observe | Lowest visible pad row, 0–28. Drum Racks only. |
 
 ## Chain
 
@@ -555,49 +639,113 @@ a second walk.
 
 Canonical path: `live_set tracks N devices M chains L`
 
-| member | type | access | notes |
-|---|---|---|---|
-| `name` | string | get, set | |
-| `devices` | list of Device | get, observe | Same list shape as `Track.devices`; a rack inside it recurses. |
-
-## MixerDevice
-
-The per-track mixer. Better Session View reaches `volume`, `panning` and `sends`; activator state
-uses the equivalent inverse of `Track.mute`, while Solo and Arm use their direct Track
-properties above.
-
-Canonical path: `live_set tracks N mixer_device`
-
-### Children used here
+### Children
 
 | child | type | access | notes |
 |---|---|---|---|
-| `track_activator` | DeviceParameter | get | Exposed by Live, but `lom.ts` uses observable `Track.mute` for this switch. |
-| `volume` | DeviceParameter | get | Track volume fader. Master uses `live_set master_track mixer_device volume`. |
-| `panning` | DeviceParameter | get | Stereo pan. Master uses `live_set master_track mixer_device panning`. |
-| `sends` | list of DeviceParameter | get, observe | One per return track, addressed as `live_set tracks N mixer_device sends L`. |
+| `devices` | list of Device | get, observe | Same list shape as `Track.devices`; a rack inside it recurses. |
+| `mixer_device` | ChainMixerDevice | get | A chain's own mixer. Not reached here; scraped into the class index only. |
 
-## DeviceParameter
-
-The writable and automatable parameter object behind volume, pan and sends. The canonical
-device parameter path is `live_set tracks N devices M parameters L`; mixer parameters are
-also reachable as children of MixerDevice, including the volume paths above.
-
-### Properties used here
+### Properties
 
 | property | type | access | notes |
 |---|---|---|---|
-| `value` | float | get, set, observe | Internal value between `min` and `max`; track and Master volume report 0–1. Linear to Live's GUI fader, not to displayed dB. |
-| `default_value` | float | get | Reset value used for double-click on the compact control. |
-| `min` | float | get | Lowest allowed internal value. |
-| `max` | float | get | Highest allowed internal value. |
-| `is_enabled` | bool | get | 0 when automation, a mapping, remote control or Live prevents direct edits. |
+| `name` | unicode | get, set, observe | |
+| `color` | int | get, set, observe | RGB, as `Track.color`. |
+| `color_index` | long | get, set, observe | **Treat `set` as unverified** — `Scene.color_index` and `Track.color_index` are both documented settable and both refuse, for the nullability reason under *Where the docs are wrong*. Write `color`. |
+| `is_auto_colored` | bool | get, set, observe | 1 = the chain follows its containing track or chain's color. |
+| `mute` | bool | get, set, observe | 1 = Chain Activator off. |
+| `solo` | bool | get, set, observe | Does not un-solo other chains. |
+| `muted_via_solo` | bool | get, observe | |
+| `has_audio_input` / `has_audio_output` / `has_midi_input` / `has_midi_output` | bool | get | |
 
-### Functions used here
+### Functions
 
 | function | notes |
 |---|---|
-| `str_for_value` | Parameter: `value` [float]. Live's formatted representation, used so compact mixer readouts match its dB and pan text. |
+| `delete_device` | Parameter: index [int]. |
+
+## MixerDevice
+
+The per-track mixer. This project reaches `volume`, `panning` and `sends`; activator state
+uses the inverse of `Track.mute`, while Solo and Arm use their direct `Track` properties.
+
+Canonical path: `live_set tracks N mixer_device`
+
+### Children
+
+| child | type | access | notes |
+|---|---|---|---|
+| `volume` | DeviceParameter | get | Track volume fader. Master is `live_set master_track mixer_device volume`. |
+| `panning` | DeviceParameter | get | Stereo pan. Master is `live_set master_track mixer_device panning`. |
+| `sends` | list of DeviceParameter | get, observe | One per return track, at `live_set tracks N mixer_device sends L`. |
+| `track_activator` | DeviceParameter | get | Exposed by Live, but `lom.ts` uses observable `Track.mute` for this switch. |
+| `cue_volume` | DeviceParameter | get | |
+| `crossfader` | DeviceParameter | get | |
+| `song_tempo` | DeviceParameter | get | Tempo as a parameter. `Song.tempo` is what this project writes. |
+| `left_split_stereo` / `right_split_stereo` | DeviceParameter | get | Split-stereo pan, live only when `panning_mode` is 1. |
+
+### Properties
+
+| property | type | access | notes |
+|---|---|---|---|
+| `panning_mode` | int | get, set, observe | 0 = Stereo, 1 = Split Stereo. |
+| `crossfade_assign` | int | get, set, observe | 0 = A, 1 = none, 2 = B. [not in master] |
+
+## DeviceParameter
+
+The writable, automatable parameter behind every control on every device — and behind
+volume, pan and sends. Canonical path `live_set tracks N devices M parameters L`; mixer
+parameters are also reachable as children of MixerDevice.
+
+**Only `value`, `state` and `automation_state` are observable.** Everything else is fixed
+for as long as the device exists, which is what makes a parameter subscription affordable:
+read the rest once when a device opens, observe one property per parameter thereafter.
+
+### Properties
+
+| property | type | access | notes |
+|---|---|---|---|
+| `value` | float | get, set, **observe** | Linear-to-GUI value between `min` and `max`. Linear to Live's fader, **not** to displayed dB. |
+| `min` | float | get | |
+| `max` | float | get | |
+| `default_value` | float | get | **Only for parameters that aren't quantized.** A quantized parameter has no default to reset to, so a control's double-click-to-reset has nothing to read — check `is_quantized` first. |
+| `is_quantized` | bool | get | 1 for booleans and enums, 0 for int/float. **A parameter can look stepped to the user and answer 0** — the page names `MidiPitch.Pitch`. So this decides which of `default_value` / `value_items` exists, and is not a reliable guide to how a control should feel. |
+| `value_items` | StringVector | get | The possible values. **Only for quantized parameters.** This is the enum member list a `Param` needs, and what Push draws an encoder's value text from. |
+| `name` | symbol | get | The short name, as in the closed automation chooser. |
+| `original_name` | symbol | get | A Macro's name before assignment. |
+| `is_enabled` | bool | get | 1 = the user can move it. 0 when macro-controlled, driven by `live.remote~`, or Live decides it shouldn't move. **`get` only — there is no observer.** Use `state` to follow this. |
+| `state` | int | get, **observe** | 0 = active and changeable, 1 = changeable but inaudible, 2 = cannot be changed. The observable answer to the question `is_enabled` asks, and a finer one. |
+| `automation_state` | int | get, **observe** | 0 = none, 1 = active, 2 = overridden. |
+
+### Functions
+
+| function | notes |
+|---|---|
+| `str_for_value` | Parameter: `value` [float]. Live's own formatted representation, so a readout matches its dB, Hz and pan text rather than being formatted a second way that eventually disagrees. |
+| `__str__` | The current value, formatted. |
+| `re_enable_automation` | |
+
+## Eq8Device
+
+An EQ Eight. Has everything `Device` has; below are the members unique to it.
+
+**Three of its controls are device properties, not parameters** — they will not appear in
+`parameters`, and a face built only from that list silently loses them.
+
+| property | type | access | notes |
+|---|---|---|---|
+| `global_mode` | int | get, set, observe | 0 = Stereo, 1 = L/R, 2 = M/S. |
+| `edit_mode` | bool | get, set, observe | Which channel is being edited. Meaning depends on `global_mode`: in L/R, 0 = L and 1 = R; in M/S, 0 = M and 1 = S; in Stereo, 0 = A and 1 = B (inactive). |
+| `oversample` | bool | get, set, observe | 0 = Off, 1 = On. |
+
+## Eq8Device.View
+
+Has everything `Device.View` has; below are the members unique to it.
+
+| property | type | access | notes |
+|---|---|---|---|
+| `selected_band` | int | get, set, observe | The currently selected filter band. Settable and observable, so band selection can be kept in step with Live. |
 
 ## ClipSlot
 
