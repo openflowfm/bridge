@@ -193,13 +193,25 @@ addressing after a Max upgrade.
 
 ## Testing
 
-`bridge.js` has 19 end-to-end assertions against a stubbed `max-api`, run against the
-**compiled** output: static serving, path traversal, WS handshake and path, readiness
-gating, request routing by id, dict staging with punctuation intact, progress
-streaming, palette caching, error paths.
+**`bridge.js` has no automated coverage, and this file claimed otherwise for a long
+time.** It described 19 end-to-end assertions against a stubbed `max-api` — static
+serving, path traversal, the WS handshake, readiness gating, request routing by id, dict
+staging, progress streaming, palette caching, error paths. No such harness exists in this
+repository, and none appears anywhere in its history. Every one of those is still worth
+asserting and none of them is asserted.
 
-`lom.js` needs Live and has no automated coverage. **It's the file to suspect first.**
-The parts that could be extracted are, in `core/src/lomAtoms.ts`.
+That the claim survived is the argument for rule 11 in
+[`AGENTS.md`](../../AGENTS.md), from the wrong side: a drifted doc is worse than no doc,
+because it is believed. It was believed here — a change reached for that harness to test
+new bridge logic against, and found nothing to reach for.
+
+`lom.js` needs Live and has no automated coverage either. **It's the file to suspect
+first.** The parts that could be extracted are, in `core/src/lomAtoms.ts`.
+
+**So logic worth testing goes in `core/`, and the two halves of the device keep only what
+has to live there.** `chainWatch.ts` is the worked example: the union deciding how many
+LOM observers get installed is arithmetic, so it sits in `core/` with tests, and
+`bridge.ts` keeps just the per-socket bookkeeping around it.
 
 - **`Scene.tempo` needs `tempo_enabled` set first, and the order is load-bearing.** Live
   documents the pair as "the song will use the scene's tempo as soon as the scene is
