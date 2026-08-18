@@ -1618,15 +1618,6 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('select_track', t);
       break;
     }
-    case 'devices': {
-      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      const t = Number(m.t);
-      if (!Number.isInteger(t) || t < 0) {
-        return send(ws, { type: 'error', id: m.id, message: 'invalid track index' });
-      }
-      Max.outlet('devices', track(ws, m), t);
-      break;
-    }
     case 'watchPlay':
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'play', m.on);
@@ -2271,7 +2262,14 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
   for (const rawChain of source.chains) {
     if (!rawChain || typeof rawChain !== 'object') return undefined;
     const chain = rawChain as Partial<BSV.RackChain>;
-    if (typeof chain.name !== 'string' || !Array.isArray(chain.devices)) return undefined;
+    if (typeof chain.name !== 'string') return undefined;
+    // No `devices` means nobody is subscribed to this chain, which is the
+    // normal state of every chain in an unopened rack — not a malformed one.
+    if (chain.devices === undefined) {
+      chains.push({ name: chain.name });
+      continue;
+    }
+    if (!Array.isArray(chain.devices)) return undefined;
     const devices: BSV.ChainDevice[] = [];
     for (const nested of chain.devices) {
       const checked = chainDevice(nested, depth + 1);
@@ -2283,43 +2281,6 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
   device.chains = chains;
   return device;
 }
-
-// One track's chain, answering a `devices` request. Sent to the client that
-// asked rather than broadcast: two clients can be looking at two different
-// tracks, and neither wants the other's footer.
-Max.addHandler('track_devices', (reqId: number, ...atoms: unknown[]) => {
-  const req = pending.get(Number(reqId));
-  pending.delete(Number(reqId));
-  const value = decodeMaxAtom(atoms.map(String).join(''));
-
-  // A track that no longer resolves answers null, which is a real answer.
-  if (value === null) {
-    return send(req?.ws, { type: 'trackDevices', id: req?.clientId, state: null });
-  }
-  if (!value || typeof value !== 'object') {
-    Max.post('track_devices: malformed payload from lom');
-    return;
-  }
-  const source = value as Partial<BSV.TrackDevices>;
-  if (!Number.isInteger(source.t) || source.t! < 0 || !Array.isArray(source.devices)) {
-    Max.post('track_devices: invalid top-level fields from lom');
-    return;
-  }
-  const devices: BSV.ChainDevice[] = [];
-  for (const raw of source.devices) {
-    const device = chainDevice(raw, 0);
-    if (!device) {
-      Max.post('track_devices: invalid device fields from lom');
-      return;
-    }
-    devices.push(device);
-  }
-  send(req?.ws, {
-    type: 'trackDevices',
-    id: req?.clientId,
-    state: { t: source.t!, devices },
-  });
-});
 
 // Kept separate from play_state: current_song_time changes continuously, and
 // making each tick re-read every track would turn one cheap clock into dozens

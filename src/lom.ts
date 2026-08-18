@@ -1923,20 +1923,19 @@ function select_track(index: number): void {
 //
 // **`at()` is one cursor**, and this is the deepest recursion in the file, so
 // the rule matters more here than anywhere: every scalar comes off a device
-// before anything descends into its chains, because the first `at()` inside the
-// recursion re-points the same object out from under the caller.
+// before anything reads its chains, because the next `at()` re-points the same
+// object out from under the caller.
 //
-// Both limits below are runaway guards rather than opinions about sets. Racks
-// nest arbitrarily in Live and a set is data we didn't write; a walk with no
-// floor is one malformed answer away from hanging Live's main thread.
-
-/** How far a rack in a rack in a rack is followed before the walk stops. */
-const DEVICE_DEPTH_MAX = 4;
+// **Nothing here recurses any more.** It used to: the one-shot read walked
+// every chain of every rack in one answer, which is why it needed a depth
+// floor. A run is now read alone and a rack's chains are a list of names, so
+// depth is bounded at one by construction rather than by a guard — and a chain
+// a client opens is a subscription of its own. See `readWatchedRun`.
 
 /** More devices than this in one run is a bad answer, not a big set. */
 const DEVICE_COUNT_MAX = 64;
 
-function readChainDevice(path: string, depth: number): BSV.ChainDevice | null {
+function readChainDevice(path: string): BSV.ChainDevice | null {
   const device = at(path);
   if (!exists(device)) return null;
 
@@ -1944,7 +1943,6 @@ function readChainDevice(path: string, depth: number): BSV.ChainDevice | null {
   const name = gstr(device, 'name');
   const className = gstr(device, 'class_name');
   const on = gbool(device, 'is_active');
-  const canHaveChains = gbool(device, 'can_have_chains');
 
   // Its own child object, so it costs a second goto. A device whose view does
   // not resolve is drawn open rather than skipped: an unreadable fold state is
@@ -1952,44 +1950,18 @@ function readChainDevice(path: string, depth: number): BSV.ChainDevice | null {
   const view = at(path + ' view');
   const folded = exists(view) ? gbool(view, 'is_collapsed') : false;
 
-  const node: BSV.ChainDevice = {
-    name: name,
-    className: className,
-    on: on,
-    folded: folded,
-  };
-
-  if (canHaveChains && depth < DEVICE_DEPTH_MAX) {
-    const chains = readRackChains(path, depth);
-    if (chains.length > 0) node.chains = chains;
-  }
-  return node;
-}
-
-function readRackChains(path: string, depth: number): BSV.RackChain[] {
-  let count = 0;
-  try {
-    count = at(path).getcount('chains');
-  } catch (e) {
-    post('bsv devices: chains unavailable at ' + path + ': ' + describe(e) + '\n');
-    return [];
-  }
-  const chains: BSV.RackChain[] = [];
-  for (let i = 0; i < count; i++) {
-    const chainPath = path + ' chains ' + i;
-    const chain = at(chainPath);
-    if (!exists(chain)) continue;
-    const name = gstr(chain, 'name');
-    chains.push({ name: name, devices: readDeviceRun(chainPath, depth + 1) });
-  }
-  return chains;
+  // `chains` is deliberately not set here. Whether this device is a rack, and
+  // what its chains are called, is `readWatchedRun`'s to fill in — it is the
+  // one that knows a run is being read for a subscription rather than walked.
+  return { name: name, className: className, on: on, folded: folded };
 }
 
 /**
  * The devices hanging off one holder — a track, or a chain inside a rack. Both
- * expose the same `devices` child list, which is why a rack nests for free.
+ * expose the same `devices` child list, which is why a chain reads exactly like
+ * a track does.
  */
-function readDeviceRun(path: string, depth: number): BSV.ChainDevice[] {
+function readDeviceRun(path: string): BSV.ChainDevice[] {
   let count = 0;
   try {
     count = at(path).getcount('devices');
@@ -2003,30 +1975,12 @@ function readDeviceRun(path: string, depth: number): BSV.ChainDevice[] {
   }
   const devices: BSV.ChainDevice[] = [];
   for (let i = 0; i < limit; i++) {
-    const device = readChainDevice(path + ' devices ' + i, depth);
+    const device = readChainDevice(path + ' devices ' + i);
     if (device) devices.push(device);
   }
   return devices;
 }
 
-function devices(reqId: number, t: number): void {
-  if (!deviceReady) return fail(reqId, 'device not ready');
-  try {
-    const index = Number(t);
-    const trackPath = 'live_set tracks ' + index;
-    // A track index that no longer resolves is a set that shrank under a client
-    // still holding the old count. Answer null rather than raising: the client
-    // asked a reasonable question about a track that has since gone.
-    if (!isFinite(index) || index < 0 || !exists(at(trackPath))) {
-      outlet(0, 'track_devices', reqId, encodeMaxAtom(null));
-      return;
-    }
-    const state: BSV.TrackDevices = { t: index, devices: readDeviceRun(trackPath, 0) };
-    outlet(0, 'track_devices', reqId, encodeMaxAtom(state));
-  } catch (e) {
-    fail(reqId, e);
-  }
-}
 
 // --- device-chain watch -----------------------------------------------
 //
@@ -2079,6 +2033,57 @@ function chainRunPath(w: BSV.ChainWatch): string | null {
 }
 
 /**
+ * One watched run: its devices, and for a rack its chain *names* only.
+ *
+ * **It does not descend, and that is the whole subscription model.** The
+ * one-shot read this replaced walked every chain of every rack, which meant the
+ * footer drew devices nothing was observing — a device added inside a rack chain
+ * was invisible until something asked again. Following them all instead is the
+ * cost this design exists to avoid: a rack with eight chains of five devices is
+ * 120 observers for one closed rack nobody is looking into.
+ *
+ * So a rack reports what it takes to draw its chain list, and the chain a client
+ * actually opens is a subscription of its own — `path` naming it. What is
+ * watched is then exactly what is on screen, which is the property the whole
+ * scheme is for.
+ */
+function readWatchedRun(path: string): BSV.ChainDevice[] {
+  const devices = readDeviceRun(path);
+  for (let i = 0; i < devices.length; i++) {
+    const device = devices[i];
+    const devicePath = path + ' devices ' + i;
+    if (!gbool(at(devicePath), 'can_have_chains')) continue;
+    device.chains = readChainNames(devicePath);
+  }
+  return devices;
+}
+
+/**
+ * A rack's chains, as a list to pick from — no devices.
+ *
+ * `devices` is left absent rather than empty, because those mean different
+ * things here: absent is "nobody is subscribed to this chain", empty is "this
+ * chain is genuinely bare". A client that drew the empty case for the first
+ * would show every unopened rack as containing nothing.
+ */
+function readChainNames(path: string): BSV.RackChain[] {
+  let count = 0;
+  try {
+    count = at(path).getcount('chains');
+  } catch (e) {
+    post('bsv chains: unavailable at ' + path + ': ' + describe(e) + '\n');
+    return [];
+  }
+  const chains: BSV.RackChain[] = [];
+  for (let i = 0; i < count; i++) {
+    const chain = at(path + ' chains ' + i);
+    if (!exists(chain)) continue;
+    chains.push({ name: gstr(chain, 'name') });
+  }
+  return chains;
+}
+
+/**
  * Re-read every watched run and publish, if anything actually moved.
  *
  * A run that no longer resolves is reported as `devices: null` rather than
@@ -2095,7 +2100,7 @@ function sendChainState(): void {
     chains.push({
       t: w.t,
       path: w.path,
-      devices: path === null ? null : readDeviceRun(path, 0),
+      devices: path === null ? null : readWatchedRun(path),
     });
   }
   const state: BSV.ChainState = { chains: chains };
@@ -2148,6 +2153,10 @@ function attachChainObservers(path: string): void {
     addChainObserver(devicePath, 'name');
     addChainObserver(devicePath, 'is_active');
     addChainObserver(devicePath + ' view', 'is_collapsed');
+    // A rack's chain *list* is drawn here, so it is followed here. What is
+    // inside those chains is not — that is a subscription of its own, and the
+    // client makes it when it opens one.
+    if (gbool(at(devicePath), 'can_have_chains')) addChainObserver(devicePath, 'chains');
   }
 }
 
