@@ -54,6 +54,30 @@ const OPS_DICT = 'bsv_ops';
 /** LOM ops per scheduler tick — keeps Live's UI responsive. */
 const CHUNK = 50;
 
+/**
+ * How much of each snapshot pass runs in one tick.
+ *
+ * `slots` is the one that matters and the one to move first: it is
+ * `trackCount x sceneCount`, it is ~60% of the walk, and it is what
+ * `npm run dev:diag -- scan <track>` measures. The other three are sized to a
+ * comparable slice of work rather than tuned — a track costs ~7 gets, a scene
+ * ~5, a clip ~6, and a slot 1 or 2.
+ */
+const SNAP_CHUNK = { tracks: 48, scenes: 96, slots: 512, clips: 96 };
+
+/** Scheduler gap between snapshot chunks, matching the write tasks. */
+const SNAP_INTERVAL_MS = 2;
+
+/**
+ * How many times a walk may start over because the set changed under it.
+ *
+ * A restructure mid-walk is rare — the common snapshot happens just after a set
+ * opens, when nobody is editing — so this is a correctness guard rather than a
+ * hot path. Three, then say so: a set being actively restructured is not one
+ * that can be read coherently, and spinning forever hides that.
+ */
+const SNAP_MAX_RESTARTS = 3;
+
 /** Safety stop for the palette sweep; real palettes are far smaller. */
 const PALETTE_MAX = 200;
 
@@ -411,154 +435,373 @@ function set_info(): void {
 
 // --- snapshot ---------------------------------------------------------
 
-function snapshot(reqId: number): void {
-  if (!deviceReady) return fail(reqId, 'device not ready');
-  const t0 = Date.now();
-  // The four phases do very different amounts of work, so raw item counts
-  // would make the bar jump backwards when the next phase's total becomes
-  // known. Give each phase a stable slice instead. Integer de-duplication also
-  // caps a large set at 101 messages rather than sending one per scene/clip.
-  let lastProgress = -1;
-  function progress(done: number): void {
-    const next = Math.max(0, Math.min(100, Math.floor(done)));
-    if (next === lastProgress) return;
-    lastProgress = next;
-    outlet(0, 'snapshot_progress', reqId, next, 100);
+/**
+ * Whether a read and a write would overlap, in either direction.
+ *
+ * The write paths have always refused each other. The snapshot joins them now
+ * that it yields: a walk spread over ticks can have `apply` land in one of the
+ * gaps, and the result describes neither the set before that write nor the one
+ * after it. The guard runs both ways — a write during a walk is refused, and a
+ * walk during a write is too.
+ */
+function blockedBy(): string | null {
+  if (snapJob) return 'a snapshot is already in progress';
+  if (job || moveJob || clipJob) return 'a write is already in progress';
+  return null;
+}
+
+interface SnapshotJob {
+  reqId: number;
+  /** Wall clock from the first request, held across a restart. */
+  t0: number;
+  pass: 'tracks' | 'scenes' | 'slots' | 'clips';
+  /** Cursor within the current pass. In `slots` it is the track half. */
+  i: number;
+  /** Scene cursor, `slots` pass only. */
+  s: number;
+  trackCount: number;
+  sceneCount: number;
+  masterColor: number | null;
+  tracks: BSV.Track[];
+  indexOfId: { [id: string]: number };
+  parentIds: number[];
+  scenes: BSV.Scene[];
+  occupied: Array<[number, number]>;
+  clips: BSV.Clip[];
+  slotsScanned: number;
+  slotTrackCount: number;
+  slotTracksDone: number;
+  /** LOM time per pass, excluding the gaps. See `newSnapshotJob`. */
+  work: { tracks: number; scenes: number; slots: number; clips: number };
+  /** Set by `onStructureChange`. The walk starts over rather than tearing. */
+  stale: boolean;
+  restarts: number;
+  lastProgress: number;
+}
+
+var snapJob: SnapshotJob | null = null;
+
+/**
+ * Read what the walk needs before it can be chunked, and nothing else.
+ *
+ * The counts have to be taken once and held: every pass is indexed against
+ * them, and re-reading `getcount` per tick would let a set that grew mid-walk
+ * produce a snapshot with more scenes than the scene rows describe. If they
+ * change, `stale` is the mechanism, not a fresh count.
+ */
+function newSnapshotJob(reqId: number, t0: number): SnapshotJob {
+  const set = at('live_set');
+  return {
+    reqId: reqId,
+    t0: t0,
+    pass: 'tracks',
+    i: 0,
+    s: 0,
+    trackCount: set.getcount('tracks'),
+    sceneCount: set.getcount('scenes'),
+    masterColor: readMasterColor(),
+    tracks: [],
+    indexOfId: {},
+    parentIds: [],
+    scenes: [],
+    occupied: [],
+    clips: [],
+    slotsScanned: 0,
+    slotTrackCount: 0,
+    slotTracksDone: 0,
+    work: { tracks: 0, scenes: 0, slots: 0, clips: 0 },
+    stale: false,
+    restarts: 0,
+    lastProgress: -1,
+  };
+}
+
+/**
+ * The four passes do very different amounts of work, so raw item counts would
+ * make the bar jump backwards when the next pass's total became known. Give
+ * each pass a stable slice instead. Integer de-duplication also caps a large
+ * set at 101 messages rather than one per scene and clip.
+ */
+function snapProgress(j: SnapshotJob, done: number): void {
+  const next = Math.max(0, Math.min(100, Math.floor(done)));
+  if (next === j.lastProgress) return;
+  j.lastProgress = next;
+  outlet(0, 'snapshot_progress', j.reqId, next, 100);
+}
+
+function snapPhase(
+  j: SnapshotJob, start: number, span: number, done: number, total: number,
+): void {
+  snapProgress(j, total > 0 ? start + span * done / total : start + span);
+}
+
+function snapshotTracks(j: SnapshotJob): boolean {
+  const end = Math.min(j.i + SNAP_CHUNK.tracks, j.trackCount);
+  for (; j.i < end; j.i++) {
+    const a = at('live_set tracks ' + j.i);
+    const isGroup = gbool(a, 'is_foldable');
+    j.indexOfId[String(a.id)] = j.i;
+    j.parentIds.push(gbool(a, 'is_grouped') ? gid(a, 'group_track') : 0);
+    j.tracks.push({
+      i: j.i,
+      name: gstr(a, 'name'),
+      color: gnum(a, 'color'),
+      colorIndex: gnum(a, 'color_index'),
+      isMidi: gbool(a, 'has_midi_input'),
+      isGroup: isGroup,
+      isGrouped: gbool(a, 'is_grouped'),
+      groupIndex: -1, // resolved once every id is known
+      // fold_state is documented as only available when is_foldable, so don't
+      // ask for it on a track that isn't a group.
+      isFolded: isGroup ? gbool(a, 'fold_state') : false,
+    });
   }
-  function phase(start: number, span: number, done: number, total: number): void {
-    progress(total > 0 ? start + span * done / total : start + span);
+  return j.i >= j.trackCount;
+}
+
+/**
+ * `group_track` hands back the parent's LOM id, but everything downstream
+ * addresses tracks by index. A second pass is needed regardless of chunking: a
+ * nested group's parent is itself a track, so only after every track has been
+ * read are all the ids known.
+ */
+function resolveGroupParents(j: SnapshotJob): void {
+  for (let t = 0; t < j.trackCount; t++) {
+    if (!j.parentIds[t]) continue;
+    const parent = j.indexOfId[String(j.parentIds[t])];
+    if (parent !== undefined) j.tracks[t].groupIndex = parent;
+  }
+  j.slotTrackCount = j.tracks.reduce((n, track) => n + (track.isGroup ? 0 : 1), 0);
+}
+
+function snapshotScenes(j: SnapshotJob): boolean {
+  const end = Math.min(j.i + SNAP_CHUNK.scenes, j.sceneCount);
+  for (; j.i < end; j.i++) j.scenes.push(readSceneRow(j.i)!);
+  return j.i >= j.sceneCount;
+}
+
+/**
+ * The occupancy scan, which is most of the walk.
+ *
+ * Two passes on purpose, as before: this one is `trackCount x sceneCount` and
+ * mostly empty slots, while the property reads below only touch clips that
+ * exist — timing them separately is what says which one to attack.
+ *
+ * The budget is counted in *slots* and crosses track boundaries rather than
+ * restarting at them, for the reason `applyStep` does the same: a track with
+ * four scenes shouldn't cost a whole tick.
+ *
+ * Deliberately canonical paths. `goto('id N')` does not resolve under this v8
+ * LiveAPI build; probing it once per track only emits `get: no valid object
+ * set` before falling back to this same scan.
+ */
+function snapshotSlots(j: SnapshotJob): boolean {
+  let budget = SNAP_CHUNK.slots;
+  while (budget > 0) {
+    if (j.i >= j.trackCount) break;
+    // Group tracks have no real clip slots.
+    if (j.tracks[j.i].isGroup) {
+      j.i++;
+      j.s = 0;
+      continue;
+    }
+    if (j.s >= j.sceneCount) {
+      j.i++;
+      j.s = 0;
+      j.slotTracksDone++;
+      continue;
+    }
+    j.slotsScanned++;
+    budget--;
+    const slot = at('live_set tracks ' + j.i + ' clip_slots ' + j.s);
+    if (exists(slot) && gbool(slot, 'has_clip')) {
+      const c = at('live_set tracks ' + j.i + ' clip_slots ' + j.s + ' clip');
+      if (exists(c)) j.occupied.push([j.i, j.s]);
+    }
+    j.s++;
+  }
+  return j.i >= j.trackCount;
+}
+
+function snapshotClips(j: SnapshotJob): boolean {
+  const end = Math.min(j.i + SNAP_CHUNK.clips, j.occupied.length);
+  for (; j.i < end; j.i++) {
+    const t = j.occupied[j.i][0];
+    const s = j.occupied[j.i][1];
+    const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
+    if (!exists(c)) continue;
+    j.clips.push({
+      t: t,
+      s: s,
+      name: gstr(c, 'name'),
+      colorIndex: gnum(c, 'color_index'),
+      color: gnum(c, 'color'),
+      length: gnum(c, 'length'),
+      isMidi: gbool(c, 'is_midi_clip'),
+    });
+  }
+  return j.i >= j.occupied.length;
+}
+
+/**
+ * The walk, spread over scheduler ticks so Live's UI keeps breathing.
+ *
+ * It was one synchronous loop, which is why opening a large set froze Live for
+ * the length of it. Every *write* in this file already chunks for exactly that
+ * reason — `applyStep`, `moveStep`, `clipMoveStep` — and the read that costs
+ * the most was the one place the idiom was skipped.
+ *
+ * **There is no other lever.** LiveAPI is main-thread-only, `Task` is a
+ * scheduler on that same thread, and the Node half has no LiveAPI at all —
+ * which is why `lom.ts` exists as a separate file in the first place. Yielding
+ * is the whole toolbox; there is no worker to move this to.
+ *
+ * Chunking buys responsiveness and spends atomicity. A synchronous walk cannot
+ * see the set change underneath it. This one can, and a walk that read tracks
+ * before an insert and clips after it would describe a set that never existed —
+ * silently, which is the failure mode this file is most careful about. So
+ * `onStructureChange` marks the job stale and it starts over.
+ */
+function snapshotStep(): void {
+  const j = snapJob;
+  if (!j) {
+    snapshotTask.cancel();
+    return;
+  }
+  if (j.stale) return restartSnapshot(j);
+  const tick = Date.now();
+  try {
+    if (j.pass === 'tracks') {
+      const done = snapshotTracks(j);
+      j.work.tracks += Date.now() - tick;
+      snapPhase(j, 0, 10, j.i, j.trackCount);
+      if (done) {
+        resolveGroupParents(j);
+        j.pass = 'scenes';
+        j.i = 0;
+      }
+    } else if (j.pass === 'scenes') {
+      const done = snapshotScenes(j);
+      j.work.scenes += Date.now() - tick;
+      snapPhase(j, 10, 10, j.i, j.sceneCount);
+      if (done) {
+        j.pass = 'slots';
+        j.i = 0;
+        j.s = 0;
+      }
+    } else if (j.pass === 'slots') {
+      const done = snapshotSlots(j);
+      j.work.slots += Date.now() - tick;
+      snapPhase(j, 20, 60, j.slotTracksDone, j.slotTrackCount);
+      if (done) {
+        j.pass = 'clips';
+        j.i = 0;
+      }
+    } else {
+      const done = snapshotClips(j);
+      j.work.clips += Date.now() - tick;
+      snapPhase(j, 80, 18, j.i, j.occupied.length);
+      if (done) finishSnapshot(j);
+    }
+  } catch (e) {
+    snapshotTask.cancel();
+    snapJob = null;
+    fail(j.reqId, e);
+  }
+}
+
+/**
+ * Start over, because the set is no longer the one this walk began reading.
+ *
+ * The original request's clock is kept, so `elapsed` reports what the caller
+ * actually waited rather than the length of the last attempt.
+ */
+function restartSnapshot(j: SnapshotJob): void {
+  if (j.restarts >= SNAP_MAX_RESTARTS) {
+    snapshotTask.cancel();
+    snapJob = null;
+    return fail(
+      j.reqId,
+      'the set kept changing while it was being read (' + SNAP_MAX_RESTARTS +
+        ' restarts) — ask again once Live has settled',
+    );
   }
   try {
-    progress(0);
-    const set = at('live_set');
-    const trackCount = set.getcount('tracks');
-    const sceneCount = set.getcount('scenes');
-    const masterColor = readMasterColor();
-
-    // group_track hands back the parent's LOM id, but everything downstream
-    // addresses tracks by index, so keep an id -> index map to resolve them.
-    // A second pass is needed regardless: a nested group's parent is itself a
-    // track, and only after the walk are all ids known.
-    const tracks: BSV.Track[] = [];
-    const indexOfId: { [id: string]: number } = {};
-    const parentIds: number[] = [];
-    for (let t = 0; t < trackCount; t++) {
-      const a = at('live_set tracks ' + t);
-      const isGroup = gbool(a, 'is_foldable');
-      indexOfId[String(a.id)] = t;
-      parentIds.push(gbool(a, 'is_grouped') ? gid(a, 'group_track') : 0);
-      tracks.push({
-        i: t,
-        name: gstr(a, 'name'),
-        color: gnum(a, 'color'),
-        colorIndex: gnum(a, 'color_index'),
-        isMidi: gbool(a, 'has_midi_input'),
-        isGroup: isGroup,
-        isGrouped: gbool(a, 'is_grouped'),
-        groupIndex: -1, // resolved below
-        // fold_state is documented as only available when is_foldable, so
-        // don't ask for it on a track that isn't a group.
-        isFolded: isGroup ? gbool(a, 'fold_state') : false,
-      });
-      phase(0, 10, t + 1, trackCount);
-    }
-    for (let t = 0; t < trackCount; t++) {
-      if (!parentIds[t]) continue;
-      const parent = indexOfId[String(parentIds[t])];
-      if (parent !== undefined) tracks[t].groupIndex = parent;
-    }
-
-    const tTracks = Date.now();
-
-    const scenes: BSV.Scene[] = [];
-    for (let s = 0; s < sceneCount; s++) {
-      scenes.push(readSceneRow(s)!);
-      phase(10, 10, s + 1, sceneCount);
-    }
-
-    const tScenes = Date.now();
-
-    // Two passes on purpose. The occupancy scan is trackCount × sceneCount and
-    // is mostly empty slots, while the property reads only touch clips that
-    // exist — timing them separately is what tells us which one to attack.
-    //
-    // This deliberately uses canonical paths. `goto('id N')` does not resolve
-    // under this v8 LiveAPI build; probing it once per track only emits
-    // `get: no valid object set` before falling back to this same scan.
-    const occupied: Array<[number, number]> = []; // track, scene
-    let slotsScanned = 0;
-    const slotTrackCount = tracks.reduce((n, track) => n + (track.isGroup ? 0 : 1), 0);
-    let slotTracksDone = 0;
-    for (let t = 0; t < trackCount; t++) {
-      if (tracks[t].isGroup) continue; // group tracks have no real clip slots
-      for (let s = 0; s < sceneCount; s++) {
-        slotsScanned++;
-        const slot = at('live_set tracks ' + t + ' clip_slots ' + s);
-        if (!exists(slot) || !gbool(slot, 'has_clip')) continue;
-        const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
-        if (exists(c)) occupied.push([t, s]);
-      }
-      slotTracksDone++;
-      phase(20, 60, slotTracksDone, slotTrackCount);
-    }
-    phase(20, 60, slotTrackCount, slotTrackCount);
-    const tSlots = Date.now();
-
-    const clips: BSV.Clip[] = [];
-    for (let i = 0; i < occupied.length; i++) {
-      const t = occupied[i][0];
-      const s = occupied[i][1];
-      const c = at('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
-      if (!exists(c)) continue;
-      clips.push({
-        t: t,
-        s: s,
-        name: gstr(c, 'name'),
-        colorIndex: gnum(c, 'color_index'),
-        color: gnum(c, 'color'),
-        length: gnum(c, 'length'),
-        isMidi: gbool(c, 'is_midi_clip'),
-      });
-      phase(80, 18, i + 1, occupied.length);
-    }
-    phase(80, 18, occupied.length, occupied.length);
-    const tClips = Date.now();
-
-    // Free here — the walk has just read every clip in the set — and it is what
-    // lets a scoped re-read afterwards tell "nothing changed" from "changed".
-    seedDigests(trackCount, clips, scenes, tracks, masterColor);
-
-    const ms = tClips - t0;
-    const payload: BSV.Snapshot = {
-      // Shares the sequence with deltas, so a client can tell a delta that
-      // follows what it holds from one that skipped a step.
-      rev: nextRev(),
-      ms: ms,
-      timings: {
-        tracks: tTracks - t0,
-        scenes: tScenes - tTracks,
-        slots: tSlots - tScenes,
-        clips: tClips - tSlots,
-        slotsScanned: slotsScanned,
-      },
-      tempo: gnum(at('live_set'), 'tempo'),
-      masterColor: masterColor,
-      trackCount: trackCount,
-      sceneCount: sceneCount,
-      clipCount: clips.length,
-      tracks: tracks,
-      scenes: scenes,
-      clips: clips,
-    };
-
-    const tDict = Date.now();
-    progress(99);
-    publish(SNAPSHOT_DICT, payload);
-    progress(100);
-    outlet(0, 'snapshot_done', reqId, SNAPSHOT_DICT, Date.now() - tDict);
+    const next = newSnapshotJob(j.reqId, j.t0);
+    next.restarts = j.restarts + 1;
+    // Progress deliberately starts over with the walk rather than carrying the
+    // old figure forward. The bar going backwards is honest — it *did* start
+    // again — and holding the old number would show a walk sitting at 60% while
+    // it re-reads the tracks.
+    snapJob = next;
+    post('bsv snapshot restarted: the set changed mid-walk (' + next.restarts + ')\n');
   } catch (e) {
-    fail(reqId, e);
+    snapshotTask.cancel();
+    snapJob = null;
+    fail(j.reqId, e);
   }
+}
+
+function finishSnapshot(j: SnapshotJob): void {
+  snapshotTask.cancel();
+  // Free here — the walk has just read every clip in the set — and it is what
+  // lets a scoped re-read afterwards tell "nothing changed" from "changed".
+  seedDigests(j.trackCount, j.clips, j.scenes, j.tracks, j.masterColor);
+
+  const work = j.work.tracks + j.work.scenes + j.work.slots + j.work.clips;
+  const payload: BSV.Snapshot = {
+    // Shares the sequence with deltas, so a client can tell a delta that
+    // follows what it holds from one that skipped a step.
+    rev: nextRev(),
+    ms: work,
+    timings: {
+      tracks: j.work.tracks,
+      scenes: j.work.scenes,
+      slots: j.work.slots,
+      clips: j.work.clips,
+      slotsScanned: j.slotsScanned,
+      elapsed: Date.now() - j.t0,
+      restarts: j.restarts,
+    },
+    tempo: gnum(at('live_set'), 'tempo'),
+    masterColor: j.masterColor,
+    trackCount: j.trackCount,
+    sceneCount: j.sceneCount,
+    clipCount: j.clips.length,
+    tracks: j.tracks,
+    scenes: j.scenes,
+    clips: j.clips,
+  };
+
+  const tDict = Date.now();
+  snapProgress(j, 99);
+  publish(SNAPSHOT_DICT, payload);
+  snapProgress(j, 100);
+  // Cleared after the publish, not before — `snapJob` is the guard keeping
+  // writes and delta flushes out while this runs, and clearing it first would
+  // reopen that window across the two calls above. Same bargain `finishJob`
+  // makes, for the same reason.
+  snapJob = null;
+  outlet(0, 'snapshot_done', j.reqId, SNAPSHOT_DICT, Date.now() - tDict);
+}
+
+var snapshotTask = new Task(snapshotStep);
+snapshotTask.interval = SNAP_INTERVAL_MS;
+
+function snapshot(reqId: number): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  if (snapJob) return fail(reqId, 'a snapshot is already in progress');
+  // A walk of a half-written set describes neither the set before the write nor
+  // the one after it. The write paths refuse for the mirror-image reason.
+  const busyWith = blockedBy();
+  if (busyWith) return fail(reqId, busyWith);
+  try {
+    snapJob = newSnapshotJob(reqId, Date.now());
+  } catch (e) {
+    return fail(reqId, e);
+  }
+  snapProgress(snapJob, 0);
+  snapshotTask.repeat();
 }
 
 // --- apply ------------------------------------------------------------
@@ -583,7 +826,8 @@ function asList<T>(v: unknown): T[] {
 
 function apply(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
+  const busyWith = blockedBy();
+  if (busyWith) return fail(reqId, busyWith);
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
@@ -702,7 +946,8 @@ function setSceneTempo(a: LiveAPI, tempo: number): void {
  */
 function add_scenes(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
+  const busyWith = blockedBy();
+  if (busyWith) return fail(reqId, busyWith);
   const t0 = Date.now();
   try {
     const d = new Dict(dictName);
@@ -993,7 +1238,8 @@ function copyClip(fromT: number, fromS: number, toT: number, toS: number): void 
 
 function move(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
+  const busyWith = blockedBy();
+  if (busyWith) return fail(reqId, busyWith);
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
@@ -1214,7 +1460,8 @@ var clipJob: ClipMoveJob | null = null;
 
 function move_clips(reqId: number, dictName: string): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
-  if (job || moveJob || clipJob) return fail(reqId, 'a write is already in progress');
+  const busyWith = blockedBy();
+  if (busyWith) return fail(reqId, busyWith);
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
@@ -3380,7 +3627,12 @@ function flushSelection(): void {
     // `clipJob` belongs here as much as the other two and was missing: a clip
     // drag is reconciled client-side by `applyClipMove` from the plan it sent,
     // and a delta landing mid-drag races exactly that.
-    if (job || moveJob || clipJob) {
+    //
+    // `snapJob` belongs here too, and for a reason of its own: a delta bumps
+    // `rev`, and a walk that publishes afterwards with its own `nextRev()`
+    // would leave every client holding a delta computed against a snapshot they
+    // never saw.
+    if (job || moveJob || clipJob || snapJob) {
       selTask.schedule(SEL_DEBOUNCE_MS);
       return;
     }
@@ -3579,6 +3831,10 @@ function onStructureChange(): void {
   masterColorDirty = false;
   selPrevTrack = -1;
   selTask.cancel();
+  // A walk in progress is now reading a set that has renumbered itself under
+  // it. Every index it has already collected means something else, so the half
+  // it has is not the half it is about to read. `snapshotStep` starts over.
+  if (snapJob) snapJob.stale = true;
   // The cursor observers are path-addressed, and a path silently re-points when
   // a scene is inserted above it — `live_set tracks 3 clip_slots 40` is a
   // different slot than it was a moment ago. An observer left attached would go
@@ -4124,6 +4380,8 @@ function notifydeleted(): void {
   diagSelectSceneTask.cancel();
   applyTask.cancel();
   moveTask.cancel();
+  snapshotTask.cancel();
+  snapJob = null;
   structureSettleTask.cancel();
   structuralJob = false;
   // An undo step left open would swallow everything the user does next into our

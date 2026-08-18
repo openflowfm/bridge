@@ -47,9 +47,13 @@ behaves the way its name suggests.
 - **Reuse one `LiveAPI` cursor with `goto()`** rather than constructing new ones. But
   beware: `at()` returns *the same object* every time, so you can't hold two cursors
   from it at once. `palette()` constructs its own for exactly this reason.
-- **LOM work runs on Live's main thread.** A tight multi-thousand-op loop freezes the
-  UI and can glitch audio. Writes go through a `Task` in chunks of `CHUNK = 50`,
-  yielding between chunks — which also gives progress reporting for free.
+- **LOM work runs on Live's main thread**, and there is nowhere else to put it. `Task`
+  schedules on that same thread and the Node half has no LiveAPI at all, so a tight
+  multi-thousand-op loop freezes the UI and can glitch audio with no way around it but
+  yielding. Writes chunk through a `Task` at `CHUNK = 50`; the snapshot walk chunks
+  through one at `SNAP_CHUNK`, per phase. Both get progress reporting for free — and the
+  progress bar only means anything *because* they yield, since nothing repaints while the
+  thread is held.
 - **There is no undo.** LOM writes don't participate reliably in Live's undo history.
   Our app has to own it. One caveat now worth chasing: `Song.begin_undo_step` /
   `end_undo_step` exist in Live's binary and are documented **nowhere** — see

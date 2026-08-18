@@ -124,14 +124,52 @@ section of [`../../tools/build-device.ts`](../../tools/build-device.ts).
 The walk is instrumented per phase because every phase is a linear scan and they
 scale differently:
 
-| phase | cost |
-|---|---|
-| tracks | `trackCount` |
-| scenes | `sceneCount` |
-| slot scan | `trackCount × sceneCount` — mostly empty slots |
-| clip reads | `clipCount` |
+| phase | cost | chunk |
+|---|---|---|
+| tracks | `trackCount` | 48 |
+| scenes | `sceneCount` | 96 |
+| slot scan | `trackCount × sceneCount` — mostly empty slots | 512 |
+| clip reads | `clipCount` | 96 |
 
 The scan dominates on a large set, which is what the id-addressing above targets.
+
+### It yields between chunks, and that is not free
+
+The walk used to be one synchronous loop, so opening a large set froze Live for the
+length of it. It now runs as a `SnapshotJob` on a `Task` at `SNAP_INTERVAL_MS`, the same
+shape `applyStep`, `moveStep` and `clipMoveStep` have always had — the read that costs
+the most was the one place the idiom was skipped.
+
+**There was never another option.** LiveAPI is main-thread-only, `Task` schedules on that
+same thread, and the Node half has no LiveAPI at all — which is the whole reason `lom.ts`
+is a separate file. There is no worker to move this to; yielding is the entire toolbox.
+
+The chunk column is what to tune, and **`slots` is the one that matters** — it is ~60% of
+the walk and the only phase that is `trackCount × sceneCount`. `npm run dev:diag -- scan
+<track>` measures exactly one track's occupancy rescan, which is the per-chunk number the
+budget is picked from.
+
+Two timings now exist and they answer different questions. `Snapshot.ms` is **LOM work** —
+the four phases summed, directly comparable to what they measured before chunking.
+`timings.elapsed` is **wall clock**, so `elapsed - ms` is the time handed back to Live.
+That gap is the thing chunking buys, and both readouts print it: the Max window line and
+the browser's `⏱ snapshot` table, which has a `lom: yielded` row.
+
+### What chunking costs: the walk can now be torn
+
+A synchronous walk cannot see the set change underneath it. This one can. A walk that read
+tracks before an insert and clips after it would describe a set that never existed, and it
+would do so silently — the failure mode this file is most careful about.
+
+So `onStructureChange` sets `stale` on the job and the walk **starts over**, up to
+`SNAP_MAX_RESTARTS` (3) before it gives up and says so. Restarting is embarrassing;
+publishing a torn snapshot is not recoverable. `timings.restarts` reports it, and it is
+normally 0 — the common snapshot happens just after a set opens, when nobody is editing.
+
+The guard runs in both directions now. `busy()` refuses a write while a walk is in flight
+and a walk while a write is, where before only the writes refused each other. A delta
+flush defers too: a delta bumps `rev`, and a walk publishing afterwards with its own
+`nextRev()` would leave clients holding a delta computed against a snapshot they never saw.
 
 **Snapshots use canonical path addressing plus `has_clip`.** An earlier id-addressed
 fast path was guarded by an outcome-based fallback, but `goto('id N')` is known not to

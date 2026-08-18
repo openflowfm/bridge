@@ -151,11 +151,15 @@ one answered but not held proves nothing about what we know now.
 **Not yet guaranteed.** Three things to fix before a second *kind* of client exists:
 
 1. **Dict names are fixed, so a request can read another's payload.** The window is
-   narrow, not wide: `lom.ts` reads and publishes synchronously inside one Max message,
-   and `apply` refuses to start while a job is running. But between one side writing a
-   dict and the other side's `getDict` landing, a second request can overwrite it —
-   and `finishJob` clears `job` *before* publishing the result, reopening the guard
-   early. Per-request names (`bsv_ops_<reqId>`) retire the whole class.
+   narrow, not wide: every publish still happens inside one Max message, and `busy()`
+   refuses to start anything while a read or a write is running. But between one side
+   writing a dict and the other side's `getDict` landing, a second request can overwrite
+   it. Per-request names (`bsv_ops_<reqId>`) retire the whole class.
+
+   **The snapshot no longer reads synchronously**, which narrows nothing and widens
+   nothing here — it spans many Max messages now, but it publishes in exactly one, and
+   `snapJob` holds the guard shut across every tick in between. `finishSnapshot` clears
+   it *after* the publish for the reason `finishJob` learned the hard way.
 2. **`apply` rejects instead of queueing.** `if (job) return fail(reqId, 'apply already
    in progress')`. Fine for one client; for two, the second just gets an error and has
    to retry. The chunked `Task` already provides the yield points a FIFO queue needs.

@@ -1704,9 +1704,14 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
     Max.post('snapshot: the set changed while this walk ran — answering it, but not holding it');
   }
   const t = data.timings;
+  // `elapsed` beside `ms` rather than instead of it: one is what Live spent
+  // reading, the other is what the user waited, and the gap between them is the
+  // time the chunked walk handed back to Live's UI. Tuning `SNAP_CHUNK` means
+  // watching that gap, so it has to be on screen.
   Max.post(
-    `snapshot: ${data.clipCount} clips in ${data.ms}ms lom ` +
-      `(tracks ${t.tracks} · scenes ${t.scenes} · ${t.slotsScanned} slots ${t.slots} · clips ${t.clips}) ` +
+    `snapshot: ${data.clipCount} clips in ${data.ms}ms lom over ${t.elapsed}ms ` +
+      `(tracks ${t.tracks} · scenes ${t.scenes} · ${t.slotsScanned} slots ${t.slots} · clips ${t.clips}` +
+      `${t.restarts > 0 ? ` · ${t.restarts} restarts` : ''}) ` +
       `+ ${dictMs}ms dict + ${hostMs}ms host`,
   );
   const event: BSV.Event = {
