@@ -166,10 +166,23 @@ So `onStructureChange` sets `stale` on the job and the walk **starts over**, up 
 publishing a torn snapshot is not recoverable. `timings.restarts` reports it, and it is
 normally 0 — the common snapshot happens just after a set opens, when nobody is editing.
 
-The guard runs in both directions now. `busy()` refuses a write while a walk is in flight
-and a walk while a write is, where before only the writes refused each other. A delta
-flush defers too: a delta bumps `rev`, and a walk publishing afterwards with its own
+The guard runs in both directions now. `blockedBy()` refuses a write while a walk is in
+flight and a walk while a write is, where before only the writes refused each other. A
+delta flush defers too: a delta bumps `rev`, and a walk publishing afterwards with its own
 `nextRev()` would leave clients holding a delta computed against a snapshot they never saw.
+
+### What's confirmed and what isn't
+
+**Confirmed with Live open:** the walk no longer blocks Live's UI. That was the whole
+point of the change and it is the one claim here that could only be settled by watching it.
+
+**Not confirmed:** that the restart path fires and recovers when the set is restructured
+mid-walk — it needs a structural edit landing inside a walk, which is hard to hit by hand
+on a set small enough to be convenient. `timings.restarts` and the `snapshot restarted`
+line in the Max window are what to look for. Nor has `SNAP_CHUNK` been tuned against
+anything: the budgets are first guesses sized by rough per-op cost, and
+`npm run dev:diag -- scan <track>` against a large set is what would replace them with
+measurements.
 
 **Snapshots use canonical path addressing plus `has_clip`.** An earlier id-addressed
 fast path was guarded by an outcome-based fallback, but `goto('id N')` is known not to

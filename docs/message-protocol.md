@@ -32,9 +32,16 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_sends <0\|1>` | add / remove the optional per-track send observers and return-track observer |
 | `watch_transport <0\|1>` | install / remove the seven fixed control-bar observers |
+| `watch_chains <encodedUnion>` | **the one watch with a target.** Not `0\|1`: the whole union of device runs anyone is looking at, rebuilt to match. An empty list is how it stops |
 | `observe <0\|1>` | install / remove the `live_set tracks` and `scenes` observers. **Device-owned** |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live*. **Device-owned** |
 | `ping` | |
+
+`watch_chains` is the exception to the shape of every other line here, and the reason is
+in `core/src/chainWatch.ts`: a watch whose cost depends on *what* is being watched cannot
+be armed by a boolean, and cannot be refcounted per kind either — two clients looking at
+different racks both want it on and neither may release the other's. So the bridge unions
+what every client declared and this side is told the answer. It never sees a client.
 
 **The two marked device-owned are sent once, when the LOM reports ready, and never
 turned off.** They are how `bridge.ts` keeps the set it holds current, so they run for
@@ -59,6 +66,7 @@ which, and what it cost to get wrong, is under *multiple clients*.
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording> <inSeconds> <sigNum> <sigDen> …` | nine atoms per *playing* track; silent tracks are absent |
 | `mixer_state <encodedState>` | complete cached mixer-control state |
+| `chain_state <encodedState>` | every watched device run, shells only. A run whose `devices` is null no longer resolves |
 | `track_devices <reqId> <encodedState>` | one track's chain, or `null` where the index no longer resolves |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `transport_state <encodedState>` | complete tempo, metronome, launch-quantization, Arrangement Record and scale state |

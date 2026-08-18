@@ -90,6 +90,15 @@ const DIAG_ATTACH_MAX = 8000;
 /** Runaway guard for an accidentally enormous scheduled scroll probe. */
 const DIAG_SCROLL_MAX = 2000;
 
+/**
+ * How long a device-chain change settles before the runs are re-read.
+ *
+ * Adding a device fires the run's membership observer and then the new device's
+ * own, and Live rearranges a rack over several turns. One re-read after the
+ * dust settles beats four describing a shape that is still moving.
+ */
+const CHAIN_DEBOUNCE_MS = 60;
+
 /** Keep consecutive view commands in distinct Live UI turns. */
 const DIAG_SCROLL_INTERVAL_MS = 50;
 
@@ -2019,6 +2028,176 @@ function devices(reqId: number, t: number): void {
   }
 }
 
+// --- device-chain watch -----------------------------------------------
+//
+// The first watch in this file with a *target*.
+//
+// Every other one is armed by a boolean, because its cost doesn't depend on
+// what it is watching: `watch_play` installs the same observers whoever asked.
+// This one's cost is entirely a function of which runs are on screen, so the
+// bridge unions what every client declared (`core/src/chainWatch.ts`) and sends
+// the union here. This side never sees clients, only the answer.
+//
+// **Shells only, for now.** Name, activator and fold state per device, plus the
+// run's own membership — which is what turns the old `devices` read into
+// something that notices a device added in Live. Parameters are the next tier
+// and land as a field on what this publishes, not as a redesign of it.
+//
+// The callbacks infer nothing. Any of them marks the whole thing dirty and a
+// `Task` re-reads every watched run, exactly as the cursor watcher does: a
+// re-read answers the same question whichever property fired, and inference is
+// what this file keeps out. It is also the only legal shape — Live throws
+// `Changes cannot be triggered by notifications` on a write from inside a
+// callback, and re-attaching observers is close enough to that line to keep off
+// it entirely.
+
+/** Runaway stop. Three observers a device, so this is ~130 devices on screen. */
+const CHAIN_OBSERVER_MAX = 400;
+
+var chainWatches: BSV.ChainWatch[] = [];
+var chainObservers: LiveAPI[] = [];
+var chainWatching = false;
+var lastChainKey = '';
+
+/**
+ * The LOM path of the run a watch names, or null if it no longer resolves.
+ *
+ * `path` is **pairs** — a run inside a rack is `devices M chains L`, and that
+ * chain's own `devices` is the run. An odd length names half an address, which
+ * is a malformed subscription rather than a shorter one.
+ */
+function chainRunPath(w: BSV.ChainWatch): string | null {
+  const steps = w.path || [];
+  if (steps.length % 2 !== 0) return null;
+  let path = 'live_set tracks ' + w.t;
+  if (!exists(at(path))) return null;
+  for (let i = 0; i < steps.length; i += 2) {
+    path += ' devices ' + steps[i] + ' chains ' + steps[i + 1];
+    if (!exists(at(path))) return null;
+  }
+  return path;
+}
+
+/**
+ * Re-read every watched run and publish, if anything actually moved.
+ *
+ * A run that no longer resolves is reported as `devices: null` rather than
+ * omitted or empty. Those three mean different things to a client — gone,
+ * unknown, and genuinely has no devices — and collapsing them is how a rack
+ * that was deleted goes on being drawn.
+ */
+function sendChainState(): void {
+  if (!chainWatching) return;
+  const chains: BSV.WatchedChain[] = [];
+  for (let i = 0; i < chainWatches.length; i++) {
+    const w = chainWatches[i];
+    const path = chainRunPath(w);
+    chains.push({
+      t: w.t,
+      path: w.path,
+      devices: path === null ? null : readDeviceRun(path, 0),
+    });
+  }
+  const state: BSV.ChainState = { chains: chains };
+  const key = JSON.stringify(state);
+  if (key === lastChainKey) return;
+  lastChainKey = key;
+  outlet(0, 'chain_state', encodeMaxAtom(state));
+}
+
+var chainTask = new Task(function () {
+  // Observers are path-addressed, so a device inserted into a run re-points
+  // every one after it. Rebuild before reading rather than after: the read is
+  // what publishes, and publishing against observers that describe the old
+  // shape means the *next* change goes unheard.
+  rebuildChainObservers();
+  sendChainState();
+});
+
+function onChainChange(): void {
+  if (!chainWatching) return;
+  chainTask.cancel();
+  chainTask.schedule(CHAIN_DEBOUNCE_MS);
+}
+
+function addChainObserver(path: string, property: string): void {
+  if (chainObservers.length >= CHAIN_OBSERVER_MAX) return;
+  const observer = observeAt(path, property, onChainChange);
+  if (observer) chainObservers.push(observer);
+}
+
+/**
+ * One run's observers: the holder's membership, then per device the three
+ * things a shell draws.
+ *
+ * `is_collapsed` is observable — this file recorded it as `get, set` for a
+ * while, which is what a trimmed LOM table cost. See `bridge/LOM.md`.
+ */
+function attachChainObservers(path: string): void {
+  addChainObserver(path, 'devices');
+  let count = 0;
+  try {
+    count = at(path).getcount('devices');
+  } catch (e) {
+    return;
+  }
+  const limit = Math.min(count, DEVICE_COUNT_MAX);
+  for (let i = 0; i < limit; i++) {
+    const devicePath = path + ' devices ' + i;
+    if (!exists(at(devicePath))) continue;
+    addChainObserver(devicePath, 'name');
+    addChainObserver(devicePath, 'is_active');
+    addChainObserver(devicePath + ' view', 'is_collapsed');
+  }
+}
+
+function rebuildChainObservers(): void {
+  clearChainObservers();
+  if (!chainWatching) return;
+  for (let i = 0; i < chainWatches.length; i++) {
+    const path = chainRunPath(chainWatches[i]);
+    if (path !== null) attachChainObservers(path);
+  }
+  if (chainObservers.length >= CHAIN_OBSERVER_MAX) {
+    post('bsv chains: hit the ' + CHAIN_OBSERVER_MAX + '-observer cap; some shells will not update\n');
+  }
+}
+
+function clearChainObservers(): void {
+  for (let i = 0; i < chainObservers.length; i++) {
+    try {
+      chainObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  chainObservers = [];
+}
+
+/**
+ * The union, whole. Not a subscribe or an unsubscribe — this side is told what
+ * is being looked at and rebuilds to match, so an empty list is how it stops.
+ *
+ * Rebuilding unconditionally rather than diffing is the same bargain
+ * `watch_play` makes: the bridge already suppresses an unchanged union, so
+ * anything arriving here is a real change, and a diff would be bookkeeping in
+ * the file with no test coverage.
+ */
+function watch_chains(encoded: unknown): void {
+  const decoded = decodeMaxAtom(encoded);
+  const list = Array.isArray(decoded) ? (decoded as BSV.ChainWatch[]) : [];
+  chainWatches = list;
+  chainWatching = list.length > 0;
+  lastChainKey = '';
+  chainTask.cancel();
+  if (!chainWatching) {
+    clearChainObservers();
+    return;
+  }
+  rebuildChainObservers();
+  sendChainState();
+}
+
 // --- folding ----------------------------------------------------------
 // Hide or reveal a group track's members, in Live itself.
 //
@@ -3835,6 +4014,10 @@ function onStructureChange(): void {
   // it. Every index it has already collected means something else, so the half
   // it has is not the half it is about to read. `snapshotStep` starts over.
   if (snapJob) snapJob.stale = true;
+  // Path-addressed like the cursor's, and re-pointed by the same renumbering.
+  // Rebuilding is the Task's job — schedule it rather than touching the LOM
+  // from inside this callback.
+  if (chainWatching) onChainChange();
   // The cursor observers are path-addressed, and a path silently re-points when
   // a scene is inserted above it — `live_set tracks 3 clip_slots 40` is a
   // different slot than it was a moment ago. An observer left attached would go
@@ -4374,6 +4557,9 @@ function notifydeleted(): void {
   clearMeterObservers();
   clearTransportObservers();
   clearSelObservers();
+  clearChainObservers();
+  chainWatching = false;
+  chainTask.cancel();
   clearDiagObservers();
   diagDetach();
   diagScrollTask.cancel();

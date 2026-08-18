@@ -22,6 +22,12 @@ import { SCENE_PATTERNS } from '../../core/src/namePattern';
 import { applyOps } from '../../core/src/ops';
 import { applySceneOps } from '../../core/src/roles';
 import { buildSetModel } from '../../core/src/setModel';
+import {
+  mergeChainWatches,
+  sameChainWatches,
+  validChainWatch,
+  type ChainWatch,
+} from '../../core/src/chainWatch';
 import { canApplyDelta, mergeRows, mergeTrackDelta } from '../../core/src/snapshotDelta';
 
 const PORT = Number(process.env.BSV_PORT) || 17800;
@@ -588,9 +594,69 @@ function armDeviceWatches(): void {
   Max.post('watching Live for the device: structural changes and the Session cursor');
 }
 
+// --- targeted watches --------------------------------------------------
+//
+// A watch whose cost depends on *what* is being watched, not merely on whether
+// anyone is. The set above cannot express one: `watchers.play` is a set of
+// sockets because arming `watch_play` costs the same whoever asked, and a
+// device chain's does not — a run of shells is a couple of observers per
+// device, one open EQ Eight is forty more, and two clients can be looking at
+// different racks with neither allowed to release the other's.
+//
+// So a client declares its **whole current view** rather than toggling. There
+// is no `off`: an empty array is how you stop, a dropped socket is exactly
+// equivalent to sending one, and no message a client can send releases a
+// subscription another client is holding. The union is `core/src/chainWatch.ts`,
+// where it has tests.
+//
+// One kind today. The map and the recompute are deliberately not specialised to
+// it — the next per-target watch (a clip's notes, one track's routing) is the
+// same shape, and the thing worth reusing is this bookkeeping rather than the
+// merge, which is per-kind by nature.
+
+const chainWatchers = new Map<WebSocket, BSV.ChainWatch[]>();
+
+/** The union last sent to `lom.ts`, so an unchanged one is never re-sent. */
+let chainUnion: ChainWatch[] = [];
+
+/**
+ * Recompute the union and tell the LOM side, if it changed.
+ *
+ * **Skipping the unchanged case is not an optimisation.** `watch_chains`
+ * rebuilds every observer it holds each time it is told, the way `watch_play`
+ * does — so re-sending an identical union tears down and reinstalls the lot,
+ * and a client that re-declares on every render would do that continuously.
+ */
+function pushChainWatches(force = false): void {
+  const next = mergeChainWatches([...chainWatchers.values()]);
+  if (!force && sameChainWatches(next, chainUnion)) return;
+  chainUnion = next;
+  Max.outlet('watch_chains', encodeMaxAtom(next));
+}
+
+/**
+ * Replace one client's declaration. Returns an error string, or null.
+ *
+ * A malformed entry rejects the whole message rather than being filtered out of
+ * it. A subscription list silently shortened is a client drawing knobs that
+ * will never move, which looks like a bridge bug from every angle except this
+ * one — the same bargain `chainDevice` makes on the way in.
+ */
+function setChainWatch(ws: WebSocket, subs: unknown): string | null {
+  if (!Array.isArray(subs)) return 'watchChains needs a list of subscriptions';
+  for (const sub of subs) {
+    if (!validChainWatch(sub)) return 'watchChains got a malformed subscription';
+  }
+  if (subs.length === 0) chainWatchers.delete(ws);
+  else chainWatchers.set(ws, subs as BSV.ChainWatch[]);
+  pushChainWatches();
+  return null;
+}
+
 /** A vanished client never sends `off`. Release whatever it was holding. */
 function releaseWatches(ws: WebSocket): void {
   for (const kind of Object.keys(watchers) as WatchKind[]) setWatch(ws, kind, false);
+  if (chainWatchers.delete(ws)) pushChainWatches();
 }
 
 /**
@@ -605,6 +671,9 @@ function rearmWatches(): void {
   for (const kind of Object.keys(watchers) as WatchKind[]) {
     if (watchers[kind].size > 0) Max.outlet(WATCH_MESSAGE[kind], 1);
   }
+  // `force`, because the union is unchanged — it is the observers behind it
+  // that are gone. The skip-if-unchanged guard is exactly wrong here.
+  if (chainWatchers.size > 0) pushChainWatches(true);
 }
 
 // --- the set we hold ---------------------------------------------------
@@ -1440,6 +1509,12 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('set_transport', encodeMaxAtom(patch));
       break;
     }
+    case 'watchChains': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const bad = setChainWatch(ws, m.subs);
+      if (bad) return send(ws, { type: 'error', id: m.id, message: bad });
+      break;
+    }
     case 'setMixer': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       const sourceTarget = m.target;
@@ -2067,6 +2142,53 @@ function mixerParameter(value: unknown): BSV.MixerParameterState | null | undefi
 // Mixer controls change far less often than levels, but parameter automation can
 // still move continuously. lom.ts coalesces callbacks and sends one complete,
 // punctuation-safe state so independent property observers cannot tear a strip.
+/**
+ * The watched runs, re-read after something in one of them changed.
+ *
+ * Validated with the same `chainDevice` the one-shot read uses, and rejected
+ * **whole** on anything malformed rather than half-drawn. A run whose `devices`
+ * is null is a real answer — the run has gone — so null passes and only a wrong
+ * *shape* is refused.
+ */
+Max.addHandler('chain_state', (...atoms: unknown[]) => {
+  const value = decodeMaxAtom(atoms.map(String).join(''));
+  if (!value || typeof value !== 'object' || !Array.isArray((value as BSV.ChainState).chains)) {
+    Max.post('chain_state: malformed payload from lom');
+    return;
+  }
+  const chains: BSV.WatchedChain[] = [];
+  for (const raw of (value as BSV.ChainState).chains) {
+    const source = raw as Partial<BSV.WatchedChain>;
+    if (
+      !Number.isInteger(source.t) ||
+      !Array.isArray(source.path) ||
+      !source.path.every((n) => Number.isInteger(n) && n >= 0)
+    ) {
+      Max.post('chain_state: invalid run address from lom');
+      return;
+    }
+    if (source.devices === null || source.devices === undefined) {
+      chains.push({ t: source.t as number, path: source.path as number[], devices: null });
+      continue;
+    }
+    if (!Array.isArray(source.devices)) {
+      Max.post('chain_state: invalid devices from lom');
+      return;
+    }
+    const devices: BSV.ChainDevice[] = [];
+    for (const rawDevice of source.devices) {
+      const checked = chainDevice(rawDevice, 0);
+      if (!checked) {
+        Max.post('chain_state: invalid device from lom');
+        return;
+      }
+      devices.push(checked);
+    }
+    chains.push({ t: source.t as number, path: source.path as number[], devices });
+  }
+  broadcast({ type: 'chainState', state: { chains } });
+});
+
 Max.addHandler('mixer_state', (...atoms: unknown[]) => {
   const value = decodeMaxAtom(atoms.map(String).join(''));
   if (!value || typeof value !== 'object') {
