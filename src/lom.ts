@@ -2108,7 +2108,45 @@ function chainRunPath(w: BSV.ChainWatch): string | null {
  * observer per control forever after, rather than re-reading to find out what
  * moved.
  */
-function readDeviceParameters(devicePath: string): BSV.DeviceParameterState[] {
+/**
+ * Descriptors already read, keyed by the device that owns them.
+ *
+ * **This is what makes "read once" true.** Everything about a control except
+ * `value`, `display` and `state` is fixed for as long as the device exists —
+ * its name, its range, whether it is quantized, and the members it steps
+ * through. The read below used to fetch all of it on every structural push, so
+ * *renaming one device* re-read every control on every open device in the run
+ * and re-spelled every enum's members with it. An EQ Eight is ~90 controls and
+ * a quantized one costs a `str_for_value` call per member, which put a single
+ * open device at ~800 LOM operations per push, on the thread that draws Live.
+ *
+ * The key is the device's LOM id **and** its control count. The id alone is
+ * wrong for a plugin whose parameter list changes underneath it; the count
+ * alone is wrong for a device swapped for another with as many controls.
+ *
+ * Entries live across observer rebuilds — opening a fourth device must not
+ * re-read the three already open, which is precisely the gesture that hurt.
+ * They are evicted by not being used: `sendChainState` keeps only what it
+ * touched, so a device that folds shut drops its descriptor with everything
+ * else it was costing.
+ */
+var paramShapes: { [key: string]: BSV.DeviceParameterState[] } = {};
+var paramShapesUsed: { [key: string]: BSV.DeviceParameterState[] } = {};
+
+/**
+ * Every control on one device.
+ *
+ * `cacheable` is false for a rack, and that carve-out is not about cost — a
+ * rack has a handful of macros where an EQ has ninety. It is that a rack's
+ * chain selector spells its members as the *chain names*, so renaming a chain
+ * changes an enum's text without changing its parameter count. Re-reading the
+ * one device whose members are genuinely dynamic is cheaper than a cache key
+ * that could tell.
+ */
+function readDeviceParameters(
+  devicePath: string,
+  cacheable: boolean,
+): BSV.DeviceParameterState[] {
   let count = 0;
   try {
     count = at(devicePath).getcount('parameters');
@@ -2120,10 +2158,43 @@ function readDeviceParameters(devicePath: string): BSV.DeviceParameterState[] {
   if (count > limit) {
     post('bsv params: ' + count + ' at ' + devicePath + ', reading ' + limit + '\n');
   }
+
+  let key = '';
+  if (cacheable) {
+    const device = at(devicePath);
+    key = (exists(device) ? String(device.id) : devicePath) + ':' + limit;
+    const held = paramShapes[key];
+    if (held && held.length === limit) {
+      refreshParameterValues(devicePath, held);
+      paramShapesUsed[key] = held;
+      return held;
+    }
+  }
+
+  const parameters = readParameterShapes(devicePath, limit);
+  if (cacheable) paramShapesUsed[key] = parameters;
+  return parameters;
+}
+
+/** The whole descriptor, read fresh. Called once per device, then cached. */
+function readParameterShapes(
+  devicePath: string,
+  limit: number,
+): BSV.DeviceParameterState[] {
   const parameters: BSV.DeviceParameterState[] = [];
   for (let i = 0; i < limit; i++) {
     const parameter = at(devicePath + ' parameters ' + i);
-    if (!exists(parameter)) continue;
+    if (!exists(parameter)) {
+      // **Index-aligned on purpose.** `p` on the wire is the LOM's own index —
+      // it is what the value observers report and what `set_device` writes
+      // against — so dropping an entry here would slide every control after it
+      // onto the wrong parameter, silently and only on the devices where one
+      // failed to resolve. A dead entry is refused by `paramDisabled`.
+      parameters.push({
+        name: '', value: 0, min: 0, max: 1, quantized: false, display: '', state: 2,
+      });
+      continue;
+    }
     // Every scalar off this cursor before anything else calls `at()`.
     const name = gstr(parameter, 'name');
     const value = gnum(parameter, 'value');
@@ -2151,6 +2222,34 @@ function readDeviceParameters(devicePath: string): BSV.DeviceParameterState[] {
     parameters.push(entry);
   }
   return parameters;
+}
+
+/**
+ * The three fields that move, refreshed onto a descriptor we already hold.
+ *
+ * Two `get`s and one `call` per control, against nine-plus and a call per enum
+ * member for the full read. Mutated in place rather than copied because the
+ * result is serialised immediately and nothing else holds a reference — the
+ * array *is* the cache entry.
+ *
+ * `state` is here rather than observed, which is the trade
+ * `attachParamObservers` describes: it moves when a parameter becomes
+ * macro-controlled or automation is armed, roughly never mid-set, so it rides
+ * the structural push instead of doubling the observer budget.
+ */
+function refreshParameterValues(
+  devicePath: string,
+  parameters: BSV.DeviceParameterState[],
+): void {
+  for (let i = 0; i < parameters.length; i++) {
+    const parameter = at(devicePath + ' parameters ' + i);
+    if (!exists(parameter)) continue;
+    const value = gnum(parameter, 'value');
+    parameters[i].value = value;
+    parameters[i].state = gnumOr(parameter, 'state', 0);
+    // Last, because it `call`s on the same cursor every `get` above used.
+    parameters[i].display = parameterDisplay(parameter, value);
+  }
 }
 
 /**
@@ -2197,13 +2296,14 @@ function readWatchedRun(path: string, open: readonly number[]): BSV.ChainDevice[
   for (let i = 0; i < devices.length; i++) {
     const device = devices[i];
     const devicePath = path + ' devices ' + i;
-    if (gbool(at(devicePath), 'can_have_chains')) {
+    const rack = gbool(at(devicePath), 'can_have_chains');
+    if (rack) {
       device.chains = readChainNames(devicePath);
     }
     // Parameters only for what someone has expanded. A closed device is a title
     // bar, and forty reads plus forty observers is what it costs not to be.
     if (open.indexOf(i) !== -1) {
-      device.parameters = readDeviceParameters(devicePath);
+      device.parameters = readDeviceParameters(devicePath, !rack);
     }
   }
   return devices;
@@ -2244,6 +2344,10 @@ function readChainNames(path: string): BSV.RackChain[] {
  */
 function sendChainState(): void {
   if (!chainWatching) return;
+  // Descriptors survive this pass only if this pass used them — see
+  // `paramShapes`. A device that folds shut, or a run that stops being watched,
+  // drops its cached controls along with everything else it was costing.
+  paramShapesUsed = {};
   const chains: BSV.WatchedChain[] = [];
   for (let i = 0; i < chainWatches.length; i++) {
     const w = chainWatches[i];
@@ -2254,6 +2358,7 @@ function sendChainState(): void {
       devices: path === null ? null : readWatchedRun(path, w.open || []),
     });
   }
+  paramShapes = paramShapesUsed;
   const state: BSV.ChainState = { chains: chains };
   const key = JSON.stringify(state);
   if (key === lastChainKey) return;
@@ -2546,6 +2651,7 @@ function watch_chains(encoded: unknown): void {
   // A new declaration re-attaches unconditionally: the shape guard exists to
   // suppress Live's own chatter, not to second-guess what a client asked for.
   lastChainShape = '';
+  paramShapes = {};
   chainTask.cancel();
   paramTask.cancel();
   paramPending = false;
