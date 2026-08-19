@@ -27,6 +27,7 @@ lom.js     ──[s ---bsv-to-node]──> bridge.js
 | `select_track <track>` | select an exact track, so Live's device view shows the chain the footer is showing |
 | `set_transport <encodedPatch>` | set tempo, metronome, launch quantization, Arrangement Record or current scale controls as one patch |
 | `set_mixer <encodedTargetAndPatch>` | set activator, Solo, Arm, volume, pan and/or one indexed send on one mixer strip |
+| `set_device <encodedTargetAndPatch>` | set one device's `is_active`, its `is_collapsed`, and/or one parameter's `value`. Addressed by run and position, never by id |
 | `watch_play <0\|1>` | install / remove the play-state and Arrangement-position observers |
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_sends <0\|1>` | add / remove the optional per-track send observers and return-track observer |
@@ -143,6 +144,13 @@ The property observers update the cached strip they belong to instead of re-read
 tracks, so automation cannot turn into a continuous LOM walk. `set_mixer` carries one
 patch for one strip in the other direction and reads that strip back even when an
 unchanged write produces no observer callback.
+
+`set_device` is the same idea one tier down, with one difference worth stating. It carries
+one patch for one device — activator, fold, or one control by index — and the watch already
+observes all three, so the readback needs no help. It gets a nudge anyway for `is_active`
+and `is_collapsed`, because an unchanged write may not notify and a shell has no deadline
+to recover from that; a control write never gets one, because during a drag that would
+rebuild every observer in the watch on every frame.
 
 Live calls the root, scale name and Scale Mode fields its Current Scale controls. Despite
 their `Song` location in the LOM, they are **not a rewrite of every clip in the Set**: the

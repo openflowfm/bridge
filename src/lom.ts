@@ -18,7 +18,8 @@
 //      playback <verb> <i> <j>
 //      select_scene <scene> | select_track <track> | set_fold <track> <0|1>
 //      set_transport <encodedPatch> | set_mixer <encodedTargetAndPatch>
-//      devices <reqId> <track>
+//      set_device <encodedTargetAndPatch>
+//      watch_chains <encodedWatchList>
 //      watch_play <0|1> | watch_meters <0|1> | watch_sends <0|1> | watch_transport <0|1>
 //      watch_status <0|1> | watch_selection <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
@@ -35,7 +36,7 @@
 //      clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording>
 //        <inSeconds> <sigNum> <sigDen> … (nine atoms per *playing* track)
 //      mixer_state <encodedState>
-//      track_devices <reqId> <encodedState>
+//      chain_state <encodedState> | chain_values <encodedChanges>
 //      pong
 
 autowatch = 1;
@@ -2051,16 +2052,28 @@ function runPathOf(t: number, steps: readonly number[]): string {
   return path;
 }
 
-function chainRunPath(w: BSV.ChainWatch): string | null {
-  const steps = w.path || [];
+/**
+ * The same address, resolved a step at a time so a stale one fails early.
+ *
+ * `runPathOf` builds the string; this one insists every hop of it is really
+ * there. That matters because a path is a *position*: a rack deleted in Live
+ * leaves every path past it naming some other device, and the difference
+ * between "no longer resolves" and "resolves to the wrong thing" is the
+ * difference between a run reported gone and a write landing on a stranger.
+ */
+function resolveRunPath(t: number, steps: readonly number[]): string | null {
   if (steps.length % 2 !== 0) return null;
-  let path = 'live_set tracks ' + w.t;
+  let path = 'live_set tracks ' + t;
   if (!exists(at(path))) return null;
   for (let i = 0; i < steps.length; i += 2) {
     path += ' devices ' + steps[i] + ' chains ' + steps[i + 1];
     if (!exists(at(path))) return null;
   }
   return path;
+}
+
+function chainRunPath(w: BSV.ChainWatch): string | null {
+  return resolveRunPath(w.t, w.path || []);
 }
 
 /**
@@ -2430,6 +2443,107 @@ function watch_chains(encoded: unknown): void {
   }
   rebuildChainObservers();
   sendChainState();
+}
+
+// --- device writes ----------------------------------------------------
+// The other direction of the device chain: the activator, the fold triangle
+// and every control on an open device.
+//
+// **Nothing here replies.** All three fields are already observed by the watch
+// above — `is_active` and `is_collapsed` on the shell, `value` on each control
+// — so the acknowledgement is the next `chain_state` or `chain_values`, and it
+// is the same one another client's write produces. Confirming a `set()` here
+// would be reporting that we called Live, which is the less useful fact.
+//
+// No undo step, following `set_mixer`. Turning a knob is not an edit anyone
+// expects on ⌘Z as its own entry, and Live keeps its own automation history.
+
+function deviceTargetPath(target: BSV.DeviceTarget): string | null {
+  const steps = target.path || [];
+  for (let i = 0; i < steps.length; i++) {
+    if (!isFinite(steps[i]) || Math.floor(steps[i]) !== steps[i] || steps[i] < 0) return null;
+  }
+  const run = resolveRunPath(target.t, steps);
+  if (run === null) return null;
+  const path = run + ' devices ' + target.i;
+  return exists(at(path)) ? path : null;
+}
+
+function set_device(encoded: unknown): void {
+  if (!deviceReady) return fail(-1, 'device not ready');
+  const value = decodeMaxAtom(encoded);
+  if (!value || typeof value !== 'object') return fail(-1, 'malformed device write');
+  const source = value as { target?: BSV.DeviceTarget; patch?: BSV.DevicePatch };
+  const target = source.target;
+  const patch = source.patch;
+  const has = Object.prototype.hasOwnProperty;
+
+  if (
+    !target || !isFinite(target.t) || Math.floor(target.t) !== target.t || target.t < 0 ||
+    !Array.isArray(target.path) || target.path.length % 2 !== 0 ||
+    !isFinite(target.i) || Math.floor(target.i) !== target.i || target.i < 0
+  ) {
+    return fail(-1, 'invalid device target');
+  }
+  if (!patch || typeof patch !== 'object') return fail(-1, 'device patch is missing');
+  if (has.call(patch, 'on') && typeof patch.on !== 'boolean') {
+    return fail(-1, 'on must be boolean');
+  }
+  if (has.call(patch, 'folded') && typeof patch.folded !== 'boolean') {
+    return fail(-1, 'folded must be boolean');
+  }
+  const param = has.call(patch, 'param') ? patch.param : undefined;
+  if (
+    param !== undefined &&
+    (!param || typeof param !== 'object' || !isFinite(param.p) ||
+      Math.floor(param.p) !== param.p || param.p < 0 || !isFinite(param.value))
+  ) {
+    return fail(-1, 'invalid device parameter write');
+  }
+  if (!has.call(patch, 'on') && !has.call(patch, 'folded') && param === undefined) {
+    return fail(-1, 'device patch is empty');
+  }
+
+  try {
+    const devicePath = deviceTargetPath(target);
+    if (devicePath === null) return fail(-1, 'device did not resolve');
+
+    // Resolve and check the control before writing anything, so a patch that
+    // also carries `on` cannot land half of itself.
+    let parameterPath = '';
+    if (param !== undefined) {
+      parameterPath = devicePath + ' parameters ' + param.p;
+      const parameter = at(parameterPath);
+      if (!exists(parameter)) return fail(-1, 'device parameter did not resolve');
+      // Live's own three-way answer, and only the last of them refuses. A
+      // parameter that is changeable but currently inaudible is still the
+      // user's to move — see `paramDisabled` on the client side.
+      if (gnumOr(parameter, 'state', 0) === 2) {
+        return fail(-1, 'device parameter cannot be changed');
+      }
+      const min = gnum(parameter, 'min');
+      const max = gnum(parameter, 'max');
+      if (param.value < min || param.value > max) {
+        return fail(-1, 'device parameter value is outside its range');
+      }
+    }
+
+    if (has.call(patch, 'on')) at(devicePath).set('is_active', patch.on ? 1 : 0);
+    if (has.call(patch, 'folded')) {
+      const view = at(devicePath + ' view');
+      if (!exists(view)) return fail(-1, 'device view did not resolve');
+      view.set('is_collapsed', patch.folded ? 1 : 0);
+    }
+    if (param !== undefined) at(parameterPath).set('value', param.value);
+
+    // An unchanged write may not notify, and the shell tier has no deadline to
+    // recover from that the way a dragged control does. Nudge the structural
+    // re-read for those two and never for a control: at gesture rate this
+    // would rebuild every observer in the watch sixteen times a second.
+    if (has.call(patch, 'on') || has.call(patch, 'folded')) onChainChange();
+  } catch (e) {
+    fail(-1, e);
+  }
 }
 
 // --- folding ----------------------------------------------------------

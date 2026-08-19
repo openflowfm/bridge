@@ -1590,6 +1590,78 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('set_mixer', encodeMaxAtom({ target, patch }));
       break;
     }
+    /**
+     * One device write, validated here and acknowledged by the watch.
+     *
+     * The address is checked for *shape* only — an even path of non-negative
+     * integers. Whether it resolves is the LOM side's to answer, because only
+     * that side can: a device's address is its position, and positions move.
+     * Rejecting a plausible one here would mean keeping a second copy of the
+     * set's device tree in this process, which is exactly what the watch model
+     * exists to avoid.
+     */
+    case 'setDevice': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const source = m.target;
+      if (!source || typeof source !== 'object') {
+        return send(ws, { type: 'error', id: m.id, message: 'device target is missing' });
+      }
+      const t = Number(source.t);
+      const i = Number(source.i);
+      if (!Number.isInteger(t) || t < 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid device track' });
+      }
+      if (!Number.isInteger(i) || i < 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid device index' });
+      }
+      if (!Array.isArray(source.path) || source.path.length % 2 !== 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid device path' });
+      }
+      const path: number[] = [];
+      for (const step of source.path) {
+        const value = Number(step);
+        if (!Number.isInteger(value) || value < 0) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid device path' });
+        }
+        path.push(value);
+      }
+      const target: BSV.DeviceTarget = { t, path, i };
+
+      const patchSource = m.patch;
+      if (!patchSource || typeof patchSource !== 'object') {
+        return send(ws, { type: 'error', id: m.id, message: 'device patch is missing' });
+      }
+      const patch: BSV.DevicePatch = {};
+      for (const field of ['on', 'folded'] as const) {
+        if (patchSource[field] === undefined) continue;
+        if (typeof patchSource[field] !== 'boolean') {
+          return send(ws, { type: 'error', id: m.id, message: `${field} must be boolean` });
+        }
+        patch[field] = patchSource[field];
+      }
+      if (patchSource.param !== undefined) {
+        const param = patchSource.param;
+        if (!param || typeof param !== 'object') {
+          return send(ws, { type: 'error', id: m.id, message: 'param must be an object' });
+        }
+        const p = Number(param.p);
+        const value = Number(param.value);
+        if (!Number.isInteger(p) || p < 0) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid parameter index' });
+        }
+        // The range is the parameter's own and differs per control, so it is
+        // checked where the parameter is: lom.ts reads its min and max.
+        if (!Number.isFinite(value)) {
+          return send(ws, { type: 'error', id: m.id, message: 'parameter must be numeric' });
+        }
+        patch.param = { p, value };
+      }
+      if (Object.keys(patch).length === 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'device patch is empty' });
+      }
+      Max.outlet('set_device', encodeMaxAtom({ target, patch }));
+      break;
+    }
     // Also fire-and-forget, and for the same reason as playback: the client
     // folded its own columns before sending. See `setFold` in the protocol.
     case 'setFold':
