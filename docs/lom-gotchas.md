@@ -12,6 +12,17 @@ Three entries below started as guesses that turned out wrong, so the habit that 
 checking `LOM.md` **and** the version note at the top of it before assuming a property
 behaves the way its name suggests.
 
+- **Constructing a `LiveAPI` calls its callback, before you have observed anything.**
+  It arrives as `['id', N]`, and the observed property usually reports right after it. Two
+  separate bugs have come out of this. `meterValue` refuses the frame because reading its
+  last atom as a level put every track at full scale. Worse, a callback that *infers
+  nothing* — one that means "something moved, re-read everything" — will schedule the
+  rebuild that is attaching it, and the rebuild attaches again: a debounced loop that never
+  converges, constructing hundreds of `LiveAPI` objects a turn on the thread that draws
+  Live. **Any function that both attaches observers and is reachable from one of their
+  callbacks needs a re-entrancy flag.** `chainAttaching` in the device-chain watch is the
+  worked example; `rebuildCursorObservers` avoids it a second way, by returning early when
+  the cursor hasn't actually moved.
 - **`get()` returns Max atoms, not values.** Usually an array even for a single value;
   a multi-word name may arrive as one element or several. Always go through
   `gstr` / `gnum` / `gbool` / `gids` / `gid`.

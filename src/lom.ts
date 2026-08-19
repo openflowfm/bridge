@@ -2038,6 +2038,29 @@ var chainWatching = false;
 var lastChainKey = '';
 
 /**
+ * What the observers currently point at. See `chainShapeKey`.
+ */
+var lastChainShape = '';
+
+/**
+ * True while observers are being attached or detached, so this file's own
+ * callbacks can't schedule the very rebuild that is running.
+ *
+ * **Constructing a `LiveAPI` calls its callback synchronously**, with
+ * `['id', N]`, before the observed property has ever reported. This file
+ * already records that where it first bit: `meterValue` refuses that frame
+ * because reading it as a level put every track at full scale.
+ *
+ * Here it is worse than a wrong reading. `onChainChange` deliberately infers
+ * nothing from its arguments — any callback means "re-read everything" — so an
+ * attach-time callback schedules `chainTask`, which rebuilds, which attaches,
+ * which schedules `chainTask`. That is a 60ms loop constructing several
+ * hundred `LiveAPI` objects a turn, on the thread that draws Live, for as long
+ * as anything is being watched. It does not converge and it does not stop.
+ */
+var chainAttaching = false;
+
+/**
  * The LOM path of the run a watch names, or null if it no longer resolves.
  *
  * `path` is **pairs** — a run inside a rack is `devices M chains L`, and that
@@ -2248,7 +2271,7 @@ var chainTask = new Task(function () {
 });
 
 function onChainChange(): void {
-  if (!chainWatching) return;
+  if (!chainWatching || chainAttaching) return;
   chainTask.cancel();
   chainTask.schedule(CHAIN_DEBOUNCE_MS);
 }
@@ -2341,7 +2364,7 @@ function addParamObserver(
 function onParamChange(
   t: number, path: readonly number[], i: number, index: number, args: unknown[],
 ): void {
-  if (!chainWatching) return;
+  if (!chainWatching || chainAttaching) return;
   const value = mixerValue(args, 'value');
   if (value === null) return;
   paramDirty[t + '|' + path.join('.') + '|' + i + '|' + index] = {
@@ -2380,25 +2403,104 @@ var paramTask = new Task(function () {
   outlet(0, 'chain_values', encodeMaxAtom({ changes: changes }));
 });
 
+/**
+ * What the observers are attached *to*, as one string.
+ *
+ * Only the facts that decide where an observer points: whether each run still
+ * resolves, which devices are in it — by **id**, so a device swapped for
+ * another at the same index counts as a move — which of them are open, and how
+ * many controls each open one has.
+ *
+ * Deliberately not names, activators or fold state. Those are what the
+ * observers *report*, and re-attaching several hundred of them because a device
+ * was renamed is work that changes nothing about what is being watched. The
+ * distinction is the whole point of the guard: `onChainChange` fires for every
+ * one of those, and almost none of them move an observer.
+ *
+ * Reads through `at()`, which reuses one cursor and observes nothing, so
+ * measuring the shape cannot itself trigger a callback.
+ */
+function chainShapeKey(): string {
+  const parts: string[] = [];
+  for (let i = 0; i < chainWatches.length; i++) {
+    const w = chainWatches[i];
+    const where = w.t + '|' + (w.path || []).join('.');
+    const runPath = chainRunPath(w);
+    if (runPath === null) {
+      parts.push(where + '|gone');
+      continue;
+    }
+    let count = -1;
+    try {
+      count = at(runPath).getcount('devices');
+    } catch (e) {
+      count = -1;
+    }
+    const limit = Math.min(Math.max(count, 0), DEVICE_COUNT_MAX);
+    const ids: string[] = [];
+    for (let k = 0; k < limit; k++) {
+      const device = at(runPath + ' devices ' + k);
+      ids.push(exists(device) ? String(device.id) : '-');
+    }
+    const open = w.open || [];
+    const widths: string[] = [];
+    for (let k = 0; k < open.length; k++) {
+      let n = -1;
+      try {
+        n = at(runPath + ' devices ' + open[k]).getcount('parameters');
+      } catch (e) {
+        n = -1;
+      }
+      widths.push(open[k] + ':' + n);
+    }
+    parts.push(where + '|' + count + '|' + ids.join(',') + '|' + widths.join(','));
+  }
+  return parts.join(';');
+}
+
 function rebuildChainObservers(): void {
-  clearChainObservers();
-  // Indexes just moved under us, so anything queued describes a parameter that
-  // may no longer be the one it names.
-  paramDirty = {};
-  if (!chainWatching) return;
-  // **Shells for every run first, then parameters.** Both draw on one budget,
-  // and a chain that silently stopped updating is a worse failure than a knob
-  // that did — so when the cap bites, it takes knobs.
-  const paths: Array<string | null> = [];
-  for (let i = 0; i < chainWatches.length; i++) {
-    const path = chainRunPath(chainWatches[i]);
-    paths.push(path);
-    if (path !== null) attachChainObservers(path);
+  if (!chainWatching) {
+    clearChainObservers();
+    paramDirty = {};
+    lastChainShape = '';
+    return;
   }
-  for (let i = 0; i < chainWatches.length; i++) {
-    const path = paths[i];
-    if (path !== null) attachParamObservers(chainWatches[i], path);
+
+  // **Same targets means the observers already point at them.** The guard
+  // `rebuildCursorObservers` makes, for the same reason and against a bigger
+  // bill: every callback in this tier means "re-read everything", so without
+  // it a device renamed in Live tears down and rebuilds up to four hundred
+  // LiveAPI objects to end up observing exactly what it was already observing.
+  const shape = chainShapeKey();
+  if (shape === lastChainShape && chainObservers.length > 0) return;
+  lastChainShape = shape;
+
+  chainAttaching = true;
+  try {
+    clearChainObservers();
+    // Indexes just moved under us, so anything queued describes a parameter
+    // that may no longer be the one it names.
+    paramDirty = {};
+    // **Shells for every run first, then parameters.** Both draw on one budget,
+    // and a chain that silently stopped updating is a worse failure than a knob
+    // that did — so when the cap bites, it takes knobs.
+    const paths: Array<string | null> = [];
+    for (let i = 0; i < chainWatches.length; i++) {
+      const path = chainRunPath(chainWatches[i]);
+      paths.push(path);
+      if (path !== null) attachChainObservers(path);
+    }
+    for (let i = 0; i < chainWatches.length; i++) {
+      const path = paths[i];
+      if (path !== null) attachParamObservers(chainWatches[i], path);
+    }
+  } finally {
+    // Restored even if a path raised mid-attach. Leaving it set would mean the
+    // watch never hears from Live again, which is the one failure worse than
+    // rebuilding too often.
+    chainAttaching = false;
   }
+
   if (chainObservers.length >= CHAIN_OBSERVER_MAX) {
     post(
       'bsv chains: hit the ' + CHAIN_OBSERVER_MAX + '-observer cap; ' +
@@ -2407,7 +2509,14 @@ function rebuildChainObservers(): void {
   }
 }
 
+/**
+ * Detaching can call back too, so this holds the flag as well — and saves the
+ * old value rather than clearing it, because `rebuildChainObservers` calls this
+ * from inside its own attaching window.
+ */
 function clearChainObservers(): void {
+  const was = chainAttaching;
+  chainAttaching = true;
   for (let i = 0; i < chainObservers.length; i++) {
     try {
       chainObservers[i].property = '';
@@ -2416,6 +2525,7 @@ function clearChainObservers(): void {
     }
   }
   chainObservers = [];
+  chainAttaching = was;
 }
 
 /**
@@ -2433,6 +2543,9 @@ function watch_chains(encoded: unknown): void {
   chainWatches = list;
   chainWatching = list.length > 0;
   lastChainKey = '';
+  // A new declaration re-attaches unconditionally: the shape guard exists to
+  // suppress Live's own chatter, not to second-guess what a client asked for.
+  lastChainShape = '';
   chainTask.cancel();
   paramTask.cancel();
   paramPending = false;
