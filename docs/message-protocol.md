@@ -209,3 +209,31 @@ with the two bugs above, a real failure surfaced as `color: ` — a log line wit
 the colon. `describe()` here, in `bridge.ts` and in `useBridge.ts` all use `||` with a real
 fallback, errors name the request that failed, and the `err` handler joins every trailing
 atom so an unquoted multi-word message isn't truncated to its first word.
+
+## `clip_notes` — the one dict-returning LOM call
+
+Every other LOM call in `lom.ts` returns atoms. `Clip.get_all_notes_extended` returns a
+**dictionary**, and Max's convention is that the call hands back the dict's *name*, which
+the caller wraps with `new Dict(name)`.
+
+That convention is the one thing in this handler that could not be checked without Live
+open, so it is written to fail loudly in the Max window and quietly everywhere else: an
+answer that is not a string, a dict that will not stringify, JSON that will not parse and a
+payload with no `notes` list each `post()` what they actually were and return an empty list.
+An empty list draws no chart. A guess would draw the wrong one.
+
+Three other things it does, each for a reason worth keeping:
+
+- **Muted notes are dropped here**, not carried with a flag. A note that does not sound is
+  not part of the harmony, and filtering at the edge means nothing downstream can forget.
+- **`is_midi_clip` is checked first.** Calling the function on an audio clip is an error
+  rather than an empty answer.
+- **One instrument read per track, not per clip.** A scene's worth of clips is a scene's
+  worth of the same few tracks, and `Device.type === 1` is Live's own word for "instrument"
+  — steadier than matching class names, since a Drum Rack, an Operator and a third-party
+  plugin all answer 1 and only the instrument does.
+
+Both halves bound what they will do: `bridge.ts` refuses an ask outside 1–`CLIP_NOTES_MAX`
+clips before it reaches Max, and `lom.ts` stops reading a clip after `NOTE_COUNT_MAX` notes.
+The ask travels as loose atoms, so without the first bound a malformed request would have
+Live open hundreds of clips inside one Max message.

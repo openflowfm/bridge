@@ -31,6 +31,14 @@ import {
 import { canApplyDelta, mergeRows, mergeTrackDelta } from '../../core/src/snapshotDelta';
 
 const PORT = Number(process.env.BSV_PORT) || 17800;
+/**
+ * Most clips one `clipNotes` may ask about.
+ *
+ * A scene's worth of playing clips is a dozen at the outside; this is the
+ * bound that stops a malformed ask turning into Live opening hundreds of clips
+ * inside one Max message.
+ */
+const CLIP_NOTES_MAX = 32;
 const HOST = '127.0.0.1';
 const WS_PATH = '/ws';
 const PUBLIC = path.join(__dirname, 'public');
@@ -1371,6 +1379,37 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       Max.outlet('palette', track(ws, m));
       break;
     }
+    /**
+     * Read the notes of a handful of clips. A read, like `devices` — the bridge
+     * holds nothing about notes and never will, because a progression is a
+     * function of what a client is asking about rather than of the set.
+     *
+     * Bounded here as well as in `lom.ts`: the ask travels as loose atoms, and
+     * a caller that sent a thousand pairs would have Live open a thousand clips
+     * inside one Max message.
+     */
+    case 'clipNotes': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const asked = Array.isArray(m.clips) ? m.clips : [];
+      if (asked.length === 0 || asked.length > CLIP_NOTES_MAX) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: `clipNotes takes 1–${CLIP_NOTES_MAX} clips`,
+        });
+      }
+      const pairs: number[] = [];
+      for (const clip of asked) {
+        const t = Number(clip?.t);
+        const s = Number(clip?.s);
+        if (!Number.isInteger(t) || !Number.isInteger(s) || t < 0 || s < 0) {
+          return send(ws, { type: 'error', id: m.id, message: 'clipNotes: bad clip address' });
+        }
+        pairs.push(t, s);
+      }
+      Max.outlet('clip_notes', track(ws, m), ...pairs);
+      break;
+    }
     // Developer diagnostics. Fire-and-forget like `observe`: no reqId, no
     // pending entry, no reply, because every answer lands in the Max window
     // instead. See the `diag` note in protocol/global.d.ts for why.
@@ -2023,6 +2062,16 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
   dropHeld('scenes were reordered, which renumbers the set');
   broadcast({ type: 'changed', kind: 'structure' });
   requestInternalSnapshot();
+});
+
+Max.addHandler('clip_notes_done', async (reqId: number, dictName: string, ms: number) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const payload: { clips?: BSV.ClipNotes[] } = await Max.getDict(dictName);
+  const clips = Array.isArray(payload?.clips) ? payload.clips : [];
+  const notes = clips.reduce((n, clip) => n + (clip.notes?.length ?? 0), 0);
+  Max.post(`clip notes: ${notes} notes from ${clips.length} clips in ${ms}ms`);
+  send(req?.ws, { type: 'clipNotes', id: req?.clientId, clips });
 });
 
 Max.addHandler('palette_done', async (reqId: number, dictName: string) => {

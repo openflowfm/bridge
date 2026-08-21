@@ -51,6 +51,8 @@ const SET_DICT = 'bsv_set';
 const DELTA_DICT = 'bsv_delta';
 /** node → lom. The only dict we don't create by publishing to it — see ensureDicts. */
 const OPS_DICT = 'bsv_ops';
+/** A clip's notes, read on request so a client can work out the harmony. */
+const NOTES_DICT = 'bsv_notes';
 
 /** LOM ops per scheduler tick — keeps Live's UI responsive. */
 const CHUNK = 50;
@@ -381,7 +383,15 @@ function publish(dictName: string, payload: unknown): void {
 var heldDicts: Dict[] = [];
 
 function ensureDicts(): void {
-  const names = [SNAPSHOT_DICT, RESULT_DICT, PALETTE_DICT, SET_DICT, DELTA_DICT, OPS_DICT];
+  const names = [
+    SNAPSHOT_DICT,
+    RESULT_DICT,
+    PALETTE_DICT,
+    SET_DICT,
+    DELTA_DICT,
+    OPS_DICT,
+    NOTES_DICT,
+  ];
   heldDicts = [];
   for (let i = 0; i < names.length; i++) {
     try {
@@ -413,6 +423,131 @@ function hello(): void {
 
 function ping(): void {
   outlet(0, 'pong');
+}
+
+/**
+ * The class name of a track's instrument, or `''` when it has none.
+ *
+ * `Device.type === 1` is Live's own word for "instrument", which is steadier
+ * than matching class names against a list: a Drum Rack, an Operator and a
+ * third-party plugin all answer 1, and only the instrument does. What the class
+ * *means* — that `DrumGroupDevice` is drums and its notes are not harmony — is
+ * decided in `core/`, where it can be tested.
+ */
+function instrumentOf(t: number): string {
+  const path = 'live_set tracks ' + t;
+  let count = 0;
+  try {
+    count = at(path).getcount('devices');
+  } catch (e) {
+    return '';
+  }
+  for (let i = 0; i < count && i < DEVICE_COUNT_MAX; i++) {
+    const device = at(path + ' devices ' + i);
+    if (!exists(device)) continue;
+    if (gnumOr(device, 'type', 0) === 1) return gstr(device, 'class_name');
+  }
+  return '';
+}
+
+/** Anything past this in one clip is a generative patch, not a progression. */
+const NOTE_COUNT_MAX = 4096;
+
+/**
+ * Every note in one clip.
+ *
+ * **This is the only dict-returning LOM call in the project**, and the shape it
+ * hands back to `[v8]` is the part that could not be checked without Live open.
+ * Max's convention is that a function returning a dictionary returns its
+ * *name*, which is then wrapped — so that is what this tries first, and every
+ * other shape is reported to the Max window with what it actually was rather
+ * than being guessed at. A clip we cannot read comes back empty, which draws no
+ * chart; that is the visible-and-harmless failure the rule asks for, as against
+ * a chart of chords nobody is playing.
+ */
+function notesIn(path: string): BSV.ClipNote[] {
+  const clip = at(path);
+  if (!exists(clip)) return [];
+  // An audio clip has no notes and answering the call on one is an error, not
+  // an empty list.
+  if (!gbool(clip, 'is_midi_clip')) return [];
+
+  let raw = '';
+  try {
+    const answer = clip.call('get_all_notes_extended');
+    if (typeof answer !== 'string' || answer === '') {
+      post('bsv notes: expected a dict name, got ' + typeof answer + ' ' + String(answer) + '\n');
+      return [];
+    }
+    raw = new Dict(answer).stringify();
+  } catch (e) {
+    post('bsv notes: could not read ' + path + ': ' + describe(e) + '\n');
+    return [];
+  }
+
+  let parsed: { notes?: unknown };
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    post('bsv notes: could not parse notes as JSON: ' + String(raw).substring(0, 200) + '\n');
+    return [];
+  }
+
+  const list = parsed && parsed.notes ? parsed.notes : null;
+  if (!list || typeof (list as { length?: number }).length !== 'number') {
+    post('bsv notes: no note list in ' + String(raw).substring(0, 200) + '\n');
+    return [];
+  }
+
+  const rows = list as Array<Record<string, unknown>>;
+  const out: BSV.ClipNote[] = [];
+  for (let i = 0; i < rows.length && out.length < NOTE_COUNT_MAX; i++) {
+    const note = rows[i];
+    if (!note) continue;
+    // A muted note does not sound, so it is not part of the harmony. Dropped
+    // here rather than carried with a flag, so nothing downstream can forget.
+    if (Number(note.mute) === 1) continue;
+    const pitch = Number(note.pitch);
+    const start = Number(note.start_time);
+    const duration = Number(note.duration);
+    if (!isFinite(pitch) || !isFinite(start) || !isFinite(duration)) continue;
+    out.push({ pitch: pitch, start: start, duration: duration });
+  }
+  return out;
+}
+
+/**
+ * The notes of every clip asked for, in one answer.
+ *
+ * Atoms in, dict out: the ask is a handful of numbers and the answer can be
+ * thousands of notes. A slot holding nothing still gets an entry with an empty
+ * list — a reader has to be able to tell "no notes here" from "you did not ask".
+ */
+function clip_notes(reqId: number, ...pairs: number[]): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  const t0 = Date.now();
+  try {
+    const clips: BSV.ClipNotes[] = [];
+    const instruments: { [t: number]: string } = {};
+    for (let i = 0; i + 1 < pairs.length; i += 2) {
+      const t = Number(pairs[i]);
+      const s = Number(pairs[i + 1]);
+      if (!isFinite(t) || !isFinite(s) || t < 0 || s < 0) continue;
+      // One read per *track*, not per clip: a scene's worth of clips is a
+      // scene's worth of the same few tracks.
+      if (instruments[t] === undefined) instruments[t] = instrumentOf(t);
+      clips.push({
+        t: t,
+        s: s,
+        instrument: instruments[t],
+        notes: notesIn('live_set tracks ' + t + ' clip_slots ' + s + ' clip'),
+      });
+    }
+    publish(NOTES_DICT, { clips: clips });
+    outlet(0, 'clip_notes_done', reqId, NOTES_DICT, Date.now() - t0);
+  } catch (e) {
+    fail(reqId, e);
+  }
 }
 
 /**
