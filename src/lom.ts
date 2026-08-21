@@ -475,39 +475,35 @@ function notesIn(path: string): { notes: BSV.ClipNote[]; problem?: string } {
   let raw = '';
   try {
     const answer = clip.call('get_all_notes_extended');
-    // **Every plausible shape, because this could not be checked on paper.**
-    // Max's convention is that a dict-returning function answers with the
-    // dict's name, but `call` has been seen to wrap that in an array and to
-    // prefix it with the symbol `dictionary`. Rather than guess once and fail
-    // silently, take the last atom that looks like a name and say what arrived
-    // when none does.
-    // Flatten whatever came back to a list of words, then take the last one
-    // that is not the literal `dictionary`. That covers the three shapes this
-    // has been seen to take — a bare name, `dictionary <name>` as **one symbol
-    // with a space in it**, and the same pair as two atoms — and the middle one
-    // is what was actually happening: `new Dict('dictionary u123')` does not
-    // fail, it cheerfully creates a second, empty dictionary under that name,
-    // which stringifies to `{}` and reads as a clip with no notes in it.
-    const words = String(
-      typeof answer === 'string' ? answer : (answer as unknown as unknown[]).join(' '),
-    )
-      .trim()
-      .split(/\s+/)
-      .filter((word) => word !== '' && word !== 'dictionary');
-    const name = words.length > 0 ? words[words.length - 1]! : '';
-    if (name === '') {
-      const shape = typeof answer + ' ' + String(answer).substring(0, 120);
-      post('bsv notes: no dict name in answer — ' + shape + '\n');
-      return { notes: [], problem: 'no dict name in answer: ' + shape };
-    }
-    raw = new Dict(name).stringify();
-    if (raw === '{}' || raw === '') {
-      // Say what was asked for as well as what came back. An empty dict is
-      // almost always the wrong name rather than an empty clip, and without the
-      // name in hand there is no way to tell those apart.
-      const shape = 'answer=' + String(answer).substring(0, 80) + ' name=' + name;
-      post('bsv notes: empty dict — ' + shape + '\n');
-      return { notes: [], problem: 'empty dict: ' + shape };
+    // **`[v8]` hands back the JSON itself, not a dictionary name.** Max's
+    // documented convention for a dict-returning function is the name, and both
+    // shapes are handled below — but the one that actually arrives here is the
+    // payload, and assuming otherwise is what made every clip in a real set
+    // read as empty: the last word of the JSON was taken as a name, and
+    // `new Dict('64.0}]}')` cheerfully creates a second, empty dictionary
+    // rather than failing.
+    const text = String(
+      answer && typeof answer !== 'string' && typeof (answer as { length?: number }).length === 'number'
+        ? (answer as unknown as unknown[]).join(' ')
+        : answer,
+    ).trim();
+
+    if (text.charAt(0) === '{') {
+      raw = text;
+    } else {
+      const words = text.split(/\s+/).filter((word) => word !== '' && word !== 'dictionary');
+      const name = words.length > 0 ? words[words.length - 1]! : '';
+      if (name === '') {
+        const shape = typeof answer + ' ' + text.substring(0, 120);
+        post('bsv notes: no payload and no dict name — ' + shape + '\n');
+        return { notes: [], problem: 'unreadable answer: ' + shape };
+      }
+      raw = new Dict(name).stringify();
+      if (raw === '{}' || raw === '') {
+        const shape = 'answer=' + text.substring(0, 80) + ' name=' + name;
+        post('bsv notes: empty dict — ' + shape + '\n');
+        return { notes: [], problem: 'empty dict: ' + shape };
+      }
     }
   } catch (e) {
     post('bsv notes: could not read ' + path + ': ' + describe(e) + '\n');
