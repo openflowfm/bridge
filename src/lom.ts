@@ -481,24 +481,34 @@ function notesIn(path: string): { notes: BSV.ClipNote[]; problem?: string } {
     // prefix it with the symbol `dictionary`. Rather than guess once and fail
     // silently, take the last atom that looks like a name and say what arrived
     // when none does.
-    let name = '';
-    if (typeof answer === 'string') name = answer;
-    else if (answer && typeof (answer as { length?: number }).length === 'number') {
-      const atoms = answer as unknown as unknown[];
-      for (let i = atoms.length - 1; i >= 0; i--) {
-        const atom = atoms[i];
-        if (typeof atom === 'string' && atom !== '' && atom !== 'dictionary') {
-          name = atom;
-          break;
-        }
-      }
-    }
+    // Flatten whatever came back to a list of words, then take the last one
+    // that is not the literal `dictionary`. That covers the three shapes this
+    // has been seen to take — a bare name, `dictionary <name>` as **one symbol
+    // with a space in it**, and the same pair as two atoms — and the middle one
+    // is what was actually happening: `new Dict('dictionary u123')` does not
+    // fail, it cheerfully creates a second, empty dictionary under that name,
+    // which stringifies to `{}` and reads as a clip with no notes in it.
+    const words = String(
+      typeof answer === 'string' ? answer : (answer as unknown as unknown[]).join(' '),
+    )
+      .trim()
+      .split(/\s+/)
+      .filter((word) => word !== '' && word !== 'dictionary');
+    const name = words.length > 0 ? words[words.length - 1]! : '';
     if (name === '') {
       const shape = typeof answer + ' ' + String(answer).substring(0, 120);
       post('bsv notes: no dict name in answer — ' + shape + '\n');
       return { notes: [], problem: 'no dict name in answer: ' + shape };
     }
     raw = new Dict(name).stringify();
+    if (raw === '{}' || raw === '') {
+      // Say what was asked for as well as what came back. An empty dict is
+      // almost always the wrong name rather than an empty clip, and without the
+      // name in hand there is no way to tell those apart.
+      const shape = 'answer=' + String(answer).substring(0, 80) + ' name=' + name;
+      post('bsv notes: empty dict — ' + shape + '\n');
+      return { notes: [], problem: 'empty dict: ' + shape };
+    }
   } catch (e) {
     post('bsv notes: could not read ' + path + ': ' + describe(e) + '\n');
     return { notes: [], problem: describe(e) };
