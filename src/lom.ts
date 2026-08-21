@@ -465,24 +465,43 @@ const NOTE_COUNT_MAX = 4096;
  * chart; that is the visible-and-harmless failure the rule asks for, as against
  * a chart of chords nobody is playing.
  */
-function notesIn(path: string): BSV.ClipNote[] {
+function notesIn(path: string): { notes: BSV.ClipNote[]; problem?: string } {
   const clip = at(path);
-  if (!exists(clip)) return [];
+  if (!exists(clip)) return { notes: [], problem: 'no clip at ' + path };
   // An audio clip has no notes and answering the call on one is an error, not
-  // an empty list.
-  if (!gbool(clip, 'is_midi_clip')) return [];
+  // an empty list. Not a problem either — it is simply not a thing with chords.
+  if (!gbool(clip, 'is_midi_clip')) return { notes: [] };
 
   let raw = '';
   try {
     const answer = clip.call('get_all_notes_extended');
-    if (typeof answer !== 'string' || answer === '') {
-      post('bsv notes: expected a dict name, got ' + typeof answer + ' ' + String(answer) + '\n');
-      return [];
+    // **Every plausible shape, because this could not be checked on paper.**
+    // Max's convention is that a dict-returning function answers with the
+    // dict's name, but `call` has been seen to wrap that in an array and to
+    // prefix it with the symbol `dictionary`. Rather than guess once and fail
+    // silently, take the last atom that looks like a name and say what arrived
+    // when none does.
+    let name = '';
+    if (typeof answer === 'string') name = answer;
+    else if (answer && typeof (answer as { length?: number }).length === 'number') {
+      const atoms = answer as unknown as unknown[];
+      for (let i = atoms.length - 1; i >= 0; i--) {
+        const atom = atoms[i];
+        if (typeof atom === 'string' && atom !== '' && atom !== 'dictionary') {
+          name = atom;
+          break;
+        }
+      }
     }
-    raw = new Dict(answer).stringify();
+    if (name === '') {
+      const shape = typeof answer + ' ' + String(answer).substring(0, 120);
+      post('bsv notes: no dict name in answer — ' + shape + '\n');
+      return { notes: [], problem: 'no dict name in answer: ' + shape };
+    }
+    raw = new Dict(name).stringify();
   } catch (e) {
     post('bsv notes: could not read ' + path + ': ' + describe(e) + '\n');
-    return [];
+    return { notes: [], problem: describe(e) };
   }
 
   let parsed: { notes?: unknown };
@@ -490,13 +509,13 @@ function notesIn(path: string): BSV.ClipNote[] {
     parsed = JSON.parse(raw);
   } catch (e) {
     post('bsv notes: could not parse notes as JSON: ' + String(raw).substring(0, 200) + '\n');
-    return [];
+    return { notes: [], problem: 'unparseable: ' + String(raw).substring(0, 120) };
   }
 
   const list = parsed && parsed.notes ? parsed.notes : null;
   if (!list || typeof (list as { length?: number }).length !== 'number') {
     post('bsv notes: no note list in ' + String(raw).substring(0, 200) + '\n');
-    return [];
+    return { notes: [], problem: 'no note list: ' + String(raw).substring(0, 120) };
   }
 
   const rows = list as Array<Record<string, unknown>>;
@@ -513,7 +532,7 @@ function notesIn(path: string): BSV.ClipNote[] {
     if (!isFinite(pitch) || !isFinite(start) || !isFinite(duration)) continue;
     out.push({ pitch: pitch, start: start, duration: duration });
   }
-  return out;
+  return { notes: out };
 }
 
 /**
@@ -536,12 +555,15 @@ function clip_notes(reqId: number, ...pairs: number[]): void {
       // One read per *track*, not per clip: a scene's worth of clips is a
       // scene's worth of the same few tracks.
       if (instruments[t] === undefined) instruments[t] = instrumentOf(t);
-      clips.push({
+      const read = notesIn('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
+      const row: BSV.ClipNotes = {
         t: t,
         s: s,
         instrument: instruments[t],
-        notes: notesIn('live_set tracks ' + t + ' clip_slots ' + s + ' clip'),
-      });
+        notes: read.notes,
+      };
+      if (read.problem) row.problem = read.problem;
+      clips.push(row);
     }
     publish(NOTES_DICT, { clips: clips });
     outlet(0, 'clip_notes_done', reqId, NOTES_DICT, Date.now() - t0);
