@@ -25,6 +25,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             bridge/package-lock.json
+            visuals/package-lock.json
 
       # `npm ci` runs the root postinstall, which installs `ws` into
       # bridge/node_modules. That's load-bearing: build:bridge esbuilds
