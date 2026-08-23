@@ -1,4 +1,4 @@
-SessionBridge — better-session-view
+SessionBridge — open[flow]
 https://github.com/ryangavin/better-session-view
 
 

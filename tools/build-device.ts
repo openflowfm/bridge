@@ -4,14 +4,14 @@
 // Patching view — send/receive deliberately break the request/response cycle
 // so Max never sees a graph loop:
 //
-//   [live.thisdevice] -> [init(  -> [s ---bsv-to-lom]
-//   [node.script] out0 ---------> [s ---bsv-to-lom]
-//   [r ---bsv-to-lom] -> [route serving device_state_get device_state_set]
+//   [live.thisdevice] -> [init(  -> [s ---openflow-to-lom]
+//   [node.script] out0 ---------> [s ---openflow-to-lom]
+//   [r ---openflow-to-lom] -> [route serving device_state_get device_state_set]
 //                         serving -> status text; state get/set -> stored pattr
 //                         unmatched -> [deferlow] -> [v8 lom.js]
-//   [pattr bsv-state] -> [prepend device_state] -> [s ---bsv-to-node]
-//   [v8 lom.js] -> [s ---bsv-to-node]
-//   [r ---bsv-to-node] -> [node.script] in0  and  -> [route ready] -> status text
+//   [pattr openflow-state] -> [prepend device_state] -> [s ---openflow-to-node]
+//   [v8 lom.js] -> [s ---openflow-to-node]
+//   [r ---openflow-to-node] -> [node.script] in0  and  -> [route ready] -> status text
 //   [live.text] -> [; max launchbrowser ...(              (launch, and GitHub)
 //   [plugin~] -> [plugout~]                                (audio passthrough)
 //
@@ -91,7 +91,7 @@ const connect = (src: string, outlet: number, dst: string, inlet: number) =>
 //  98    ╭──────────────────────────────╮
 //        │     Open Session Manager     │
 // 128    ╰──────────────────────────────╯
-// 139    Better Session View 0.1.0  GitHub
+// 139    open[flow] 0.1.0  GitHub
 // 169
 //
 // The device's own name is not repeated anywhere: Live already draws it in the
@@ -224,7 +224,7 @@ const launch = linkButton(
 // The footer sits on the device surface rather than the display, so this one is
 // a `live.comment` with no color set — that is already the surface text color,
 // in whichever theme Live is wearing.
-box('live.comment', `Better Session View ${VERSION}`, [528, 522, 150, 16], {
+box('live.comment', `open[flow] ${VERSION}`, [528, 522, 150, 16], {
   numinlets: 1,
   numoutlets: 0,
   fontsize: 9.0,
@@ -233,7 +233,7 @@ box('live.comment', `Better Session View ${VERSION}`, [528, 522, 150, 16], {
 
 const github = linkButton(
   'GitHub',
-  'Open the Better Session View project page on GitHub.',
+  'Open the open[flow] project page on GitHub.',
   [698, 519, 60, 20],
   [176, 139, 62, 20],
   10.0,
@@ -259,11 +259,11 @@ const markInitialized = msg('1', [76, 122, 30, 22]);
 const initialized = obj('i 0', [700, 286, 36, 22], 2, 1);
 const selectInitialized = obj('sel 1', [746, 286, 44, 22], 1, 2);
 
-const rToNode = obj('r ---bsv-to-node', [20, 130, 130, 22], 0, 1);
+const rToNode = obj('r ---openflow-to-node', [20, 130, 130, 22], 0, 1);
 const nodeScript = obj('node.script bridge.js @autostart 1 @watch 1', [20, 164, 300, 22], 1, 2);
-const sToLom = obj('s ---bsv-to-lom', [20, 202, 120, 22], 1, 0);
+const sToLom = obj('s ---openflow-to-lom', [20, 202, 120, 22], 1, 0);
 
-const rToLom = obj('r ---bsv-to-lom', [370, 58, 120, 22], 0, 1);
+const rToLom = obj('r ---openflow-to-lom', [370, 58, 120, 22], 0, 1);
 const routeStatus = obj(
   'route status device_state_get device_state_set push_songs push_bank',
   [370, 90, 400, 22],
@@ -274,15 +274,21 @@ const deferlow = obj('deferlow', [440, 124, 70, 22], 1, 1);
 const v8 = obj('v8 lom.js', [440, 156, 100, 22], 1, 1);
 // `boot` is patcher-private. Everything else continues to Node unchanged.
 const routeV8Boot = obj('route boot', [440, 190, 76, 22], 1, 2);
-const sToNode = obj('s ---bsv-to-node', [530, 190, 130, 22], 1, 0);
+const sToNode = obj('s ---openflow-to-node', [530, 190, 130, 22], 1, 0);
 
 // One opaque, versioned JSON blob encoded as a base64url symbol. Parameter
 // type 3 is Max for Live's Blob type; parameter_invisible makes it Stored Only,
 // so Live saves it in the .als without offering meaningless automation.
 // `restore` is the new-device sentinel — bridge.ts replaces it with migrated or
 // default state the first time it asks.
-const deviceState = obj('pattr bsv-state', [370, 244, 110, 22], 1, 3, {
-  varname: 'bsv-state',
+//
+// The long name is the identity Live stores the value under in the .als. It
+// said `bsv-state` before the open[flow] rename, so a set saved back then
+// presents nothing under this name: the pattr restores its `0` sentinel and
+// bridge.ts re-runs the legacy bsv.json/roles.json migration as if the device
+// were new. The next save of the set persists under `openflow-state`.
+const deviceState = obj('pattr openflow-state', [370, 244, 110, 22], 1, 3, {
+  varname: 'openflow-state',
   restore: [0.0],
   saved_object_attributes: { parameter_enable: 1 },
   saved_attribute_attributes: {
@@ -296,9 +302,9 @@ const deviceState = obj('pattr bsv-state', [370, 244, 110, 22], 1, 3, {
       parameter_mmin: 0.0,
       parameter_type: 3,
       parameter_initial_enable: 0,
-      parameter_shortname: 'bsv-state',
+      parameter_shortname: 'openflow-state',
       parameter_modmax: 127.0,
-      parameter_longname: 'bsv-state',
+      parameter_longname: 'openflow-state',
       parameter_modmin: 0.0,
       parameter_linknames: 0,
       parameter_modmode: 0,
@@ -501,8 +507,9 @@ const songMenu = box('live.menu', null, [20, 570, 120, 15], {
       parameter_steps: PUSH_SONG_MAX,
       parameter_initial_enable: 1,
       parameter_initial: [0.0],
-      // **Push displays the long name, not the short one.** It read `bsv-song`
-      // on hardware while the short name said something else entirely — which
+      // **Push displays the long name, not the short one.** Under this
+      // parameter's original long name, `bsv-song`, that is exactly what
+      // hardware read while the short name said something else entirely — which
       // also settles what v1 was chasing: `_parameter_shortname` never had a
       // chance of being seen. So this is a word rather than an identifier, and
       // it is what the live.banks message below has to address the parameter by.
@@ -632,7 +639,7 @@ const patcher = {
     // Live reads these into the browser and the Info View, so they are user
     // copy, not a note to ourselves about WebSockets.
     description:
-      'Connects this Live Set to Better Session View — naming, color and running order for large sets.',
+      'Connects this Live Set to open[flow] — naming, color and running order for large sets.',
     digest: 'Session Bridge',
     tags: 'session manager bridge',
     style: '',
@@ -644,11 +651,11 @@ const patcher = {
     // pattr has parameter metadata but Live does not register it with the
     // device, so there is nothing for the .als to save.
     parameters: {
-      [deviceState]: ['bsv-state', 'bsv-state', 0],
+      [deviceState]: ['openflow-state', 'openflow-state', 0],
       // The name here is the one Live registers the parameter under, and Push
       // reads it from Live — so it has to agree with `parameter_longname` on
-      // the object. Left saying `bsv-song` after the object was renamed, it is
-      // what Push kept displaying.
+      // the object. Left saying `bsv-song` after the object's long name became
+      // `Song`, it is what Push kept displaying.
       [songMenu]: ['Song', 'Song', 1],
     },
     dependency_cache: [],

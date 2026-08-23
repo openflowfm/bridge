@@ -68,7 +68,7 @@ nothing. An older `bsv.json` or `roles.json` is read once when an empty device m
 new writes never create a sidecar file.
 
 Only one copy of the device can run at a time — they'd fight over port 17800. A
-second instance posts a warning rather than crashing. `BSV_PORT` overrides.
+second instance posts a warning rather than crashing. `OPENFLOW_PORT` overrides.
 
 After a rebuild Live usually reloads the device on its own. If behaviour looks stale,
 delete it from the track and re-drag.
@@ -86,7 +86,7 @@ This is the part that surprises people, and it's all forced by Max.
   `strict: true` injects `"use strict"`, which puts those assignments at risk. The
   hand-written predecessor ran without it, so we keep it that way.
 - Consequence: **`lom.ts` cannot `import` anything.** That's why the protocol lives in
-  a global `BSV` namespace rather than a module, and why atom-parsing logic is
+  a global `OpenFlow` namespace rather than a module, and why atom-parsing logic is
   duplicated into `core/src/lomAtoms.ts` so it can be unit-tested.
 
 **`bridge.ts` compiles to CommonJS**, because Node for Max injects `max-api` as a CJS
@@ -99,7 +99,7 @@ shipped build, `tools/dev-bridge.ts` for the dev watch loop — specifically so 
 import across the `core/` package boundary (the song list Push shows needs `derive()`).
 Bundling doesn't care where an import lives, which is what made that possible;
 `bridge/tsconfig.node.json` is typecheck-only now, and nothing asks `tsc` to emit
-`bridge.ts` at all. It still reads protocol types off the global `BSV` namespace rather
+`bridge.ts` at all. It still reads protocol types off the global `OpenFlow` namespace rather
 than importing `protocol/` directly — nothing forces that anymore, it's just how it's
 always been done here, not a constraint left over from `rootDir`.
 

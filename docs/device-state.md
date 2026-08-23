@@ -6,9 +6,14 @@ Set-owned configuration in the hidden parameter, and the 70-color table.
 
 The default artist, roles and the allowed-color subset live in one versioned JSON object. `bridge.ts`
 encodes it as a base64url symbol and sends `device_state_set`; the generated patcher
-routes that around `lom.ts` into `pattr bsv-state`. The pattr is a Max for Live Blob
+routes that around `lom.ts` into `pattr openflow-state`. The pattr is a Max for Live Blob
 parameter with `parameter_invisible: 1`, so it is Stored Only: Live writes it into the
 set but does not expose meaningless automation for it.
+
+The parameter's long name is the identity Live stores the value under, and it said
+`bsv-state` before the open[flow] rename. A set saved under the old name presents
+nothing under `openflow-state`, so the device comes up as if new — the migration
+below runs again, and the next save persists under the new name.
 
 On startup Node sends `device_state_get` explicitly. That timing is important — pattr
 may restore before `node.script` has installed its handlers, so relying on the initial

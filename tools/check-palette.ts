@@ -5,10 +5,10 @@
 // track and clip, walks color_index, removes the track, and returns Live's table.
 // Nothing in the built UI calls this path.
 
-import { LIVE_PALETTE } from '../core/src/livePalette.ts';
-import type { Event, EventOf, Request } from '../protocol/index.ts';
+import { LIVE_PALETTE } from '@openflow/core/livePalette.ts';
+import type { Event, EventOf, Request } from '@openflow/protocol/index.ts';
 
-const url = process.env.BSV_WS || 'ws://127.0.0.1:17800/ws';
+const url = process.env.OPENFLOW_WS || 'ws://127.0.0.1:17800/ws';
 const ws = new WebSocket(url);
 
 await new Promise<void>((resolve, reject) => {

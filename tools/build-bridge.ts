@@ -10,8 +10,8 @@
 // So: `ws` is inlined, and the built UI rides along as base64 in a `define`.
 //
 // `npm run dev` does NOT use this — it keeps plain `tsc --watch`, which is faster
-// and leaves BSV_ASSETS undefined so the bridge serves public/ off disk while
-// vite owns the UI. See the BSV_ASSETS comment in bridge.ts.
+// and leaves OPENFLOW_ASSETS undefined so the bridge serves public/ off disk while
+// vite owns the UI. See the OPENFLOW_ASSETS comment in bridge.ts.
 
 import esbuild from 'esbuild';
 import fs from 'node:fs';
@@ -63,7 +63,7 @@ await esbuild.build({
   // ws's two optional native speedups are require'd inside a try/catch; left
   // external they simply stay unavailable, which is how they already are.
   external: ['max-api', 'bufferutil', 'utf-8-validate'],
-  define: { BSV_ASSETS: JSON.stringify(assets) },
+  define: { OPENFLOW_ASSETS: JSON.stringify(assets) },
   legalComments: 'none',
   minify: false, // this is what you read in the Max window when it goes wrong
 });

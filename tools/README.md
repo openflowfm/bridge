@@ -128,21 +128,21 @@ alongside the `.amxd` so you can open the same patch in Max to debug.
 ### Patch topology
 
 ```
-[live.thisdevice] ─> [initialized latch] ─> [init( ─> [s ---bsv-to-lom]
-[node.script] out0 ──────────────────────-> [s ---bsv-to-lom]
+[live.thisdevice] ─> [initialized latch] ─> [init( ─> [s ---openflow-to-lom]
+[node.script] out0 ──────────────────────-> [s ---openflow-to-lom]
 
-[r ---bsv-to-lom] ─> [route status device_state_get device_state_set]
+[r ---openflow-to-lom] ─> [route status device_state_get device_state_set]
                        ├─ status ──────> [sel -1 0 1] ─┬─ set "Waiting for Live"
                        │                               ├─ set "No connections"
                        │                               ├─ set "1 connection"
                        │                               └─ [sprintf set %ld connections(
-                       ├─ state get/set > [pattr bsv-state]         └─> status text
+                       ├─ state get/set > [pattr openflow-state]    └─> status text
                        └─ rest ────────> [deferlow] ─> [v8 lom.js]
-[pattr bsv-state] ─> [prepend device_state] ─> [s ---bsv-to-node]
-[v8 lom.js] ─> [route boot] ─┬─ rest ──────────────> [s ---bsv-to-node]
+[pattr openflow-state] ─> [prepend device_state] ─> [s ---openflow-to-node]
+[v8 lom.js] ─> [route boot] ─┬─ rest ──────────────> [s ---openflow-to-node]
                              └─ boot + initialized ─> [init(
 
-[r ---bsv-to-node] ─> [node.script] in0
+[r ---openflow-to-node] ─> [node.script] in0
 
 [live.text] ─> [; max launchbrowser …(                   two of these: app, GitHub
 
@@ -171,7 +171,7 @@ Notes that matter if you edit this:
   wrong, where a symbol with a space in it does. `select` gets the two counts that don't
   pluralize and `sprintf` gets the rest; note `sel -1 0 1` has **one** inlet, because
   `select` only grows a second one when it has a single argument to set through it.
-- **`pattr bsv-state` is a Blob parameter registered in the patcher's `parameters`
+- **`pattr openflow-state` is a Blob parameter registered in the patcher's `parameters`
   map.** Both pieces are required for Live to store the base64url-encoded JSON in the
   `.als`. It is marked Stored Only so it cannot be automated.
 - **`plugin~` and `plugout~` are both 2-in/2-out `signal`**, copied verbatim from

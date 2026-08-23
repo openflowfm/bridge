@@ -154,7 +154,7 @@ one answered but not held proves nothing about what we know now.
    narrow, not wide: every publish still happens inside one Max message, and `busy()`
    refuses to start anything while a read or a write is running. But between one side
    writing a dict and the other side's `getDict` landing, a second request can overwrite
-   it. Per-request names (`bsv_ops_<reqId>`) retire the whole class.
+   it. Per-request names (`openflow_ops_<reqId>`) retire the whole class.
 
    **The snapshot no longer reads synchronously**, which narrows nothing and widens
    nothing here — it spans many Max messages now, but it publishes in exactly one, and
@@ -190,7 +190,7 @@ one answered but not held proves nothing about what we know now.
    patched by every signal that can change the set and dropped the moment one of them
    can't be applied. Age was never the right question; provenance is.
 
-   Related and narrower: **`bsv_delta` is a fixed dict name like the rest**, and a delta
+   Related and narrower: **`openflow_delta` is a fixed dict name like the rest**, and a delta
    is pushed rather than requested, so two flushes 100ms apart could in principle have
    the second overwrite the dict before `bridge.ts`'s `await Max.getDict` lands. The
    failure is a garbled delta rather than a wrong grid — `prevRev` won't line up and the

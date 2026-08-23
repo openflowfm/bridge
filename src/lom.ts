@@ -9,7 +9,7 @@
 //
 // NO IMPORTS ARE POSSIBLE HERE. Compiled with `module: "none"` so that message
 // handlers stay top-level globals where Max can find them. Protocol types come
-// from the global BSV namespace (see protocol/global.d.ts).
+// from the global OpenFlow namespace (see protocol/global.d.ts).
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      add_scenes <reqId> <dictName>
@@ -43,16 +43,16 @@ autowatch = 1;
 inlets = 1;
 outlets = 1;
 
-const SNAPSHOT_DICT = 'bsv_snapshot';
-const RESULT_DICT = 'bsv_result';
-const PALETTE_DICT = 'bsv_palette';
-const SET_DICT = 'bsv_set';
+const SNAPSHOT_DICT = 'openflow_snapshot';
+const RESULT_DICT = 'openflow_result';
+const PALETTE_DICT = 'openflow_palette';
+const SET_DICT = 'openflow_set';
 /** Partial re-reads pushed when the user changes something in Live. */
-const DELTA_DICT = 'bsv_delta';
+const DELTA_DICT = 'openflow_delta';
 /** node → lom. The only dict we don't create by publishing to it — see ensureDicts. */
-const OPS_DICT = 'bsv_ops';
+const OPS_DICT = 'openflow_ops';
 /** A clip's notes, read on request so a client can work out the harmony. */
-const NOTES_DICT = 'bsv_notes';
+const NOTES_DICT = 'openflow_notes';
 
 /** LOM ops per scheduler tick — keeps Live's UI responsive. */
 const CHUNK = 50;
@@ -107,13 +107,13 @@ const DIAG_SCROLL_INTERVAL_MS = 50;
 
 interface ApplyJob {
   reqId: number;
-  ops: BSV.ApplyOp[];
+  ops: OpenFlow.ApplyOp[];
   /**
    * Scene writes, run after the clip writes in the same chunked job. One job
    * rather than two keeps `applied + skipped` a count of the whole batch, so a
    * write that tags scenes and recolors their clips reports one honest total.
    */
-  sceneOps: BSV.SceneOp[];
+  sceneOps: OpenFlow.SceneOp[];
   /** Position across `ops` then `sceneOps`, i.e. `0 .. ops.length + sceneOps.length`. */
   i: number;
   ok: number;
@@ -155,7 +155,7 @@ var metersWatching = false;
 /** Send parameters are the expensive optional section of the mixer watch. */
 var sendsWatching = false;
 /** Latest coherent control state; observer callbacks update this cache in place. */
-var mixerState: BSV.MixerState | null = null;
+var mixerState: OpenFlow.MixerState | null = null;
 var mixerDirty = false;
 var lastMixerKey = '';
 var job: ApplyJob | null = null;
@@ -331,7 +331,7 @@ function setName(a: LiveAPI, value: unknown): void {
     // punctuation reads as very nearly right and gets written 848 times.
     a.set('name', s);
     post(
-      'bsv setName: neither form round-trips. Sent "' + s + '", plain read back "' +
+      'openflow setName: neither form round-trips. Sent "' + s + '", plain read back "' +
         back + '", quoted read back "' + backQuoted + '". Staying plain.\n',
     );
   }
@@ -352,7 +352,7 @@ function describe(e: unknown): string {
 
 function fail(reqId: number | undefined, e: unknown): void {
   const m = describe(e).replace(/[",;]/g, ' ');
-  post('bsv lom error: ' + m + '\n');
+  post('openflow lom error: ' + m + '\n');
   outlet(0, 'err', reqId === undefined ? -1 : reqId, '"' + m + '"');
 }
 
@@ -373,7 +373,7 @@ function publish(dictName: string, payload: unknown): void {
  * arrives in the UI as the uninformative "apply: Error".
  *
  * The three lom → node dicts create themselves: `publish()` calls
- * `new Dict(name)` before anything reads them. `bsv_ops` travels the other way,
+ * `new Dict(name)` before anything reads them. `openflow_ops` travels the other way,
  * so nothing ever created it, and staging an op batch could never work. Creating
  * it here is the fix.
  *
@@ -397,7 +397,7 @@ function ensureDicts(): void {
     try {
       heldDicts.push(new Dict(names[i]));
     } catch (e) {
-      post('bsv: could not create dict ' + names[i] + ' — ' + describe(e) + '\n');
+      post('openflow: could not create dict ' + names[i] + ' — ' + describe(e) + '\n');
     }
   }
 }
@@ -465,7 +465,7 @@ const NOTE_COUNT_MAX = 4096;
  * chart; that is the visible-and-harmless failure the rule asks for, as against
  * a chart of chords nobody is playing.
  */
-function notesIn(path: string): { notes: BSV.ClipNote[]; problem?: string } {
+function notesIn(path: string): { notes: OpenFlow.ClipNote[]; problem?: string } {
   const clip = at(path);
   if (!exists(clip)) return { notes: [], problem: 'no clip at ' + path };
   // An audio clip has no notes and answering the call on one is an error, not
@@ -495,18 +495,18 @@ function notesIn(path: string): { notes: BSV.ClipNote[]; problem?: string } {
       const name = words.length > 0 ? words[words.length - 1]! : '';
       if (name === '') {
         const shape = typeof answer + ' ' + text.substring(0, 120);
-        post('bsv notes: no payload and no dict name — ' + shape + '\n');
+        post('openflow notes: no payload and no dict name — ' + shape + '\n');
         return { notes: [], problem: 'unreadable answer: ' + shape };
       }
       raw = new Dict(name).stringify();
       if (raw === '{}' || raw === '') {
         const shape = 'answer=' + text.substring(0, 80) + ' name=' + name;
-        post('bsv notes: empty dict — ' + shape + '\n');
+        post('openflow notes: empty dict — ' + shape + '\n');
         return { notes: [], problem: 'empty dict: ' + shape };
       }
     }
   } catch (e) {
-    post('bsv notes: could not read ' + path + ': ' + describe(e) + '\n');
+    post('openflow notes: could not read ' + path + ': ' + describe(e) + '\n');
     return { notes: [], problem: describe(e) };
   }
 
@@ -514,18 +514,18 @@ function notesIn(path: string): { notes: BSV.ClipNote[]; problem?: string } {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    post('bsv notes: could not parse notes as JSON: ' + String(raw).substring(0, 200) + '\n');
+    post('openflow notes: could not parse notes as JSON: ' + String(raw).substring(0, 200) + '\n');
     return { notes: [], problem: 'unparseable: ' + String(raw).substring(0, 120) };
   }
 
   const list = parsed && parsed.notes ? parsed.notes : null;
   if (!list || typeof (list as { length?: number }).length !== 'number') {
-    post('bsv notes: no note list in ' + String(raw).substring(0, 200) + '\n');
+    post('openflow notes: no note list in ' + String(raw).substring(0, 200) + '\n');
     return { notes: [], problem: 'no note list: ' + String(raw).substring(0, 120) };
   }
 
   const rows = list as Array<Record<string, unknown>>;
-  const out: BSV.ClipNote[] = [];
+  const out: OpenFlow.ClipNote[] = [];
   for (let i = 0; i < rows.length && out.length < NOTE_COUNT_MAX; i++) {
     const note = rows[i];
     if (!note) continue;
@@ -552,7 +552,7 @@ function clip_notes(reqId: number, ...pairs: number[]): void {
   if (!deviceReady) return fail(reqId, 'device not ready');
   const t0 = Date.now();
   try {
-    const clips: BSV.ClipNotes[] = [];
+    const clips: OpenFlow.ClipNotes[] = [];
     const instruments: { [t: number]: string } = {};
     for (let i = 0; i + 1 < pairs.length; i += 2) {
       const t = Number(pairs[i]);
@@ -562,7 +562,7 @@ function clip_notes(reqId: number, ...pairs: number[]): void {
       // scene's worth of the same few tracks.
       if (instruments[t] === undefined) instruments[t] = instrumentOf(t);
       const read = notesIn('live_set tracks ' + t + ' clip_slots ' + s + ' clip');
-      const row: BSV.ClipNotes = {
+      const row: OpenFlow.ClipNotes = {
         t: t,
         s: s,
         instrument: instruments[t],
@@ -635,12 +635,12 @@ interface SnapshotJob {
   trackCount: number;
   sceneCount: number;
   masterColor: number | null;
-  tracks: BSV.Track[];
+  tracks: OpenFlow.Track[];
   indexOfId: { [id: string]: number };
   parentIds: number[];
-  scenes: BSV.Scene[];
+  scenes: OpenFlow.Scene[];
   occupied: Array<[number, number]>;
-  clips: BSV.Clip[];
+  clips: OpenFlow.Clip[];
   slotsScanned: number;
   slotTrackCount: number;
   slotTracksDone: number;
@@ -907,7 +907,7 @@ function restartSnapshot(j: SnapshotJob): void {
     // again — and holding the old number would show a walk sitting at 60% while
     // it re-reads the tracks.
     snapJob = next;
-    post('bsv snapshot restarted: the set changed mid-walk (' + next.restarts + ')\n');
+    post('openflow snapshot restarted: the set changed mid-walk (' + next.restarts + ')\n');
   } catch (e) {
     snapshotTask.cancel();
     snapJob = null;
@@ -922,7 +922,7 @@ function finishSnapshot(j: SnapshotJob): void {
   seedDigests(j.trackCount, j.clips, j.scenes, j.tracks, j.masterColor);
 
   const work = j.work.tracks + j.work.scenes + j.work.slots + j.work.clips;
-  const payload: BSV.Snapshot = {
+  const payload: OpenFlow.Snapshot = {
     // Shares the sequence with deltas, so a client can tell a delta that
     // follows what it holds from one that skipped a step.
     rev: nextRev(),
@@ -1015,13 +1015,13 @@ function apply(reqId: number, dictName: string): void {
       );
     }
 
-    const ops = asList<BSV.ApplyOp>(parsed.ops);
-    const sceneOps = asList<BSV.SceneOp>(parsed.sceneOps);
+    const ops = asList<OpenFlow.ApplyOp>(parsed.ops);
+    const sceneOps = asList<OpenFlow.SceneOp>(parsed.sceneOps);
     const total = ops.length + sceneOps.length;
 
     if (!total) {
       post(
-        'bsv apply: no ops found in ' + dictName + ' — dict contained: ' +
+        'openflow apply: no ops found in ' + dictName + ' — dict contained: ' +
           String(raw).substring(0, 300) + '\n',
       );
     }
@@ -1042,7 +1042,7 @@ function apply(reqId: number, dictName: string): void {
   }
 }
 
-function execOp(op: BSV.ApplyOp): void {
+function execOp(op: OpenFlow.ApplyOp): void {
   const j = job!;
   const c = at('live_set tracks ' + op.t + ' clip_slots ' + op.s + ' clip');
   if (!exists(c)) {
@@ -1069,7 +1069,7 @@ function execOp(op: BSV.ApplyOp): void {
  * `colorIndex` rides along on the op for the UI's and undo's benefit and is
  * deliberately not written here.
  */
-function execSceneOp(op: BSV.SceneOp): void {
+function execSceneOp(op: OpenFlow.SceneOp): void {
   const j = job!;
   const a = at('live_set scenes ' + op.s);
   if (!exists(a)) {
@@ -1125,7 +1125,7 @@ function add_scenes(reqId: number, dictName: string): void {
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
-    let parsed: { addition?: BSV.SceneAddition };
+    let parsed: { addition?: OpenFlow.SceneAddition };
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
@@ -1165,7 +1165,7 @@ function add_scenes(reqId: number, dictName: string): void {
       at('live_set').call('begin_undo_step');
       undoStep = true;
     } catch (e) {
-      post('bsv add_scenes: begin_undo_step unavailable — ' + describe(e) + '\n');
+      post('openflow add_scenes: begin_undo_step unavailable — ' + describe(e) + '\n');
     }
 
     let created = 0;
@@ -1182,7 +1182,7 @@ function add_scenes(reqId: number, dictName: string): void {
           created++;
         } catch (e) {
           failed += count - i;
-          post('bsv add_scenes: create at ' + s + ' failed — ' + describe(e) + '\n');
+          post('openflow add_scenes: create at ' + s + ' failed — ' + describe(e) + '\n');
           break;
         }
 
@@ -1195,7 +1195,7 @@ function add_scenes(reqId: number, dictName: string): void {
           configured++;
         } catch (e) {
           failed++;
-          post('bsv add_scenes: configure scene ' + s + ' failed — ' + describe(e) + '\n');
+          post('openflow add_scenes: configure scene ' + s + ' failed — ' + describe(e) + '\n');
         }
       }
     } finally {
@@ -1204,7 +1204,7 @@ function add_scenes(reqId: number, dictName: string): void {
           at('live_set').call('end_undo_step');
         } catch (e) {
           undoStep = false;
-          post('bsv add_scenes: end_undo_step failed — ' + describe(e) + '\n');
+          post('openflow add_scenes: end_undo_step failed — ' + describe(e) + '\n');
         }
       }
       // Live may deliver the scenes observer callbacks just after create_scene
@@ -1214,7 +1214,7 @@ function add_scenes(reqId: number, dictName: string): void {
       structureSettleTask.schedule(100);
     }
 
-    const result: BSV.ScenesAddedResult = {
+    const result: OpenFlow.ScenesAddedResult = {
       created: created,
       configured: configured,
       failed: failed,
@@ -1262,7 +1262,7 @@ function applyStep(): void {
 function finishJob(): void {
   const j = job!;
   const ms = Date.now() - j.t0;
-  const result: BSV.ApplyResult = {
+  const result: OpenFlow.ApplyResult = {
     applied: j.ok,
     skipped: j.skipped,
     // The whole batch, both kinds. A total that counted only clips would make a
@@ -1317,7 +1317,7 @@ applyTask.interval = 2;
 
 interface MoveJob {
   reqId: number;
-  plan: BSV.MovePlan;
+  plan: OpenFlow.MovePlan;
   /** Position across create → steps → remove, as one flat index. */
   i: number;
   created: number;
@@ -1416,7 +1416,7 @@ function move(reqId: number, dictName: string): void {
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
-    let parsed: { plan?: BSV.MovePlan };
+    let parsed: { plan?: OpenFlow.MovePlan };
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
@@ -1427,7 +1427,7 @@ function move(reqId: number, dictName: string): void {
 
     const plan = parsed.plan;
     const create = plan ? asList<number>(plan.create) : [];
-    const steps = plan ? asList<BSV.MoveStep>(plan.steps) : [];
+    const steps = plan ? asList<OpenFlow.MoveStep>(plan.steps) : [];
     const remove = plan ? asList<number>(plan.remove) : [];
 
     // A plan that would delete more than it creates is malformed, and the
@@ -1450,7 +1450,7 @@ function move(reqId: number, dictName: string): void {
       song.call('begin_undo_step');
       undoStep = true;
     } catch (e) {
-      post('bsv move: begin_undo_step unavailable — ' + describe(e) + '\n');
+      post('openflow move: begin_undo_step unavailable — ' + describe(e) + '\n');
     }
 
     // A reorder is a build-then-delete pass, so it trips the scenes observer
@@ -1533,7 +1533,7 @@ function moveStep(): void {
           } catch (e) {
             j.failed++;
             post(
-              'bsv move: clip ' + tracks[k] + '/' + step.from + ' → ' + step.to +
+              'openflow move: clip ' + tracks[k] + '/' + step.from + ' → ' + step.to +
                 ' failed: ' + describe(e) + '\n',
             );
           }
@@ -1550,7 +1550,7 @@ function moveStep(): void {
       }
     } catch (e) {
       j.failed++;
-      post('bsv move: step ' + j.i + ' failed: ' + describe(e) + '\n');
+      post('openflow move: step ' + j.i + ' failed: ' + describe(e) + '\n');
     }
   }
 
@@ -1571,7 +1571,7 @@ function finishMove(): void {
     try {
       at('live_set').call('end_undo_step');
     } catch (e) {
-      post('bsv move: end_undo_step failed — ' + describe(e) + '\n');
+      post('openflow move: end_undo_step failed — ' + describe(e) + '\n');
     }
   }
 
@@ -1593,7 +1593,7 @@ function finishMove(): void {
 
   if (result.failed) {
     post(
-      'bsv move: ' + result.failed + ' operation(s) failed — the originals were NOT ' +
+      'openflow move: ' + result.failed + ' operation(s) failed — the originals were NOT ' +
         'deleted. The set now holds both copies.\n',
     );
   }
@@ -1618,7 +1618,7 @@ moveTask.interval = 2;
 
 interface ClipMoveJob {
   reqId: number;
-  steps: BSV.ClipMoveStep[];
+  steps: OpenFlow.ClipMoveStep[];
   remove: Array<{ t: number; s: number }>;
   /** Position across steps → remove, as one flat index. */
   i: number;
@@ -1638,7 +1638,7 @@ function move_clips(reqId: number, dictName: string): void {
   try {
     const d = new Dict(dictName);
     const raw = d.stringify();
-    let parsed: { clipPlan?: BSV.ClipMovePlan };
+    let parsed: { clipPlan?: OpenFlow.ClipMovePlan };
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
@@ -1648,7 +1648,7 @@ function move_clips(reqId: number, dictName: string): void {
     }
 
     const plan = parsed.clipPlan;
-    const steps = plan ? asList<BSV.ClipMoveStep>(plan.steps) : [];
+    const steps = plan ? asList<OpenFlow.ClipMoveStep>(plan.steps) : [];
     const remove = plan ? asList<{ t: number; s: number }>(plan.remove) : [];
     if (!steps.length) return fail(reqId, 'move_clips: empty plan');
     // More deletions than copies can only mean clearing slots nothing was moved
@@ -1668,7 +1668,7 @@ function move_clips(reqId: number, dictName: string): void {
       song.call('begin_undo_step');
       undoStep = true;
     } catch (e) {
-      post('bsv move_clips: begin_undo_step unavailable — ' + describe(e) + '\n');
+      post('openflow move_clips: begin_undo_step unavailable — ' + describe(e) + '\n');
     }
 
     clipJob = {
@@ -1716,7 +1716,7 @@ function clipMoveStep(): void {
       } catch (e) {
         j.failed++;
         post(
-          'bsv move_clips: ' + step.fromT + '/' + step.fromS + ' → ' + step.toT + '/' +
+          'openflow move_clips: ' + step.fromT + '/' + step.fromS + ' → ' + step.toT + '/' +
             step.toS + ' failed: ' + describe(e) + '\n',
         );
       }
@@ -1738,7 +1738,7 @@ function clipMoveStep(): void {
         } catch (e) {
           j.failed++;
           post(
-            'bsv move_clips: clearing ' + gone.t + '/' + gone.s + ' failed: ' +
+            'openflow move_clips: clearing ' + gone.t + '/' + gone.s + ' failed: ' +
               describe(e) + '\n',
           );
         }
@@ -1761,7 +1761,7 @@ function finishClipMove(): void {
     try {
       at('live_set').call('end_undo_step');
     } catch (e) {
-      post('bsv move_clips: end_undo_step failed — ' + describe(e) + '\n');
+      post('openflow move_clips: end_undo_step failed — ' + describe(e) + '\n');
     }
   }
   const ms = Date.now() - j.t0;
@@ -1777,7 +1777,7 @@ function finishClipMove(): void {
 
   if (result.failed) {
     post(
-      'bsv move_clips: ' + result.failed + ' operation(s) failed — nothing was ' +
+      'openflow move_clips: ' + result.failed + ' operation(s) failed — nothing was ' +
         'deleted. The originals are all still where they were.\n',
     );
   }
@@ -1901,7 +1901,7 @@ function palette(reqId: number): void {
     if (colors.length < 2 || distinct < 2) {
       cl.set('color_index', 0);
       post(
-        'bsv palette: sweep produced ' + colors.length + ' entr(ies), ' + distinct +
+        'openflow palette: sweep produced ' + colors.length + ' entr(ies), ' + distinct +
           ' distinct — refusing to cache it.\n' +
           '  stopped at index ' + stoppedAt + ': ' + stopReason + '\n' +
           '  scratch clip id ' + cl.id + ' on track ' + scratchTrack + '\n' +
@@ -1917,10 +1917,10 @@ function palette(reqId: number): void {
     }
 
     post(
-      'bsv palette: ' + colors.length + ' colors, ' + distinct + ' distinct (' +
+      'openflow palette: ' + colors.length + ' colors, ' + distinct + ' distinct (' +
         stopReason + ')\n',
     );
-    const p: BSV.Palette = { count: colors.length, colors: colors };
+    const p: OpenFlow.Palette = { count: colors.length, colors: colors };
     publish(PALETTE_DICT, p);
     outlet(0, 'palette_done', reqId, PALETTE_DICT);
   } catch (e) {
@@ -1931,7 +1931,7 @@ function palette(reqId: number): void {
         set.call('delete_track', scratchTrack);
       } catch (e) {
         post(
-          'bsv: FAILED to remove scratch track at index ' + scratchTrack +
+          'openflow: FAILED to remove scratch track at index ' + scratchTrack +
             ' — delete it by hand (it is the last track, named after Live default)\n',
         );
       }
@@ -2099,7 +2099,7 @@ function select_track(index: number): void {
 /** More devices than this in one run is a bad answer, not a big set. */
 const DEVICE_COUNT_MAX = 64;
 
-function readChainDevice(path: string): BSV.ChainDevice | null {
+function readChainDevice(path: string): OpenFlow.ChainDevice | null {
   const device = at(path);
   if (!exists(device)) return null;
 
@@ -2125,19 +2125,19 @@ function readChainDevice(path: string): BSV.ChainDevice | null {
  * expose the same `devices` child list, which is why a chain reads exactly like
  * a track does.
  */
-function readDeviceRun(path: string): BSV.ChainDevice[] {
+function readDeviceRun(path: string): OpenFlow.ChainDevice[] {
   let count = 0;
   try {
     count = at(path).getcount('devices');
   } catch (e) {
-    post('bsv devices: devices unavailable at ' + path + ': ' + describe(e) + '\n');
+    post('openflow devices: devices unavailable at ' + path + ': ' + describe(e) + '\n');
     return [];
   }
   const limit = Math.min(count, DEVICE_COUNT_MAX);
   if (count > limit) {
-    post('bsv devices: ' + count + ' devices at ' + path + ', reading ' + limit + '\n');
+    post('openflow devices: ' + count + ' devices at ' + path + ', reading ' + limit + '\n');
   }
-  const devices: BSV.ChainDevice[] = [];
+  const devices: OpenFlow.ChainDevice[] = [];
   for (let i = 0; i < limit; i++) {
     const device = readChainDevice(path + ' devices ' + i);
     if (device) devices.push(device);
@@ -2195,7 +2195,7 @@ const PARAM_ITEMS_MAX = 64;
 /** Coalesce a drag into one message a frame rather than one per callback. */
 const PARAM_DEBOUNCE_MS = 30;
 
-var chainWatches: BSV.ChainWatch[] = [];
+var chainWatches: OpenFlow.ChainWatch[] = [];
 var chainObservers: LiveAPI[] = [];
 var chainWatching = false;
 var lastChainKey = '';
@@ -2258,7 +2258,7 @@ function resolveRunPath(t: number, steps: readonly number[]): string | null {
   return path;
 }
 
-function chainRunPath(w: BSV.ChainWatch): string | null {
+function chainRunPath(w: OpenFlow.ChainWatch): string | null {
   return resolveRunPath(w.t, w.path || []);
 }
 
@@ -2293,8 +2293,8 @@ function chainRunPath(w: BSV.ChainWatch): string | null {
  * touched, so a device that folds shut drops its descriptor with everything
  * else it was costing.
  */
-var paramShapes: { [key: string]: BSV.DeviceParameterState[] } = {};
-var paramShapesUsed: { [key: string]: BSV.DeviceParameterState[] } = {};
+var paramShapes: { [key: string]: OpenFlow.DeviceParameterState[] } = {};
+var paramShapesUsed: { [key: string]: OpenFlow.DeviceParameterState[] } = {};
 
 /**
  * Every control on one device.
@@ -2309,17 +2309,17 @@ var paramShapesUsed: { [key: string]: BSV.DeviceParameterState[] } = {};
 function readDeviceParameters(
   devicePath: string,
   cacheable: boolean,
-): BSV.DeviceParameterState[] {
+): OpenFlow.DeviceParameterState[] {
   let count = 0;
   try {
     count = at(devicePath).getcount('parameters');
   } catch (e) {
-    post('bsv params: unavailable at ' + devicePath + ': ' + describe(e) + '\n');
+    post('openflow params: unavailable at ' + devicePath + ': ' + describe(e) + '\n');
     return [];
   }
   const limit = Math.min(count, PARAM_COUNT_MAX);
   if (count > limit) {
-    post('bsv params: ' + count + ' at ' + devicePath + ', reading ' + limit + '\n');
+    post('openflow params: ' + count + ' at ' + devicePath + ', reading ' + limit + '\n');
   }
 
   let key = '';
@@ -2343,8 +2343,8 @@ function readDeviceParameters(
 function readParameterShapes(
   devicePath: string,
   limit: number,
-): BSV.DeviceParameterState[] {
-  const parameters: BSV.DeviceParameterState[] = [];
+): OpenFlow.DeviceParameterState[] {
+  const parameters: OpenFlow.DeviceParameterState[] = [];
   for (let i = 0; i < limit; i++) {
     const parameter = at(devicePath + ' parameters ' + i);
     if (!exists(parameter)) {
@@ -2365,7 +2365,7 @@ function readParameterShapes(
     const max = gnum(parameter, 'max');
     const quantized = gbool(parameter, 'is_quantized');
     const state = gnumOr(parameter, 'state', 0);
-    const entry: BSV.DeviceParameterState = {
+    const entry: OpenFlow.DeviceParameterState = {
       name: name,
       value: value,
       min: min,
@@ -2402,7 +2402,7 @@ function readParameterShapes(
  */
 function refreshParameterValues(
   devicePath: string,
-  parameters: BSV.DeviceParameterState[],
+  parameters: OpenFlow.DeviceParameterState[],
 ): void {
   for (let i = 0; i < parameters.length; i++) {
     const parameter = at(devicePath + ' parameters ' + i);
@@ -2454,7 +2454,7 @@ function parameterItems(parameter: LiveAPI, min: number, max: number): string[] 
  * watched is then exactly what is on screen, which is the property the whole
  * scheme is for.
  */
-function readWatchedRun(path: string, open: readonly number[]): BSV.ChainDevice[] {
+function readWatchedRun(path: string, open: readonly number[]): OpenFlow.ChainDevice[] {
   const devices = readDeviceRun(path);
   for (let i = 0; i < devices.length; i++) {
     const device = devices[i];
@@ -2480,15 +2480,15 @@ function readWatchedRun(path: string, open: readonly number[]): BSV.ChainDevice[
  * chain is genuinely bare". A client that drew the empty case for the first
  * would show every unopened rack as containing nothing.
  */
-function readChainNames(path: string): BSV.RackChain[] {
+function readChainNames(path: string): OpenFlow.RackChain[] {
   let count = 0;
   try {
     count = at(path).getcount('chains');
   } catch (e) {
-    post('bsv chains: unavailable at ' + path + ': ' + describe(e) + '\n');
+    post('openflow chains: unavailable at ' + path + ': ' + describe(e) + '\n');
     return [];
   }
-  const chains: BSV.RackChain[] = [];
+  const chains: OpenFlow.RackChain[] = [];
   for (let i = 0; i < count; i++) {
     const chain = at(path + ' chains ' + i);
     if (!exists(chain)) continue;
@@ -2511,7 +2511,7 @@ function sendChainState(): void {
   // `paramShapes`. A device that folds shut, or a run that stops being watched,
   // drops its cached controls along with everything else it was costing.
   paramShapesUsed = {};
-  const chains: BSV.WatchedChain[] = [];
+  const chains: OpenFlow.WatchedChain[] = [];
   for (let i = 0; i < chainWatches.length; i++) {
     const w = chainWatches[i];
     const path = chainRunPath(w);
@@ -2522,7 +2522,7 @@ function sendChainState(): void {
     });
   }
   paramShapes = paramShapesUsed;
-  const state: BSV.ChainState = { chains: chains };
+  const state: OpenFlow.ChainState = { chains: chains };
   const key = JSON.stringify(state);
   if (key === lastChainKey) return;
   lastChainKey = key;
@@ -2589,7 +2589,7 @@ function attachChainObservers(path: string): void {
  * instead, so a control greys out on the next chain change rather than
  * instantly. `automation_state` is the same trade.
  */
-function attachParamObservers(w: BSV.ChainWatch, runPath: string): void {
+function attachParamObservers(w: OpenFlow.ChainWatch, runPath: string): void {
   const open = w.open || [];
   for (let k = 0; k < open.length; k++) {
     const i = open[k];
@@ -2651,13 +2651,13 @@ function onParamChange(
   paramTask.schedule(PARAM_DEBOUNCE_MS);
 }
 
-var paramDirty: { [key: string]: BSV.ChainValueChange } = {};
+var paramDirty: { [key: string]: OpenFlow.ChainValueChange } = {};
 var paramPending = false;
 
 var paramTask = new Task(function () {
   paramPending = false;
   const keys = Object.keys(paramDirty);
-  const changes: BSV.ChainValueChange[] = [];
+  const changes: OpenFlow.ChainValueChange[] = [];
   for (let k = 0; k < keys.length; k++) {
     const change = paramDirty[keys[k]];
     const parameter = at(
@@ -2771,7 +2771,7 @@ function rebuildChainObservers(): void {
 
   if (chainObservers.length >= CHAIN_OBSERVER_MAX) {
     post(
-      'bsv chains: hit the ' + CHAIN_OBSERVER_MAX + '-observer cap; ' +
+      'openflow chains: hit the ' + CHAIN_OBSERVER_MAX + '-observer cap; ' +
         'some controls will not follow Live\n',
     );
   }
@@ -2807,7 +2807,7 @@ function clearChainObservers(): void {
  */
 function watch_chains(encoded: unknown): void {
   const decoded = decodeMaxAtom(encoded);
-  const list = Array.isArray(decoded) ? (decoded as BSV.ChainWatch[]) : [];
+  const list = Array.isArray(decoded) ? (decoded as OpenFlow.ChainWatch[]) : [];
   chainWatches = list;
   chainWatching = list.length > 0;
   lastChainKey = '';
@@ -2840,7 +2840,7 @@ function watch_chains(encoded: unknown): void {
 // No undo step, following `set_mixer`. Turning a knob is not an edit anyone
 // expects on ⌘Z as its own entry, and Live keeps its own automation history.
 
-function deviceTargetPath(target: BSV.DeviceTarget): string | null {
+function deviceTargetPath(target: OpenFlow.DeviceTarget): string | null {
   const steps = target.path || [];
   for (let i = 0; i < steps.length; i++) {
     if (!isFinite(steps[i]) || Math.floor(steps[i]) !== steps[i] || steps[i] < 0) return null;
@@ -2855,7 +2855,7 @@ function set_device(encoded: unknown): void {
   if (!deviceReady) return fail(-1, 'device not ready');
   const value = decodeMaxAtom(encoded);
   if (!value || typeof value !== 'object') return fail(-1, 'malformed device write');
-  const source = value as { target?: BSV.DeviceTarget; patch?: BSV.DevicePatch };
+  const source = value as { target?: OpenFlow.DeviceTarget; patch?: OpenFlow.DevicePatch };
   const target = source.target;
   const patch = source.patch;
   const has = Object.prototype.hasOwnProperty;
@@ -2962,7 +2962,7 @@ function set_fold(t: number, folded: number): void {
 // message punctuation is syntax, so sending the raw string would eventually
 // turn one valid name into several arguments.
 
-function readTransportState(): BSV.TransportState {
+function readTransportState(): OpenFlow.TransportState {
   const set = at('live_set');
   return {
     // Two decimals are all the header renders. Rounding here also keeps tempo
@@ -3005,7 +3005,7 @@ function set_transport(encoded: unknown): void {
   if (!deviceReady) return fail(-1, 'device not ready');
   const value = decodeMaxAtom(encoded);
   if (!value || typeof value !== 'object') return fail(-1, 'malformed transport patch');
-  const patch = value as BSV.TransportPatch;
+  const patch = value as OpenFlow.TransportPatch;
   const has = Object.prototype.hasOwnProperty;
   const tempo = has.call(patch, 'tempo') ? Number(patch.tempo) : undefined;
   const quantization = has.call(patch, 'clipTriggerQuantization')
@@ -3128,7 +3128,7 @@ function clearTransportObservers(): void {
 // The report goes out as message atoms rather than a Dict, which is the
 // opposite of the rule for the snapshot, and deliberately: dict names are
 // global, so a push that can fire many times a second would race itself —
-// v8 overwriting bsv_playstate before Node had finished reading the previous
+// v8 overwriting openflow_playstate before Node had finished reading the previous
 // one. The payload is 1 + 3 × trackCount plain numbers with no punctuation in
 // it, so atoms are safe here in a way clip names never are.
 
@@ -3425,7 +3425,7 @@ function parameterDisplay(parameter: LiveAPI, value: number): string {
   }
 }
 
-function readMixerParameter(path: string): BSV.MixerParameterState | null {
+function readMixerParameter(path: string): OpenFlow.MixerParameterState | null {
   try {
     const parameter = at(path);
     if (!exists(parameter)) return null;
@@ -3447,18 +3447,18 @@ function readMixerParameter(path: string): BSV.MixerParameterState | null {
       enabled: gbool(parameter, 'is_enabled'),
     };
   } catch (e) {
-    post('bsv mixer parameter unavailable at ' + path + ': ' + describe(e) + '\n');
+    post('openflow mixer parameter unavailable at ' + path + ': ' + describe(e) + '\n');
     return null;
   }
 }
 
-function readMixerTrack(t: number, sendCount: number): BSV.MixerTrackState | null {
+function readMixerTrack(t: number, sendCount: number): OpenFlow.MixerTrackState | null {
   const path = 'live_set tracks ' + t;
   const track = at(path);
   if (!exists(track)) return null;
   const canArm = gbool(track, 'can_be_armed');
   // Read every Track property before readMixerParameter moves the shared cursor.
-  const state: BSV.MixerTrackState = {
+  const state: OpenFlow.MixerTrackState = {
     t: t,
     active: !gbool(track, 'mute'),
     solo: gbool(track, 'solo'),
@@ -3476,7 +3476,7 @@ function readMixerTrack(t: number, sendCount: number): BSV.MixerTrackState | nul
   return state;
 }
 
-function readMixerState(): BSV.MixerState {
+function readMixerState(): OpenFlow.MixerState {
   const count = at('live_set').getcount('tracks');
   // Sends are additive to the already-working strip. If an embedded runtime
   // rejects this documented child list, preserve volume/pan with zero rows.
@@ -3485,10 +3485,10 @@ function readMixerState(): BSV.MixerState {
     try {
       sendCount = at('live_set').getcount('return_tracks');
     } catch (e) {
-      post('bsv mixer sends unavailable: ' + describe(e) + '\n');
+      post('openflow mixer sends unavailable: ' + describe(e) + '\n');
     }
   }
-  const tracks: BSV.MixerTrackState[] = [];
+  const tracks: OpenFlow.MixerTrackState[] = [];
   for (let t = 0; t < count; t++) {
     const state = readMixerTrack(t, sendCount);
     if (state) tracks.push(state);
@@ -3702,7 +3702,7 @@ function startMixerStructureObserver(): void {
     structure.property = 'return_tracks';
     mixerStructureObserver = structure;
   } catch (e) {
-    post('bsv return-track observer unavailable: ' + describe(e) + '\n');
+    post('openflow return-track observer unavailable: ' + describe(e) + '\n');
   }
 }
 
@@ -3711,7 +3711,7 @@ function startMixerObservers(trackCount: number): void {
   startMixerStructureObserver();
 }
 
-function refreshMixerTarget(target: BSV.MixerTarget): void {
+function refreshMixerTarget(target: OpenFlow.MixerTarget): void {
   if (!mixerState) return;
   if (target.kind === 'master') {
     mixerState.masterVolume = readMixerParameter('live_set master_track mixer_device volume');
@@ -3727,7 +3727,7 @@ function set_mixer(encoded: unknown): void {
   if (!deviceReady) return fail(-1, 'device not ready');
   const value = decodeMaxAtom(encoded);
   if (!value || typeof value !== 'object') return fail(-1, 'malformed mixer write');
-  const source = value as { target?: BSV.MixerTarget; patch?: BSV.MixerPatch };
+  const source = value as { target?: OpenFlow.MixerTarget; patch?: OpenFlow.MixerPatch };
   const target = source.target;
   const patch = source.patch;
   const has = Object.prototype.hasOwnProperty;
@@ -3783,7 +3783,7 @@ function set_mixer(encoded: unknown): void {
       }
     }
 
-    let volumeState: BSV.MixerParameterState | null = null;
+    let volumeState: OpenFlow.MixerParameterState | null = null;
     if (volume !== undefined) {
       volumeState = readMixerParameter(base + ' mixer_device volume');
       if (!volumeState) return fail(-1, 'mixer volume did not resolve');
@@ -3792,7 +3792,7 @@ function set_mixer(encoded: unknown): void {
         return fail(-1, 'volume is outside the parameter range');
       }
     }
-    let panState: BSV.MixerParameterState | null = null;
+    let panState: OpenFlow.MixerParameterState | null = null;
     if (pan !== undefined) {
       panState = readMixerParameter(base + ' mixer_device panning');
       if (!panState) return fail(-1, 'mixer pan did not resolve');
@@ -3801,7 +3801,7 @@ function set_mixer(encoded: unknown): void {
         return fail(-1, 'pan is outside the parameter range');
       }
     }
-    let sendState: BSV.MixerParameterState | null = null;
+    let sendState: OpenFlow.MixerParameterState | null = null;
     if (send !== undefined) {
       const sendCount = at('live_set').getcount('return_tracks');
       if (send.index >= sendCount) return fail(-1, 'invalid send index');
@@ -4155,7 +4155,7 @@ function trackIndexOf(id: number): number {
  * Null when the scene doesn't resolve — deleted under us, which the structure
  * observer is already telling everyone about.
  */
-function readSceneRow(s: number): BSV.Scene | null {
+function readSceneRow(s: number): OpenFlow.Scene | null {
   const a = at('live_set scenes ' + s);
   if (!exists(a)) return null;
   return {
@@ -4178,7 +4178,7 @@ function readSceneRow(s: number): BSV.Scene | null {
  * without adding or removing a track — which is structural, drops the cache, and
  * sends every client for a full walk anyway.
  */
-function readTrackRow(t: number): BSV.Track | null {
+function readTrackRow(t: number): OpenFlow.Track | null {
   const a = at('live_set tracks ' + t);
   if (!exists(a)) return null;
   const isGroup = gbool(a, 'is_foldable');
@@ -4213,7 +4213,7 @@ function readMasterColor(): number | null {
     const color = gnumOr(master, 'color', -1);
     return color >= 0 ? color : null;
   } catch (e) {
-    post('bsv master color unavailable: ' + describe(e) + '\n');
+    post('openflow master color unavailable: ' + describe(e) + '\n');
     return null;
   }
 }
@@ -4227,7 +4227,7 @@ function readMasterColor(): number | null {
  * against a real set. Path addressing is the form this project has actually
  * watched work.
  */
-function readTrackClips(t: number, sceneCount: number, out: BSV.Clip[]): void {
+function readTrackClips(t: number, sceneCount: number, out: OpenFlow.Clip[]): void {
   for (let s = 0; s < sceneCount; s++) {
     const slotPath = 'live_set tracks ' + t + ' clip_slots ' + s;
     const slot = at(slotPath);
@@ -4378,7 +4378,7 @@ function rebuildCursorObservers(): void {
     // Never fatal to the flush: the delta this was called alongside is still
     // worth publishing, and losing the cursor observers only costs coverage
     // until the next flush rebuilds them.
-    post('bsv cursor observers: ' + describe(e) + '\n');
+    post('openflow cursor observers: ' + describe(e) + '\n');
   }
 }
 
@@ -4431,25 +4431,25 @@ function sceneIndexOf(id: number): number {
 var digests: { [k: string]: string } = {};
 
 /** Everything about a clip a delta can carry and a client can see change. */
-function clipDigest(c: BSV.Clip): string {
+function clipDigest(c: OpenFlow.Clip): string {
   return c.s + '|' + c.name + '|' + c.colorIndex + '|' + c.length;
 }
 
 /** The same for a scene row, and for a track row. */
-function sceneDigest(s: BSV.Scene): string {
+function sceneDigest(s: OpenFlow.Scene): string {
   return s.name + '|' + s.colorIndex + '|' + s.color + '|' + s.tempo + '|' + s.isEmpty;
 }
 
-function trackRowDigest(t: BSV.Track): string {
+function trackRowDigest(t: OpenFlow.Track): string {
   return t.name + '|' + t.colorIndex + '|' + t.color + '|' + t.isFolded;
 }
 
 /** Seeded from a full walk, which has already read all four sources. One pass each. */
 function seedDigests(
   trackCount: number,
-  clips: BSV.Clip[],
-  scenes: BSV.Scene[],
-  tracks: BSV.Track[],
+  clips: OpenFlow.Clip[],
+  scenes: OpenFlow.Scene[],
+  tracks: OpenFlow.Track[],
   masterColor: number | null,
 ): void {
   const acc: { [t: string]: string[] } = {};
@@ -4488,7 +4488,7 @@ function indexesOf(set: { [k: string]: boolean }): number[] {
  * filters rather than assuming that, because the assumption is invisible if it
  * ever stops holding and the cost is a scan of a list that is already in hand.
  */
-function digestOfTrack(t: number, clips: BSV.Clip[]): string {
+function digestOfTrack(t: number, clips: OpenFlow.Clip[]): string {
   const parts: string[] = [];
   for (let i = 0; i < clips.length; i++) {
     if (clips[i].t === t) parts.push(clipDigest(clips[i]));
@@ -4565,7 +4565,7 @@ function flushSelection(): void {
 
     const t0 = Date.now();
     const sceneCount = at('live_set').getcount('scenes');
-    const clips: BSV.Clip[] = [];
+    const clips: OpenFlow.Clip[] = [];
     const scanned: number[] = [];
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
@@ -4588,12 +4588,12 @@ function flushSelection(): void {
     // the same grounds as a vanished track: the structure observer has already
     // sent everyone for a walk, and describing a scene that isn't there would
     // outlive that walk in some client's copy.
-    const sceneRows: BSV.Scene[] = [];
+    const sceneRows: OpenFlow.Scene[] = [];
     for (let i = 0; i < dirtyScenes.length; i++) {
       const row = readSceneRow(dirtyScenes[i]);
       if (row) sceneRows.push(row);
     }
-    const trackRows: BSV.Track[] = [];
+    const trackRows: OpenFlow.Track[] = [];
     for (let i = 0; i < dirtyRows.length; i++) {
       const row = readTrackRow(dirtyRows[i]);
       if (row) trackRows.push(row);
@@ -4635,7 +4635,7 @@ function flushSelection(): void {
     }
 
     const prevRev = rev;
-    const payload: BSV.SnapshotDelta = {
+    const payload: OpenFlow.SnapshotDelta = {
       rev: nextRev(),
       prevRev: prevRev,
       clipScope: scanned,
@@ -4677,7 +4677,7 @@ function watch_selection(on: number): void {
         selObservers.push(master);
       }
     } catch (e) {
-      post('bsv master color observer unavailable: ' + describe(e) + '\n');
+      post('openflow master color observer unavailable: ' + describe(e) + '\n');
     }
 
     // Seed from where the cursor is now rather than waiting to be told. An
@@ -4830,7 +4830,7 @@ var diagSelectedSceneIndex = -1;
  */
 function diagIds(): void {
   const trackIds = gids(at('live_set'), 'tracks');
-  post('bsv diag ids: live_set tracks -> ' + trackIds.length + ' id(s)\n');
+  post('openflow diag ids: live_set tracks -> ' + trackIds.length + ' id(s)\n');
   if (!trackIds.length) return;
 
   const byId = at('id ' + trackIds[0]);
@@ -4889,7 +4889,7 @@ function diagSlot(): void {
       const clipRgb = gnumOr(clip, 'color', -1);
       const match = slotIndex >= 0 && slotIndex === clipIndex;
 
-      post('bsv diag slot: occupied slot (' + t + ',' + s + ')\n');
+      post('openflow diag slot: occupied slot (' + t + ',' + s + ')\n');
       post('  slot color_index=' + slotIndex + ' color=' + slotRgb + '\n');
       post('  clip color_index=' + clipIndex + ' color=' + clipRgb + '\n');
       post(
@@ -4919,7 +4919,7 @@ function diagSlot(): void {
       return;
     }
   }
-  post('bsv diag slot: no occupied non-group slot found\n');
+  post('openflow diag slot: no occupied non-group slot found\n');
 }
 
 /**
@@ -4973,7 +4973,7 @@ function diagSelection(label: string, dedupe: boolean): void {
   diagLastSel = key;
 
   post(
-    'bsv diag ' + label + ': track ' + tIndex + ' scene ' + sIndex +
+    'openflow diag ' + label + ': track ' + tIndex + ' scene ' + sIndex +
       ' | slot id ' + slotId + ' detail_clip id ' + detailId +
       ' | is_part_of_selection [' + inSelection.join(' ') + ']' +
       ' | resolved in ' + (Date.now() - t0) + 'ms\n',
@@ -5002,7 +5002,7 @@ function onDiagSelectionChange(): void {
 function diagWatch(on: number): void {
   clearDiagObservers();
   if (Number(on) !== 1) {
-    post('bsv diag: selection watch OFF\n');
+    post('openflow diag: selection watch OFF\n');
     return;
   }
   const t = new LiveAPI(onDiagSelectionChange, 'live_set view');
@@ -5011,7 +5011,7 @@ function diagWatch(on: number): void {
   s.property = 'selected_scene';
   diagObservers = [t, s];
   post(
-    'bsv diag: selection watch ON. Drag a clip to another slot and count the ' +
+    'openflow diag: selection watch ON. Drag a clip to another slot and count the ' +
       'lines — two (source, then target) is what the resync design needs; one ' +
       'means the source slot goes stale.\n',
   );
@@ -5047,7 +5047,7 @@ function diagScan(t: number): void {
   }
   const ms = Date.now() - t0;
   post(
-    'bsv diag scan: track ' + index + ' — ' + sceneCount + ' slots in ' + ms +
+    'openflow diag scan: track ' + index + ' — ' + sceneCount + ' slots in ' + ms +
       'ms (' + (sceneCount ? (ms / sceneCount).toFixed(3) : '0') + 'ms/slot), ' +
       occupied + ' occupied\n',
   );
@@ -5082,7 +5082,7 @@ function diagAttach(n: number): void {
   const made = diagAttached.length;
   const ms = Date.now() - t0;
   post(
-    'bsv diag attach: ' + made + ' slot observers in ' + ms + 'ms (' +
+    'openflow diag attach: ' + made + ' slot observers in ' + ms + 'ms (' +
       (made ? (ms / made).toFixed(3) : '0') + 'ms each). Live was frozen for ' +
       'that whole time. Now use Live normally and see whether IT feels ' +
       'different. `diag detach` when done.\n',
@@ -5101,7 +5101,7 @@ function diagDetach(): void {
     }
   }
   diagAttached = [];
-  post('bsv diag detach: released ' + n + ' observers in ' + (Date.now() - t0) + 'ms\n');
+  post('openflow diag detach: released ' + n + ' observers in ' + (Date.now() - t0) + 'ms\n');
 }
 
 /**
@@ -5128,7 +5128,7 @@ function diagScroll(steps: number): void {
   diagScrollDirection = signed > 0 ? 1 : 0;
   diagScrollTask.repeat();
   post(
-    'bsv diag scroll: queued ' + Math.abs(signed) + ' Session ' +
+    'openflow diag scroll: queued ' + Math.abs(signed) + ' Session ' +
       (signed > 0 ? 'down' : 'up') + ' call(s), ' + DIAG_SCROLL_INTERVAL_MS +
       'ms apart\n',
   );
@@ -5147,14 +5147,14 @@ function diagScrollStep(): void {
     if (diagScrollRemaining === 0) {
       diagScrollTask.cancel();
       post(
-        'bsv diag scroll: completed ' + Math.abs(diagScrollSigned) + ' Session ' +
+        'openflow diag scroll: completed ' + Math.abs(diagScrollSigned) + ' Session ' +
           (diagScrollSigned > 0 ? 'down' : 'up') + ' call(s)\n',
       );
     }
   } catch (e) {
     diagScrollTask.cancel();
     diagScrollRemaining = 0;
-    post('bsv diag scroll: ' + describe(e) + '\n');
+    post('openflow diag scroll: ' + describe(e) + '\n');
   }
 }
 
@@ -5178,7 +5178,7 @@ function diagSelectScene(index: number): void {
   diagSelectSceneTask.cancel();
   diagSelectSceneTask.schedule(DIAG_SCROLL_INTERVAL_MS);
   post(
-    'bsv diag selectscene: requested scene ' + sceneIndex + ' id ' + sceneId + '\n',
+    'openflow diag selectscene: requested scene ' + sceneIndex + ' id ' + sceneId + '\n',
   );
 }
 
@@ -5186,12 +5186,12 @@ var diagSelectSceneTask = new Task(function () {
   try {
     const selectedId = gid(at('live_set view'), 'selected_scene');
     post(
-      'bsv diag selectscene: scene ' + diagSelectedSceneIndex + ' requested id ' +
+      'openflow diag selectscene: scene ' + diagSelectedSceneIndex + ' requested id ' +
         diagSelectedSceneId + ', read back id ' + selectedId +
         (selectedId === diagSelectedSceneId ? ' — SELECTED' : ' — DID NOT SELECT') + '\n',
     );
   } catch (e) {
-    post('bsv diag selectscene readback: ' + describe(e) + '\n');
+    post('openflow diag selectscene readback: ' + describe(e) + '\n');
   }
 });
 
@@ -5217,18 +5217,18 @@ var diagSelectSceneTask = new Task(function () {
 function diagParam(): void {
   const dev = at('this_device');
   if (!exists(dev)) {
-    post('bsv diag param: this_device did not resolve\n');
+    post('openflow diag param: this_device did not resolve\n');
     return;
   }
   const count = dev.getcount('parameters');
-  post('bsv diag param: ' + count + ' parameter(s) on this device\n');
+  post('openflow diag param: ' + count + ' parameter(s) on this device\n');
   // Canonical paths, not `id N` — [`LOM.md`](../LOM.md) records `goto('id N')`
   // as not resolving here, and a probe that silently addresses nothing would
   // read as "Live has no labels" no matter what Live actually holds.
   for (let i = 0; i < count; i++) {
     const p = at('this_device parameters ' + i);
     if (!exists(p)) {
-      post('bsv diag param: [' + i + '] did not resolve\n');
+      post('openflow diag param: [' + i + '] did not resolve\n');
       continue;
     }
     const items = p.get('value_items');
@@ -5237,19 +5237,19 @@ function diagParam(): void {
     // wrong length, and the length is what Push indexes into.
     const list = Array.isArray(items) ? items : items === undefined ? [] : [items];
     post(
-      'bsv diag param: [' + i + '] "' + gstr(p, 'name') + '"' +
+      'openflow diag param: [' + i + '] "' + gstr(p, 'name') + '"' +
         ' quantized=' + (gbool(p, 'is_quantized') ? 1 : 0) +
         ' min=' + gnum(p, 'min') + ' max=' + gnum(p, 'max') +
         ' value=' + gnum(p, 'value') +
         ' items=' + list.length + '\n',
     );
-    if (list.length) post('bsv diag param:      ' + list.map(String).join(' | ') + '\n');
+    if (list.length) post('openflow diag param:      ' + list.map(String).join(' | ') + '\n');
   }
 }
 
 function diag(what: string, arg: number): void {
   if (!deviceReady) {
-    post('bsv diag: device not ready\n');
+    post('openflow diag: device not ready\n');
     return;
   }
   const w = String(what || '');
@@ -5266,18 +5266,18 @@ function diag(what: string, arg: number): void {
     else if (w === 'param') diagParam();
     else {
       post(
-        'bsv diag: unknown "' + w + '". Try: ids | slot | sel | watch 0|1 | ' +
+        'openflow diag: unknown "' + w + '". Try: ids | slot | sel | watch 0|1 | ' +
           'scan <track> | attach <n> | detach | scroll <signed steps> | ' +
           'selectscene <index> | param\n',
       );
     }
   } catch (e) {
-    post('bsv diag ' + w + ': ' + describe(e) + '\n');
+    post('openflow diag ' + w + ': ' + describe(e) + '\n');
   }
 }
 
 function anything(): void {
-  post('bsv lom: unhandled message "' + messagename + '"\n');
+  post('openflow lom: unhandled message "' + messagename + '"\n');
 }
 
 function notifydeleted(): void {

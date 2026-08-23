@@ -5,7 +5,7 @@
 // Serving the UI from here is deliberate: the whole app ships as one .amxd plus
 // this folder, with no packaging, signing or updater.
 //
-// Protocol types come from the global BSV namespace rather than an import, so
+// Protocol types come from the global OpenFlow namespace rather than an import, so
 // this can emit to a flat file outside its own rootDir.
 
 import Max = require('max-api');
@@ -14,23 +14,23 @@ import fs = require('node:fs');
 import os = require('node:os');
 import path = require('node:path');
 import { WebSocketServer, WebSocket } from 'ws';
-import { MIN_INTERVAL_MS, STALE_MS, shouldWalk } from '../../core/src/backstop';
-import { applyClipMove } from '../../core/src/clipMove';
-import { derive } from '../../core/src/derive';
-import { LIVE_PALETTE } from '../../core/src/livePalette';
-import { SCENE_PATTERNS } from '../../core/src/namePattern';
-import { applyOps } from '../../core/src/ops';
-import { applySceneOps } from '../../core/src/roles';
-import { buildSetModel } from '../../core/src/setModel';
+import { MIN_INTERVAL_MS, STALE_MS, shouldWalk } from '@openflow/core/backstop.ts';
+import { applyClipMove } from '@openflow/core/clipMove.ts';
+import { derive } from '@openflow/core/derive.ts';
+import { LIVE_PALETTE } from '@openflow/core/livePalette.ts';
+import { SCENE_PATTERNS } from '@openflow/core/namePattern.ts';
+import { applyOps } from '@openflow/core/ops.ts';
+import { applySceneOps } from '@openflow/core/roles.ts';
+import { buildSetModel } from '@openflow/core/setModel.ts';
 import {
   mergeChainWatches,
   sameChainWatches,
   validChainWatch,
   type ChainWatch,
-} from '../../core/src/chainWatch';
-import { canApplyDelta, mergeRows, mergeTrackDelta } from '../../core/src/snapshotDelta';
+} from '@openflow/core/chainWatch.ts';
+import { canApplyDelta, mergeRows, mergeTrackDelta } from '@openflow/core/snapshotDelta.ts';
 
-const PORT = Number(process.env.BSV_PORT) || 17800;
+const PORT = Number(process.env.OPENFLOW_PORT) || 17800;
 /**
  * Most clips one `clipNotes` may ask about.
  *
@@ -56,7 +56,7 @@ const PUBLIC = path.join(__dirname, 'public');
  * in the .als itself. This directory remains read-only migration input.
  */
 function stateDir(): string {
-  const override = process.env.BSV_STATE_DIR;
+  const override = process.env.OPENFLOW_STATE_DIR;
   if (override) return override;
   const home = os.homedir();
   return process.platform === 'win32'
@@ -136,15 +136,15 @@ function readLegacyVocabulary(): Buffer | null {
 // --- device state ----------------------------------------------------
 
 /** Keep malformed or stale state from reaching React or being written back. */
-function cleanRoles(value: unknown): BSV.Role[] {
+function cleanRoles(value: unknown): OpenFlow.Role[] {
   if (!Array.isArray(value)) return [];
   return value.filter(
-    (r): r is BSV.Role =>
+    (r): r is OpenFlow.Role =>
       !!r && typeof r === 'object' &&
-      typeof (r as BSV.Role).name === 'string' &&
-      (r as BSV.Role).name.trim() !== '' &&
-      Number.isInteger((r as BSV.Role).colorIndex) &&
-      (r as BSV.Role).colorIndex >= -1,
+      typeof (r as OpenFlow.Role).name === 'string' &&
+      (r as OpenFlow.Role).name.trim() !== '' &&
+      Number.isInteger((r as OpenFlow.Role).colorIndex) &&
+      (r as OpenFlow.Role).colorIndex >= -1,
   ).map((r) => ({ name: r.name.trim(), colorIndex: r.colorIndex }));
 }
 
@@ -160,7 +160,7 @@ function cleanDefaultArtist(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
+function normalizeDeviceState(value: unknown): OpenFlow.DeviceState | null {
   if (!value || typeof value !== 'object' || (value as { version?: unknown }).version !== 1) {
     return null;
   }
@@ -170,7 +170,7 @@ function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
     allowedColors?: unknown;
     writeSceneTempo?: unknown;
   };
-  const state: BSV.DeviceState = {
+  const state: OpenFlow.DeviceState = {
     version: 1,
     defaultArtist: cleanDefaultArtist(source.defaultArtist),
     roles: cleanRoles(source.roles),
@@ -184,11 +184,11 @@ function normalizeDeviceState(value: unknown): BSV.DeviceState | null {
   return state;
 }
 
-function encodeDeviceState(state: BSV.DeviceState): string {
+function encodeDeviceState(state: OpenFlow.DeviceState): string {
   return Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
 }
 
-function decodeDeviceState(encoded: unknown): BSV.DeviceState | null {
+function decodeDeviceState(encoded: unknown): OpenFlow.DeviceState | null {
   if (typeof encoded !== 'string' || encoded === '' || encoded === '0') return null;
   try {
     return normalizeDeviceState(
@@ -216,7 +216,7 @@ function decodeMaxAtom(value: unknown): unknown {
   }
 }
 
-let deviceState: BSV.DeviceState | null = null;
+let deviceState: OpenFlow.DeviceState | null = null;
 let deviceStateEncoded = '';
 let needsLegacyState = false;
 let setInfoKnown = false;
@@ -228,7 +228,7 @@ interface DeviceStateWaiter {
 
 const deviceStateWaiters = new Map<string, DeviceStateWaiter[]>();
 
-function publishDeviceState(next: BSV.DeviceState): Promise<void> {
+function publishDeviceState(next: OpenFlow.DeviceState): Promise<void> {
   const normalized = normalizeDeviceState(next) ?? {
     version: 1,
     defaultArtist: '',
@@ -256,7 +256,7 @@ function publishDeviceState(next: BSV.DeviceState): Promise<void> {
 /** Finish the one-time bsv.json/roles.json migration once set_info is known. */
 function migrateLegacyDeviceState(): void {
   if (!needsLegacyState || !setInfoKnown) return;
-  let roles: BSV.Role[] = [];
+  let roles: OpenFlow.Role[] = [];
   const legacy = readLegacyVocabulary();
   if (legacy) {
     try {
@@ -283,13 +283,13 @@ function migrateLegacyDeviceState(): void {
  * `ui/docs/snapshot-lifecycle.md` under *A write patches the snapshot*.
  */
 type Written =
-  | { kind: 'apply'; ops: BSV.ApplyOp[]; sceneOps: BSV.SceneOp[] }
-  | { kind: 'clips'; plan: BSV.ClipMovePlan };
+  | { kind: 'apply'; ops: OpenFlow.ApplyOp[]; sceneOps: OpenFlow.SceneOp[] }
+  | { kind: 'clips'; plan: OpenFlow.ClipMovePlan };
 
 interface Pending {
   /** Absent for a request the bridge made of itself — see `trackInternal`. */
   ws: WebSocket | undefined;
-  type: BSV.RequestType;
+  type: OpenFlow.RequestType;
   clientId?: number;
   started: number;
   written?: Written;
@@ -384,9 +384,9 @@ function describe(e: unknown): string {
  * to `public/` on disk. That's the arrangement the dev loop wants anyway — vite
  * owns the UI there. See tools/build-bridge.ts.
  */
-declare const BSV_ASSETS: Record<string, string> | undefined;
+declare const OPENFLOW_ASSETS: Record<string, string> | undefined;
 const ASSETS: Record<string, string> =
-  typeof BSV_ASSETS === 'undefined' ? {} : BSV_ASSETS;
+  typeof OPENFLOW_ASSETS === 'undefined' ? {} : OPENFLOW_ASSETS;
 
 /** Serve an inlined asset, or 404 if this build has none. */
 function serveEmbedded(rel: string, res: http.ServerResponse): void {
@@ -430,11 +430,11 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server, path: WS_PATH });
 
-function send(ws: WebSocket | undefined, event: BSV.Event): void {
+function send(ws: WebSocket | undefined, event: OpenFlow.Event): void {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(event));
 }
 
-function broadcast(event: BSV.Event): void {
+function broadcast(event: OpenFlow.Event): void {
   const s = JSON.stringify(event);
   for (const ws of wss.clients) if (ws.readyState === 1) ws.send(s);
 }
@@ -469,7 +469,7 @@ wss.on('connection', (ws: WebSocket) => {
   if (deviceState) send(ws, { type: 'deviceState', state: deviceState });
 
   ws.on('message', async (raw) => {
-    let m: BSV.Request;
+    let m: OpenFlow.Request;
     try {
       m = JSON.parse(raw.toString());
     } catch {
@@ -493,7 +493,7 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-function track(ws: WebSocket, m: BSV.Request, written?: Written): number {
+function track(ws: WebSocket, m: OpenFlow.Request, written?: Written): number {
   const reqId = nextReqId++;
   pending.set(reqId, { ws, type: m.type, clientId: m.id, started: Date.now(), written });
   return reqId;
@@ -622,7 +622,7 @@ function armDeviceWatches(): void {
 // same shape, and the thing worth reusing is this bookkeeping rather than the
 // merge, which is per-kind by nature.
 
-const chainWatchers = new Map<WebSocket, BSV.ChainWatch[]>();
+const chainWatchers = new Map<WebSocket, OpenFlow.ChainWatch[]>();
 
 /** The union last sent to `lom.ts`, so an unchanged one is never re-sent. */
 let chainUnion: ChainWatch[] = [];
@@ -656,7 +656,7 @@ function setChainWatch(ws: WebSocket, subs: unknown): string | null {
     if (!validChainWatch(sub)) return 'watchChains got a malformed subscription';
   }
   if (subs.length === 0) chainWatchers.delete(ws);
-  else chainWatchers.set(ws, subs as BSV.ChainWatch[]);
+  else chainWatchers.set(ws, subs as OpenFlow.ChainWatch[]);
   pushChainWatches();
   return null;
 }
@@ -699,9 +699,9 @@ function rearmWatches(): void {
 // and visible, so every uncertain case takes it.
 
 interface HeldSet {
-  snapshot: BSV.Snapshot;
+  snapshot: OpenFlow.Snapshot;
   /** Read from `snapshot`. See `core/docs/setModel.md`. */
-  model: BSV.SetModel;
+  model: OpenFlow.SetModel;
   /**
    * The two host-side costs of the walk this was first read by.
    *
@@ -829,7 +829,7 @@ function takeStructureEcho(): boolean {
  * two steps separately, because it may turn out not to be holdable at all and
  * the encoder must not be relabelled from a set that no longer exists.
  */
-function rereadModel(rev: number, scenes: readonly BSV.Scene[]): BSV.SetModel {
+function rereadModel(rev: number, scenes: readonly OpenFlow.Scene[]): OpenFlow.SetModel {
   const model = buildSetModel(derive(scenes, SCENE_PATTERNS), rev);
   refreshPushSongs(model);
   return model;
@@ -1071,7 +1071,7 @@ function diagPushBank(): void {
  * latter, which made the mapping computed twice in this one process and a third
  * time in every browser tab — the drift `core/docs/setModel.md` exists to close.
  */
-function refreshPushSongs(model: BSV.SetModel): void {
+function refreshPushSongs(model: OpenFlow.SetModel): void {
   const all = model.songs
     // "First scene carrying this song" — `blocks` is ascending and a reprise is
     // a later block, so this is the start of the first run rather than of the
@@ -1102,7 +1102,7 @@ function selectSceneOnLive(scene: number): void {
 }
 
 /** A snapshot request with no client behind it — see `requestInternalSnapshot`. */
-function trackInternal(type: BSV.RequestType): number {
+function trackInternal(type: OpenFlow.RequestType): number {
   const reqId = nextReqId++;
   pending.set(reqId, { ws: undefined, type, started: Date.now() });
   return reqId;
@@ -1195,7 +1195,7 @@ Max.addHandler('push_song', (i: number) => {
   }
 });
 
-async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
+async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
   switch (m.type) {
     case 'snapshot': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
@@ -1236,21 +1236,21 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       const sceneOps = Array.isArray(m.sceneOps) ? m.sceneOps : [];
       const reqId = track(ws, m, { kind: 'apply', ops, sceneOps });
       try {
-        await Max.setDict('bsv_ops', { ops, sceneOps });
+        await Max.setDict('openflow_ops', { ops, sceneOps });
       } catch (e) {
         // Max rejects setDict for a dict that doesn't exist yet, and does it with
         // an empty message — which is how this arrived as "apply: Error" and
-        // nothing else. lom.ts creates bsv_ops in ensureDicts() on init for
+        // nothing else. lom.ts creates openflow_ops in ensureDicts() on init for
         // exactly this reason, so if you're reading this, suspect that ran late
         // or not at all.
         pending.delete(reqId);
         throw new Error(
-          `could not stage ${ops.length + sceneOps.length} ops into bsv_ops — ` +
+          `could not stage ${ops.length + sceneOps.length} ops into openflow_ops — ` +
             `${describe(e)}. The dict must exist before Node can write it; ` +
             `lom.ts creates it on init.`,
         );
       }
-      Max.outlet('apply', reqId, 'bsv_ops');
+      Max.outlet('apply', reqId, 'openflow_ops');
       break;
     }
     // Additive scene creation gets its own route rather than borrowing the
@@ -1285,23 +1285,23 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       ) {
         return send(ws, { type: 'error', id: m.id, message: 'tempo must be 20–1000 BPM' });
       }
-      const clean: BSV.SceneAddition = { at, count, name };
+      const clean: OpenFlow.SceneAddition = { at, count, name };
       if (color !== undefined) clean.color = color;
       if (tempo !== undefined) clean.tempo = tempo;
       const reqId = track(ws, m);
       try {
-        await Max.setDict('bsv_ops', { addition: clean });
+        await Max.setDict('openflow_ops', { addition: clean });
       } catch (e) {
         pending.delete(reqId);
         throw new Error(
-          `could not stage ${count} new scenes into bsv_ops — ${describe(e)}. ` +
+          `could not stage ${count} new scenes into openflow_ops — ${describe(e)}. ` +
             `The dict must exist before Node can write it; lom.ts creates it on init.`,
         );
       }
-      Max.outlet('add_scenes', reqId, 'bsv_ops');
+      Max.outlet('add_scenes', reqId, 'openflow_ops');
       break;
     }
-    // Reordering scenes. Shares `bsv_ops` with apply — one write is in flight at
+    // Reordering scenes. Shares `openflow_ops` with apply — one write is in flight at
     // a time and lom.ts refuses either while the other is running, so there's no
     // second dict to keep alive. It does NOT share the `apply` message: this one
     // deletes scenes, and the two paths should not be one typo apart.
@@ -1325,19 +1325,19 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       }
       const reqId = track(ws, m);
       try {
-        await Max.setDict('bsv_ops', { plan: { create, steps, remove } });
+        await Max.setDict('openflow_ops', { plan: { create, steps, remove } });
       } catch (e) {
         pending.delete(reqId);
         throw new Error(
-          `could not stage a move of ${create.length} scenes into bsv_ops — ` +
+          `could not stage a move of ${create.length} scenes into openflow_ops — ` +
             `${describe(e)}. The dict must exist before Node can write it; ` +
             `lom.ts creates it on init.`,
         );
       }
-      Max.outlet('move', reqId, 'bsv_ops');
+      Max.outlet('move', reqId, 'openflow_ops');
       break;
     }
-    // Slots, not scenes — see `moveClips` in the protocol. Shares `bsv_ops` with
+    // Slots, not scenes — see `moveClips` in the protocol. Shares `openflow_ops` with
     // the two writes above for the same reason they share it: one staging dict,
     // and only one write can be in flight at a time anyway.
     case 'moveClips': {
@@ -1362,16 +1362,16 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       }
       const reqId = track(ws, m, { kind: 'clips', plan: { steps, remove } });
       try {
-        await Max.setDict('bsv_ops', { clipPlan: { steps, remove } });
+        await Max.setDict('openflow_ops', { clipPlan: { steps, remove } });
       } catch (e) {
         pending.delete(reqId);
         throw new Error(
-          `could not stage a move of ${steps.length} clips into bsv_ops — ` +
+          `could not stage a move of ${steps.length} clips into openflow_ops — ` +
             `${describe(e)}. The dict must exist before Node can write it; ` +
             `lom.ts creates it on init.`,
         );
       }
-      Max.outlet('move_clips', reqId, 'bsv_ops');
+      Max.outlet('move_clips', reqId, 'openflow_ops');
       break;
     }
     case 'palette': {
@@ -1493,7 +1493,7 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!source || typeof source !== 'object') {
         return send(ws, { type: 'error', id: m.id, message: 'transport patch is missing' });
       }
-      const patch: BSV.TransportPatch = {};
+      const patch: OpenFlow.TransportPatch = {};
       if (source.tempo !== undefined) {
         const tempo = Number(source.tempo);
         if (!Number.isFinite(tempo) || tempo < 20 || tempo > 999) {
@@ -1557,7 +1557,7 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
     case 'setMixer': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       const sourceTarget = m.target;
-      let target: BSV.MixerTarget;
+      let target: OpenFlow.MixerTarget;
       if (sourceTarget?.kind === 'master') {
         target = { kind: 'master' };
       } else if (sourceTarget?.kind === 'track') {
@@ -1574,7 +1574,7 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
       if (!source || typeof source !== 'object') {
         return send(ws, { type: 'error', id: m.id, message: 'mixer patch is missing' });
       }
-      const patch: BSV.MixerPatch = {};
+      const patch: OpenFlow.MixerPatch = {};
       for (const field of ['active', 'solo', 'armed'] as const) {
         if (source[field] === undefined) continue;
         if (typeof source[field] !== 'boolean') {
@@ -1664,13 +1664,13 @@ async function handle(ws: WebSocket, m: BSV.Request): Promise<void> {
         }
         path.push(value);
       }
-      const target: BSV.DeviceTarget = { t, path, i };
+      const target: OpenFlow.DeviceTarget = { t, path, i };
 
       const patchSource = m.patch;
       if (!patchSource || typeof patchSource !== 'object') {
         return send(ws, { type: 'error', id: m.id, message: 'device patch is missing' });
       }
-      const patch: BSV.DevicePatch = {};
+      const patch: OpenFlow.DevicePatch = {};
       for (const field of ['on', 'folded'] as const) {
         if (patchSource[field] === undefined) continue;
         if (typeof patchSource[field] !== 'boolean') {
@@ -1859,7 +1859,7 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   const walkedGeneration = snapshotFlight?.reqId === reqId ? snapshotFlight.generation : -1;
   const flight = takeFlight(reqId);
   const t0 = Date.now();
-  const data: BSV.Snapshot = await Max.getDict(dictName);
+  const data: OpenFlow.Snapshot = await Max.getDict(dictName);
   const hostMs = Date.now() - t0;
   // Read the mapping once, here, and ship it. Every client used to run the same
   // `derive()` over the same scene names to draw its own grid — see
@@ -1891,7 +1891,7 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
       `${t.restarts > 0 ? ` · ${t.restarts} restarts` : ''}) ` +
       `+ ${dictMs}ms dict + ${hostMs}ms host`,
   );
-  const event: BSV.Event = {
+  const event: OpenFlow.Event = {
     type: 'snapshot',
     id: req?.clientId,
     dictMs,
@@ -1950,7 +1950,7 @@ Max.addHandler('apply_progress', (reqId: number, done: number, total: number) =>
  * so a partial write cannot be reproduced here and doesn't try to be — the held
  * set goes instead, and the next request walks Live.
  */
-function patchHeldWithApply(req: Pending | undefined, result: BSV.ApplyResult): void {
+function patchHeldWithApply(req: Pending | undefined, result: OpenFlow.ApplyResult): void {
   if (!held) return;
   if (req?.written?.kind !== 'apply') {
     dropHeld('an apply finished with no record of what it wrote');
@@ -1975,7 +1975,7 @@ function patchHeldWithApply(req: Pending | undefined, result: BSV.ApplyResult): 
 Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const result: BSV.ApplyResult = await Max.getDict(dictName);
+  const result: OpenFlow.ApplyResult = await Max.getDict(dictName);
   patchHeldWithApply(req, result);
   Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
   send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
@@ -1985,7 +1985,7 @@ Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number)
 Max.addHandler('add_scenes_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const r: BSV.ScenesAddedResult = await Max.getDict(dictName);
+  const r: OpenFlow.ScenesAddedResult = await Max.getDict(dictName);
   Max.post(
     `addScenes: ${r.created} created, ${r.configured} configured, ` +
       `${r.failed} failed, ${ms}ms` +
@@ -2067,7 +2067,7 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
 Max.addHandler('clip_notes_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const payload: { clips?: BSV.ClipNotes[] } = await Max.getDict(dictName);
+  const payload: { clips?: OpenFlow.ClipNotes[] } = await Max.getDict(dictName);
   const clips = Array.isArray(payload?.clips) ? payload.clips : [];
   const notes = clips.reduce((n, clip) => n + (clip.notes?.length ?? 0), 0);
   Max.post(`clip notes: ${notes} notes from ${clips.length} clips in ${ms}ms`);
@@ -2077,7 +2077,7 @@ Max.addHandler('clip_notes_done', async (reqId: number, dictName: string, ms: nu
 Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const p: BSV.Palette = await Max.getDict(dictName);
+  const p: OpenFlow.Palette = await Max.getDict(dictName);
   Max.post(`palette diagnostic: ${p.count} colors extracted (not persisted)`);
   send(req?.ws, { type: 'palette', id: req?.clientId, ...p });
 });
@@ -2112,7 +2112,7 @@ Max.addHandler('changed', (kind: string) => {
 // commas and semicolons, all special in Max messages.
 Max.addHandler('delta', async (dictName: string) => {
   try {
-    const data: BSV.SnapshotDelta = await Max.getDict(dictName);
+    const data: OpenFlow.SnapshotDelta = await Max.getDict(dictName);
     Max.post(
       `delta: ${data.clips.length} clip(s) across track(s) ` +
         `${data.clipScope.join(', ')} in ${data.ms}ms (rev ${data.prevRev} -> ${data.rev})`,
@@ -2128,7 +2128,7 @@ Max.addHandler('delta', async (dictName: string) => {
     // has. A rename is exactly this path — `apply` broadcasts
     // `changed: 'applied'` rather than `'structure'`, so a delta is what says
     // scene names, and therefore the song list, moved under us.
-    let model: BSV.SetModel | undefined;
+    let model: OpenFlow.SetModel | undefined;
     if (held) {
       if (!canApplyDelta(held.snapshot.rev, data.prevRev)) {
         dropHeld(`a delta computed against rev ${data.prevRev} arrived while ` +
@@ -2169,7 +2169,7 @@ Max.addHandler('delta', async (dictName: string) => {
 // dict name would race itself. See the note above `playStateAtoms` in lom.ts.
 // Shape: isPlaying, then (playing, fired, armed) per track in track order.
 Max.addHandler('play_state', (...args: number[]) => {
-  const tracks: BSV.TrackPlayState[] = [];
+  const tracks: OpenFlow.TrackPlayState[] = [];
   for (let i = 1; i + 2 < args.length; i += 3) {
     tracks.push({
       playing: Number(args[i]),
@@ -2185,7 +2185,7 @@ Max.addHandler('play_state', (...args: number[]) => {
 Max.addHandler('meter_levels', (...args: number[]) => {
   const master = Number(args[0]);
   if (!Number.isFinite(master)) return;
-  const tracks: BSV.TrackMeterLevel[] = [];
+  const tracks: OpenFlow.TrackMeterLevel[] = [];
   for (let i = 1; i + 1 < args.length; i += 2) {
     const t = Number(args[i]);
     const level = Number(args[i + 1]);
@@ -2202,7 +2202,7 @@ Max.addHandler('meter_levels', (...args: number[]) => {
 const CLIP_STATUS_FIELDS = 9;
 
 Max.addHandler('clip_status', (...args: number[]) => {
-  const tracks: BSV.PlayingClip[] = [];
+  const tracks: OpenFlow.PlayingClip[] = [];
   for (let i = 0; i + CLIP_STATUS_FIELDS <= args.length; i += CLIP_STATUS_FIELDS) {
     const t = Number(args[i]);
     const position = Number(args[i + 1]);
@@ -2229,10 +2229,10 @@ Max.addHandler('clip_status', (...args: number[]) => {
   broadcast({ type: 'clipStatus', frame: { tracks } });
 });
 
-function mixerParameter(value: unknown): BSV.MixerParameterState | null | undefined {
+function mixerParameter(value: unknown): OpenFlow.MixerParameterState | null | undefined {
   if (value === null) return null;
   if (!value || typeof value !== 'object') return undefined;
-  const parameter = value as Partial<BSV.MixerParameterState>;
+  const parameter = value as Partial<OpenFlow.MixerParameterState>;
   if (
     !Number.isFinite(parameter.value) ||
     !Number.isFinite(parameter.min) ||
@@ -2248,7 +2248,7 @@ function mixerParameter(value: unknown): BSV.MixerParameterState | null | undefi
   ) {
     return undefined;
   }
-  return parameter as BSV.MixerParameterState;
+  return parameter as OpenFlow.MixerParameterState;
 }
 
 // Mixer controls change far less often than levels, but parameter automation can
@@ -2264,13 +2264,13 @@ function mixerParameter(value: unknown): BSV.MixerParameterState | null | undefi
  */
 Max.addHandler('chain_state', (...atoms: unknown[]) => {
   const value = decodeMaxAtom(atoms.map(String).join(''));
-  if (!value || typeof value !== 'object' || !Array.isArray((value as BSV.ChainState).chains)) {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as OpenFlow.ChainState).chains)) {
     Max.post('chain_state: malformed payload from lom');
     return;
   }
-  const chains: BSV.WatchedChain[] = [];
-  for (const raw of (value as BSV.ChainState).chains) {
-    const source = raw as Partial<BSV.WatchedChain>;
+  const chains: OpenFlow.WatchedChain[] = [];
+  for (const raw of (value as OpenFlow.ChainState).chains) {
+    const source = raw as Partial<OpenFlow.WatchedChain>;
     if (
       !Number.isInteger(source.t) ||
       !Array.isArray(source.path) ||
@@ -2287,7 +2287,7 @@ Max.addHandler('chain_state', (...atoms: unknown[]) => {
       Max.post('chain_state: invalid devices from lom');
       return;
     }
-    const devices: BSV.ChainDevice[] = [];
+    const devices: OpenFlow.ChainDevice[] = [];
     for (const rawDevice of source.devices) {
       const checked = chainDevice(rawDevice, 0);
       if (!checked) {
@@ -2317,9 +2317,9 @@ Max.addHandler('chain_values', (...atoms: unknown[]) => {
     Max.post('chain_values: malformed payload from lom');
     return;
   }
-  const changes: BSV.ChainValueChange[] = [];
+  const changes: OpenFlow.ChainValueChange[] = [];
   for (const entry of raw) {
-    const change = entry as Partial<BSV.ChainValueChange>;
+    const change = entry as Partial<OpenFlow.ChainValueChange>;
     if (
       !Number.isInteger(change.t) ||
       !Array.isArray(change.path) ||
@@ -2350,7 +2350,7 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
     Max.post('mixer_state: malformed payload from lom');
     return;
   }
-  const source = value as Partial<BSV.MixerState>;
+  const source = value as Partial<OpenFlow.MixerState>;
   const sendCount = Number(source.sendCount);
   const masterVolume = mixerParameter(source.masterVolume);
   const masterPan = mixerParameter(source.masterPan);
@@ -2361,10 +2361,10 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
     Max.post('mixer_state: invalid top-level fields from lom');
     return;
   }
-  const tracks: BSV.MixerTrackState[] = [];
+  const tracks: OpenFlow.MixerTrackState[] = [];
   for (const raw of source.tracks) {
     if (!raw || typeof raw !== 'object') return;
-    const track = raw as Partial<BSV.MixerTrackState>;
+    const track = raw as Partial<OpenFlow.MixerTrackState>;
     const volume = mixerParameter(track.volume);
     const pan = mixerParameter(track.pan);
     const sends = Array.isArray(track.sends) ? track.sends.map(mixerParameter) : null;
@@ -2389,7 +2389,7 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
       canArm: track.canArm,
       volume,
       pan,
-      sends: sends as (BSV.MixerParameterState | null)[],
+      sends: sends as (OpenFlow.MixerParameterState | null)[],
     });
   }
   broadcast({ type: 'mixerState', state: { sendCount, masterVolume, masterPan, tracks } });
@@ -2410,9 +2410,9 @@ Max.addHandler('mixer_state', (...atoms: unknown[]) => {
  * default only for continuous parameters and members only for quantized ones —
  * so absence passes and only a wrong *type* is refused.
  */
-function deviceParameter(raw: unknown): BSV.DeviceParameterState | undefined {
+function deviceParameter(raw: unknown): OpenFlow.DeviceParameterState | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
-  const source = raw as Partial<BSV.DeviceParameterState>;
+  const source = raw as Partial<OpenFlow.DeviceParameterState>;
   const number = (n: unknown) => typeof n === 'number' && Number.isFinite(n);
   if (
     typeof source.name !== 'string' ||
@@ -2423,7 +2423,7 @@ function deviceParameter(raw: unknown): BSV.DeviceParameterState | undefined {
   ) {
     return undefined;
   }
-  const parameter: BSV.DeviceParameterState = {
+  const parameter: OpenFlow.DeviceParameterState = {
     name: source.name,
     value: source.value as number,
     min: source.min as number,
@@ -2445,9 +2445,9 @@ function deviceParameter(raw: unknown): BSV.DeviceParameterState | undefined {
   return parameter;
 }
 
-function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
+function chainDevice(raw: unknown, depth: number): OpenFlow.ChainDevice | undefined {
   if (!raw || typeof raw !== 'object' || depth > 8) return undefined;
-  const source = raw as Partial<BSV.ChainDevice>;
+  const source = raw as Partial<OpenFlow.ChainDevice>;
   if (
     typeof source.name !== 'string' ||
     typeof source.className !== 'string' ||
@@ -2456,7 +2456,7 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
   ) {
     return undefined;
   }
-  const device: BSV.ChainDevice = {
+  const device: OpenFlow.ChainDevice = {
     name: source.name,
     className: source.className,
     on: source.on,
@@ -2464,7 +2464,7 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
   };
   if (source.parameters !== undefined) {
     if (!Array.isArray(source.parameters)) return undefined;
-    const parameters: BSV.DeviceParameterState[] = [];
+    const parameters: OpenFlow.DeviceParameterState[] = [];
     for (const rawParameter of source.parameters) {
       const parameter = deviceParameter(rawParameter);
       if (!parameter) return undefined;
@@ -2474,10 +2474,10 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
   }
   if (source.chains === undefined) return device;
   if (!Array.isArray(source.chains)) return undefined;
-  const chains: BSV.RackChain[] = [];
+  const chains: OpenFlow.RackChain[] = [];
   for (const rawChain of source.chains) {
     if (!rawChain || typeof rawChain !== 'object') return undefined;
-    const chain = rawChain as Partial<BSV.RackChain>;
+    const chain = rawChain as Partial<OpenFlow.RackChain>;
     if (typeof chain.name !== 'string') return undefined;
     // No `devices` means nobody is subscribed to this chain, which is the
     // normal state of every chain in an unopened rack — not a malformed one.
@@ -2486,7 +2486,7 @@ function chainDevice(raw: unknown, depth: number): BSV.ChainDevice | undefined {
       continue;
     }
     if (!Array.isArray(chain.devices)) return undefined;
-    const devices: BSV.ChainDevice[] = [];
+    const devices: OpenFlow.ChainDevice[] = [];
     for (const nested of chain.devices) {
       const checked = chainDevice(nested, depth + 1);
       if (!checked) return undefined;
@@ -2519,7 +2519,7 @@ Max.addHandler('transport_state', (...atoms: unknown[]) => {
     Max.post('transport_state: malformed payload from lom');
     return;
   }
-  const state = value as Partial<BSV.TransportState>;
+  const state = value as Partial<OpenFlow.TransportState>;
   if (
     !Number.isFinite(state.tempo) || state.tempo! < 20 || state.tempo! > 999 ||
     typeof state.metronome !== 'boolean' ||
@@ -2533,7 +2533,7 @@ Max.addHandler('transport_state', (...atoms: unknown[]) => {
     Max.post('transport_state: invalid fields from lom');
     return;
   }
-  broadcast({ type: 'transportState', state: state as BSV.TransportState });
+  broadcast({ type: 'transportState', state: state as OpenFlow.TransportState });
 });
 
 Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
@@ -2544,7 +2544,7 @@ Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
   const joined = rest.map(String).join(' ').trim();
   const message = joined !== '' ? joined : 'LOM failed without a message';
   Max.post(`LOM error: ${message}`);
-  const event: BSV.Event = { type: 'error', id: req?.clientId, message };
+  const event: OpenFlow.Event = { type: 'error', id: req?.clientId, message };
   // Untracked failures — a launch, a stop, an observer callback — have no
   // pending request to answer, and dropping them is how a silent bug hides.
   // With no id, no waiter is rejected; the client just logs it. A request the
@@ -2594,7 +2594,7 @@ function onServerError(e: NodeJS.ErrnoException): void {
   if (e.code === 'EADDRINUSE') {
     Max.post(
       `port ${PORT} already in use — another copy of this device is probably loaded. ` +
-        `Delete the duplicate, or set BSV_PORT.`,
+        `Delete the duplicate, or set OPENFLOW_PORT.`,
     );
   } else {
     Max.post(`server error: ${e.message}`);

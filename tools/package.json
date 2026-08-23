@@ -1,0 +1,7 @@
+{
+  "name": "@openflow/tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Build and diagnostic scripts: the device patcher, the bridge bundle, and the LOM scrape."
+}

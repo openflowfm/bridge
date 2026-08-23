@@ -1,17 +1,16 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "module": "CommonJS",
-    "moduleResolution": "Node",
+    // Not ESNext: bridge.ts imports max-api and the node builtins with
+    // `import x = require()`, which TS refuses under pure ESM module targets.
+    // This pass is noEmit-only (esbuild does the real build), so Preserve just
+    // has to typecheck the syntax as written.
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
     "moduleDetection": "auto",
     "types": ["node"],
     "noEmit": true
   },
-  "include": [
-    "src/**/*.ts",
-    "types/**/*.d.ts",
-    "../core/src/**/*.ts",
-    "../protocol/**/*.ts",
-    "../protocol/**/*.d.ts"
-  ]
+  "include": ["src/**/*.ts", "types/**/*.d.ts", "../protocol/global.d.ts"]
 }

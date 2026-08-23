@@ -23,7 +23,7 @@
 //   npm run dev:diag -- labelspaces    write two-word labels, spaced and non-breaking
 //   npm run dev:diag -- bank           redefine the live.banks page, after a write
 
-import type { Request } from '../protocol/index.ts';
+import type { Request } from '@openflow/protocol/index.ts';
 
 const WHAT = new Set([
   'ids',
@@ -72,7 +72,7 @@ if (what === 'labels' && (!Number.isSafeInteger(arg) || arg < 0 || arg > LABELS_
   process.exit(1);
 }
 
-const url = process.env.BSV_WS || 'ws://127.0.0.1:17800/ws';
+const url = process.env.OPENFLOW_WS || 'ws://127.0.0.1:17800/ws';
 const ws = new WebSocket(url);
 
 await new Promise<void>((resolve, reject) => {

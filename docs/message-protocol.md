@@ -8,8 +8,8 @@ Not the WebSocket protocol — see [`../protocol/README.md`](../../protocol/READ
 that. This is Max messages between `bridge.js` and `lom.js`.
 
 ```
-bridge.js  ──[s ---bsv-to-lom]──>  lom.js
-lom.js     ──[s ---bsv-to-node]──> bridge.js
+bridge.js  ──[s ---openflow-to-lom]──>  lom.js
+lom.js     ──[s ---openflow-to-node]──> bridge.js
 ```
 
 | → lom | |
@@ -93,7 +93,7 @@ the number into words, so no string ever has to survive the crossing.
 
 `play_state`, `meter_levels` and `clip_status` break the rule below on purpose, and the reason is worth
 knowing before "fixing" it: **dict names are global.** A request/response payload like
-the snapshot is safe in `bsv_snapshot` because only one is ever in flight. Realtime
+the snapshot is safe in `openflow_snapshot` because only one is ever in flight. Realtime
 pushes can arrive many times a second, so a dict would race itself, `v8` overwriting it
 before Node had finished reading the previous one.
 
@@ -165,16 +165,16 @@ Anything bigger than a few numbers crosses via a named Max dictionary:
 
 | dict | direction | contents |
 |---|---|---|
-| `bsv_snapshot` | lom → node | the whole set |
-| `bsv_delta` | lom → node | a partial re-read — some tracks, in full |
-| `bsv_ops` | node → lom | the op batch to apply, **or** a move plan |
-| `bsv_result` | lom → node | applied / skipped / total, **or** a move's counts |
-| `bsv_palette` | lom → node | derived colors |
+| `openflow_snapshot` | lom → node | the whole set |
+| `openflow_delta` | lom → node | a partial re-read — some tracks, in full |
+| `openflow_ops` | node → lom | the op batch to apply, **or** a move plan |
+| `openflow_result` | lom → node | applied / skipped / total, **or** a move's counts |
+| `openflow_palette` | lom → node | derived colors |
 
 Names are global, so **one device instance per Live set** — and see *Multiple clients*
 below, because global names have consequences there too.
 
-`apply` and `move` share `bsv_ops` and `bsv_result` rather than taking two dicts each.
+`apply` and `move` share `openflow_ops` and `openflow_result` rather than taking two dicts each.
 That's safe for the same reason one dict per direction is: only one write is ever in
 flight, and `lom.ts` refuses either message while the other is running. Per-request names
 would retire the whole question — see *Multiple clients*.
@@ -187,7 +187,7 @@ missing one with an **empty message**, which arrives in the UI as `apply: Error`
 else.
 
 Three of the four dicts create themselves, because `publish()` calls `new Dict(name)` before
-anything reads them — which is why snapshot and palette have always worked. **`bsv_ops` is
+anything reads them — which is why snapshot and palette have always worked. **`openflow_ops` is
 the only one travelling node → lom**, so nothing ever created it, and staging an op batch
 could never succeed. `Max.setDict` is the one direction this project had never exercised.
 
