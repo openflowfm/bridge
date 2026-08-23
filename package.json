@@ -1,5 +1,5 @@
 {
-  "name": "bsv-bridge",
+  "name": "@openflow/bridge",
   "version": "0.1.0",
   "private": true,
   "description": "Node for Max script: serves the Session Manager UI and bridges the Live Object Model over WebSocket.",
