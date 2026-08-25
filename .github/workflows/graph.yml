@@ -1,0 +1,64 @@
+name: graph
+
+# The gnosis architecture graph: static scan, then the test suite run
+# instrumented so the graph records what actually executes, then the viz
+# exported as a static site. PRs build it as a check; pushes to main deploy
+# it to GitHub Pages.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: graph-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            bridge/package-lock.json
+            visuals/package-lock.json
+
+      # Installs gnosis from its repo too — its prepare step compiles it.
+      - run: npm ci
+
+      # CI=true makes the posttest graph hook a no-op, so `gnosis trace`
+      # below is the only instrumented run; it refuses to merge a trace
+      # whose pass/fail counts differ from the baseline run.
+      - run: npx gnosis scan .
+      - run: npx gnosis trace .
+      - run: npx gnosis export . --out _site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
+      - id: deployment
+        uses: actions/deploy-pages@v5
