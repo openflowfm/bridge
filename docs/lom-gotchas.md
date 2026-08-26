@@ -105,7 +105,7 @@ behaves the way its name suggests.
   nothing about how the grid is drawn. `Track.View` is `selected_device`,
   `device_insert_mode`, `is_collapsed` (documented as the *arranger*, not the session)
   and `select_instrument`. Those widths live only in the `.als`, which we don't parse,
-  so anything layout-shaped is ours to invent — see `ui/README.md` *Column widths*.
+  so anything layout-shaped is ours to invent — see `set/README.md` *Column widths*.
   Live 12.4 ships the whole LOM docstring table inside its binary, which is the fastest
   way to settle "does the LOM expose X" without guessing:
   `strings -n 6 "/Applications/Ableton Live 12 Suite.app/Contents/MacOS/Live" | grep -n …`

@@ -44,7 +44,7 @@ const assetBytes = Object.values(assets).reduce((n, b64) => n + b64.length, 0);
 
 if (!Object.keys(assets).length) {
   console.warn(
-    'build:bridge — public/ is empty, so the UI is NOT inlined. Run build:ui first ' +
+    'build:bridge — public/ is empty, so the UI is NOT inlined. Run build:set first ' +
       '(npm run build does). The device will serve nothing but the API.',
   );
 }

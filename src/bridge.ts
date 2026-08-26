@@ -280,7 +280,7 @@ function migrateLegacyDeviceState(): void {
  * *counts* — it never says which ops it skipped — so the only way to patch the
  * held snapshot is to have the request that produced them still in hand. This
  * is the same batch or plan the client patches its own copy with; see
- * `ui/docs/snapshot-lifecycle.md` under *A write patches the snapshot*.
+ * `set/docs/snapshot-lifecycle.md` under *A write patches the snapshot*.
  */
 type Written =
   | { kind: 'apply'; ops: OpenFlow.ApplyOp[]; sceneOps: OpenFlow.SceneOp[] }

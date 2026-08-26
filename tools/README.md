@@ -8,11 +8,11 @@ amxd.ts                      pack / unpack / inspect .amxd containers  (library 
 build-bridge.ts              bundles bridge.js — ws and the built UI inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
-show.ts                      show night: builds the renderer, supervises the visuals server
+visuals.ts                   show night: builds the renderer, supervises the visuals server
 ```
 
 ```sh
-npm run show                # a show night — see below
+npm run visuals             # a show night — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
@@ -30,13 +30,13 @@ Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
 no enums, no runtime `namespace`, no decorators.
 
-## `npm run show`
+## `npm run visuals`
 
 The one process that matters, kept up, and nothing else.
 
 `npm run dev` is `concurrently -k` over ten dev processes, and `-k` means **any one of them
 exiting kills all the others** — right for a dev loop, and wrong for a gig, where a chart
-server or a `tsc --watch` falling over would take the wall down with it. `show.ts` builds
+server or a `tsc --watch` falling over would take the wall down with it. `visuals.ts` builds
 `visuals/dist` and then runs `visuals/server/index.ts` alone, restarting it after a second
 if it stops.
 
@@ -48,7 +48,7 @@ noise on top of a problem.
 
 ### It opens a browser that belongs to the show
 
-Once the port answers, `show` opens the rig in **its own Chrome** — macOS only, `--no-browse`
+Once the port answers, it opens the rig in **its own Chrome** — macOS only, `--no-browse`
 to skip it, and skipped anyway if one is already up on that profile.
 
 The lever is `--user-data-dir=~/.openflow/visuals/chrome`, which makes it a separate

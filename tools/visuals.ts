@@ -100,32 +100,32 @@ const openWindow = async () => {
   }
   if (!child) return; // Gone before it ever listened. Not ours to open onto.
   if (!(await answering())) {
-    console.error(`show: the server never answered on ${PORT} — open ${RIG} yourself`);
+    console.error(`visuals: the server never answered on ${PORT} — open ${RIG} yourself`);
     return;
   }
   if (process.platform !== 'darwin') {
-    console.log(`show: open ${RIG} — and see tools/README.md for the flags worth using`);
+    console.log(`visuals: open ${RIG} — and see tools/README.md for the flags worth using`);
     return;
   }
   const app = CHROME.find((at) => fs.existsSync(at));
   if (!app) {
-    console.log(`show: Google Chrome is not installed — open ${RIG} yourself`);
+    console.log(`visuals: Google Chrome is not installed — open ${RIG} yourself`);
     return;
   }
   // Already up, from an earlier run tonight. Launching again would stack a
   // second window on the same profile rather than doing anything useful.
   if (spawnSync('pgrep', ['-f', profile]).status === 0) {
-    console.log(`show: the show browser is already open on ${RIG}`);
+    console.log(`visuals: a show browser is already open on ${RIG}`);
     return;
   }
   fs.mkdirSync(profile, { recursive: true });
   spawn('open', ['-na', app, '--args', ...FLAGS], { detached: true, stdio: 'ignore' }).unref();
-  console.log(`show: ${RIG} in its own Chrome — profile ${profile}`);
+  console.log(`visuals: ${RIG} in its own Chrome — profile ${profile}`);
 };
 
 const build = spawnSync('npm', ['run', 'build:visuals'], { cwd: root, stdio: 'inherit' });
 if (build.status !== 0) {
-  console.error('show: the renderer did not build — not starting the server');
+  console.error('visuals: the renderer did not build — not starting the server');
   process.exit(build.status ?? 1);
 }
 
@@ -156,7 +156,7 @@ const start = () => {
       process.exit(code ?? 0);
     }
     console.error(
-      `show: the visuals server exited (${signal ?? code}) — restarting in ${RESTART_MS}ms`,
+      `visuals: the server exited (${signal ?? code}) — restarting in ${RESTART_MS}ms`,
     );
     setTimeout(start, RESTART_MS);
   });
