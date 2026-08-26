@@ -8,11 +8,14 @@ amxd.ts                      pack / unpack / inspect .amxd containers  (library 
 build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
-visuals.ts                   show night: builds the renderer, supervises the visuals server
+visuals.ts                   the visuals rig in a dedicated Chrome — npm run visuals:browser
+build-electron.ts            bundles a module's Electron main and preload to CommonJS
 ```
 
 ```sh
-npm run visuals             # a show night — see below
+npm run visuals             # a show night: the visual[flow] app
+npm run set                 # the set[flow] app
+npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
@@ -30,9 +33,25 @@ Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
 no enums, no runtime `namespace`, no decorators.
 
-## `npm run visuals`
+## Two desktop apps
 
-The one process that matters, kept up, and nothing else.
+`npm run set` and `npm run visuals` each build their renderer, build their Electron shell
+with `build-electron.ts`, and launch it. Where the reasoning lives:
+[`set/docs/desktop.md`](../set/docs/desktop.md) for the custom scheme and where state goes,
+[`visuals/docs/desktop.md`](../visuals/docs/desktop.md) for the supervised server, the wall
+window and the display list.
+
+`build-electron.ts` esbuilds `<module>/electron/{main,preload}.ts` to **CommonJS**. Both
+halves are forced: Electron's bundled Node does not strip types the way Node 24 on your PATH
+does, and a `sandbox: true` preload must be CJS. Neither app is part of `npm run build` —
+that script is what CI enforces and what produces the `.amxd`, and it has no business
+needing an Electron binary.
+
+## `npm run visuals:browser`
+
+The visuals rig in a dedicated Chrome instead of the app. Kept because a second machine runs
+a browser anyway — which is the arrangement the rig was always meant for — and because it is
+the rollback if the app misbehaves on a show night.
 
 `npm run dev` is `concurrently -k` over ten dev processes, and `-k` means **any one of them
 exiting kills all the others** — right for a dev loop, and wrong for a gig, where a chart
@@ -58,9 +77,16 @@ origin, and its own permissions — so the window-management grant the wall need
 once and stays given, rather than being asked for on a stage. `--app=` drops the tab strip
 and the address bar.
 
-It is also the lightest Chromium available on a Mac, because it is the Chromium already
-installed. Tauri's webview there is WKWebView, not Chromium, and Electron's Chromium is the
-same engine as this one with a 150 MB bundle, a signing identity and an updater around it.
+It is the lightest Chromium available on a Mac, because it is the Chromium already
+installed — and that argument is why this path existed before there was an app, and why it
+is still here now.
+
+**What changed is the question, not the answer.** While the device served the session
+manager there was a URL to point a browser at, so "Chrome or Electron" was a real choice and
+Chrome won it. The device serves nothing now, so the choice is "ship a window or ship a
+server", and only one of those leaves the device carrying nothing. Tauri was not an option
+either way: its macOS webview is WKWebView rather than Chromium, and every shader in
+`visuals/` has been validated against one engine.
 
 Three of the flags are about a projector specifically:
 
@@ -73,6 +99,10 @@ Three of the flags are about a projector specifically:
 Chrome slows and eventually freezes a renderer it decides nobody is looking at, and a wall
 window sitting behind the console is exactly that. Without these, bringing another window to
 the front can drop the projector to a stutter.
+
+**The app needs the same three**, because Electron is the same Chromium — it passes them as
+command-line switches and sets `backgroundThrottling: false` on every window besides. This
+is the easiest thing in either path to forget, and the symptom reads as a renderer bug.
 
 **Only for a server it started.** The readiness poll waits a beat before its first look,
 because a port already in use answers *immediately* — from whatever is on it — and a window
