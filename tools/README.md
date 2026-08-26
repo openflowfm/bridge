@@ -8,9 +8,11 @@ amxd.ts                      pack / unpack / inspect .amxd containers  (library 
 build-bridge.ts              bundles bridge.js — ws and the built UI inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
+show.ts                      show night: builds the renderer, supervises the visuals server
 ```
 
 ```sh
+npm run show                # a show night — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
@@ -27,6 +29,22 @@ exits 0. This repo lives at `.../The Source/...`; the CLI had never once run her
 Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
 no enums, no runtime `namespace`, no decorators.
+
+## `npm run show`
+
+The one process that matters, kept up, and nothing else.
+
+`npm run dev` is `concurrently -k` over ten dev processes, and `-k` means **any one of them
+exiting kills all the others** — right for a dev loop, and wrong for a gig, where a chart
+server or a `tsc --watch` falling over would take the wall down with it. `show.ts` builds
+`visuals/dist` and then runs `visuals/server/index.ts` alone, restarting it after a second
+if it stops.
+
+Two exits it does **not** restart, because neither is fixed by trying again: a clean one,
+which is the server's own Ctrl-C path, and status **2**, which is the port already being
+taken. That code exists for this — the server has already printed which port and how to
+find what is on it, and a supervisor relaunching into the same message once a second is
+noise on top of a problem.
 
 ## The LOM reference
 
