@@ -46,6 +46,39 @@ taken. That code exists for this — the server has already printed which port a
 find what is on it, and a supervisor relaunching into the same message once a second is
 noise on top of a problem.
 
+### It opens a browser that belongs to the show
+
+Once the port answers, `show` opens the rig in **its own Chrome** — macOS only, `--no-browse`
+to skip it, and skipped anyway if one is already up on that profile.
+
+The lever is `--user-data-dir=~/.openflow/visuals/chrome`, which makes it a separate
+*instance* rather than a flag on the browser you read your mail in: no extensions, no forty
+other tabs on the same GPU, its own share of the ~16 WebGL contexts a browser keeps per
+origin, and its own permissions — so the window-management grant the wall needs is given
+once and stays given, rather than being asked for on a stage. `--app=` drops the tab strip
+and the address bar.
+
+It is also the lightest Chromium available on a Mac, because it is the Chromium already
+installed. Tauri's webview there is WKWebView, not Chromium, and Electron's Chromium is the
+same engine as this one with a 150 MB bundle, a signing identity and an updater around it.
+
+Three of the flags are about a projector specifically:
+
+```
+--disable-background-timer-throttling
+--disable-backgrounding-occluded-windows
+--disable-renderer-backgrounding
+```
+
+Chrome slows and eventually freezes a renderer it decides nobody is looking at, and a wall
+window sitting behind the console is exactly that. Without these, bringing another window to
+the front can drop the projector to a stutter.
+
+**Only for a server it started.** The readiness poll waits a beat before its first look,
+because a port already in use answers *immediately* — from whatever is on it — and a window
+would open onto somebody else's server a moment before ours died of `EADDRINUSE`. The
+settle gives that failure time to land, and the child going away is what says it did.
+
 ## The LOM reference
 
 `lom-reference.ts` scrapes Cycling '74's LOM page into
