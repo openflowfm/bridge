@@ -51,6 +51,17 @@ function bundle(name: string): string | null {
 }
 
 /**
+ * Whether the quarantine flag is on a bundle. Checked after stripping rather
+ * than assumed, because it is the whole difference between a double-click and a
+ * dialog, and `xattr -d` succeeds cheerfully when it removed nothing.
+ *
+ * The bundle root is the one that counts — that is where Gatekeeper reads it.
+ */
+function quarantined(app: string): boolean {
+  return spawnSync('xattr', ['-p', 'com.apple.quarantine', app], { stdio: 'ignore' }).status === 0;
+}
+
+/**
  * Whether the thing we are about to replace is open.
  *
  * Deleting a running bundle out from under macOS is allowed and behaves exactly
@@ -111,14 +122,29 @@ for (const name of names) {
     process.exit(1);
   }
 
-  // These are unsigned, so a quarantine flag is the difference between opening
-  // and a Gatekeeper refusal. A locally built bundle should not carry one — but
-  // one that came off the `.dmg` does, and this is where that stops mattering.
+  // Quarantine is the flag that makes macOS ask before a first launch, and for
+  // these it is worse than an ask: electron-builder rewrote the bundle without
+  // re-sealing its resources, so a quarantined copy is one Gatekeeper *rejects*
+  // on the signature rather than one it merely distrusts — `spctl` says "code
+  // has no resources but signature indicates they must be present". Right-click
+  // → Open does not reliably get past that.
+  //
+  // A locally built bundle carries no flag to begin with, so this is belt and
+  // braces for a copy that arrived some other way. Either way it is gone before
+  // the app is yours to open.
   spawnSync('xattr', ['-dr', 'com.apple.quarantine', dst], { stdio: 'ignore' });
+  if (quarantined(dst)) {
+    console.error(
+      `install-apps: ${path.basename(dst)} is still quarantined — it will not open cleanly.\n` +
+        `      Try by hand: xattr -dr com.apple.quarantine "${dst}"`,
+    );
+    process.exit(1);
+  }
 
   console.log(`installed ${path.basename(dst)} → ${DEST}`);
   installed += 1;
 }
 
-console.log(`${installed} app${installed === 1 ? '' : 's'} in ${DEST}. They are unsigned: if one`);
-console.log('refuses to open, right-click it and choose Open the first time.');
+console.log(
+  `${installed} app${installed === 1 ? '' : 's'} in ${DEST}, unquarantined — double-click and go.`,
+);
