@@ -17,6 +17,7 @@ install-apps.ts              copies the packed apps into /Applications
 ```sh
 npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
+npm run qa                  # build + pack + install:apps — everything, onto this machine
 npm run pack                # both apps as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications — or one: install:apps set
 npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
@@ -60,6 +61,13 @@ than merges, refuses to overwrite an app that is open, and takes `OPENFLOW_APPS`
 `/Applications` is not yours to write. Neither building nor packing is part of
 `npm run build` — that script is what CI enforces and what produces the `.amxd`, and it has
 no business needing an Electron binary.
+
+**`npm run qa` is those three in order** — the device, both apps, installed — for when the
+next thing you do is drive the real applications rather than a dev server. It stops at the
+first failure, so a bad build never reaches `/Applications`. It runs neither `typecheck` nor
+`test`: those are fast and belong in the loop before this one, and a script that quietly
+reruns them makes the slow path look like the cheap one. The chart is not in it either — it
+is a page, not an app, and `npm run build:chart` stands alone.
 
 ## `npm run visuals:browser`
 
