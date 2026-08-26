@@ -32,7 +32,16 @@ jobs:
       # bridge/src/bridge.ts, and `ws` lives only there, not at the root.
       - run: npm ci
 
+      # The graph always builds with gnosis' latest main, regardless of the
+      # SHA the lockfile pins — --no-save leaves the lockfile alone.
+      - run: npm install --no-save github:ryangavin/gnosis
+
       - run: npm run typecheck
+
+      # `npm test` IS the graph build: gnosis scan, then the suite run ONCE
+      # through gnosis' instrumentation (`gnosis test`), which records what
+      # actually executes and exits with vitest's status. No separate trace
+      # step, no second run of the suite anywhere in the pipeline.
       - run: npm test
 
       # The "must build from a clean tree" rule, enforced rather than
@@ -52,3 +61,27 @@ jobs:
             bridge/lom.js
           if-no-files-found: error
           retention-days: 14
+
+      # The traced graph from the test run above, exported as a static site.
+      - run: npx gnosis export . --out _site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
+      - id: deployment
+        uses: actions/deploy-pages@v5
