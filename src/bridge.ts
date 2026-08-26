@@ -329,7 +329,33 @@ let snapshotFlight: {
  */
 function startFlight(reqId: number): void {
   snapshotFlight = { reqId, joined: [], generation: heldGeneration };
+  if (flightTimer) clearTimeout(flightTimer);
+  flightTimer = setTimeout(() => failFlight(reqId, 'the walk never answered'), FLIGHT_TIMEOUT_MS);
+  flightTimer.unref?.();
   Max.outlet('snapshot', reqId);
+}
+
+/**
+ * How long a walk may be in flight before it is presumed lost.
+ *
+ * Far past any real walk — a full one is ~2.6s and a chunked one over a huge set
+ * has been seen at ten. It exists because a flight is cleared only by a matching
+ * `snapshot_done` or `err`: a reply that never arrives strands every later
+ * snapshot on a walk that is not running, and `ready` re-arms everything except
+ * this, so reloading the LOM does not recover it either.
+ */
+const FLIGHT_TIMEOUT_MS = 45_000;
+let flightTimer: NodeJS.Timeout | null = null;
+
+/** End a flight nothing answered, failing everyone on it the way `err` does. */
+function failFlight(reqId: number, why: string): void {
+  if (snapshotFlight?.reqId !== reqId) return;
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const message = `snapshot: ${why}`;
+  Max.post(message);
+  if (req?.ws) send(req.ws, { type: 'error', id: req.clientId, message });
+  for (const j of takeFlight(reqId)) send(j.ws, { type: 'error', id: j.clientId, message });
 }
 
 /**
@@ -344,6 +370,10 @@ function takeFlight(reqId: number): Array<{ ws: WebSocket; clientId?: number }> 
   if (snapshotFlight?.reqId !== reqId) return [];
   const { joined } = snapshotFlight;
   snapshotFlight = null;
+  if (flightTimer) {
+    clearTimeout(flightTimer);
+    flightTimer = null;
+  }
   return joined;
 }
 
@@ -403,8 +433,16 @@ function serveEmbedded(rel: string, res: http.ServerResponse): void {
 }
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`);
-  let rel = decodeURIComponent(url.pathname);
+  let rel: string;
+  try {
+    // `/%` and `/%zz` are requests a scanner makes without meaning anything by
+    // it, and `decodeURIComponent` answers both with a throw — uncaught here,
+    // which is the device gone.
+    rel = decodeURIComponent(new URL(req.url ?? '/', `http://${HOST}:${PORT}`).pathname);
+  } catch {
+    res.writeHead(400, { 'content-type': 'text/plain' }).end('bad request');
+    return;
+  }
   if (rel === '/') rel = '/index.html';
 
   const file = path.join(PUBLIC, path.normalize(rel));
@@ -430,13 +468,32 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server, path: WS_PATH });
 
+/**
+ * Most bytes allowed to queue on one socket before it is treated as gone.
+ *
+ * `readyState` says a socket is open; it does not say anything is reading it. A
+ * client that stopped draining still takes meter frames at 30 Hz, and they
+ * accumulate inside Live's Node process — on the order of a hundred megabytes an
+ * hour for a browser nobody is looking at. Dropping it costs a reconnect, which
+ * this protocol does by itself.
+ */
+const MAX_BUFFERED = 4 * 1024 * 1024;
+
+function writable(ws: WebSocket): boolean {
+  if (ws.readyState !== 1) return false;
+  if (ws.bufferedAmount <= MAX_BUFFERED) return true;
+  Max.post(`client is not reading — ${ws.bufferedAmount} bytes queued, dropping it`);
+  ws.terminate();
+  return false;
+}
+
 function send(ws: WebSocket | undefined, event: OpenFlow.Event): void {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(event));
+  if (ws && writable(ws)) ws.send(JSON.stringify(event));
 }
 
 function broadcast(event: OpenFlow.Event): void {
   const s = JSON.stringify(event);
-  for (const ws of wss.clients) if (ws.readyState === 1) ws.send(s);
+  for (const ws of wss.clients) if (writable(ws)) ws.send(s);
 }
 
 /**
@@ -464,9 +521,19 @@ function showConnections(): void {
 
 wss.on('connection', (ws: WebSocket) => {
   Max.post(`client connected (${wss.clients.size} total)`);
+  alive.add(ws);
   showConnections();
   send(ws, { type: 'status', lomReady });
   if (deviceState) send(ws, { type: 'deviceState', state: deviceState });
+
+  // `ws` throws on a socket whose 'error' nobody listens for, so an unclean
+  // disconnect — a phone off the LAN, a force-killed browser — would take the
+  // whole device with it. The 'close' that follows does the cleanup.
+  ws.on('error', (e) => {
+    Max.post(`client socket error — ${describe(e)}`);
+  });
+
+  ws.on('pong', () => alive.add(ws));
 
   ws.on('message', async (raw) => {
     let m: OpenFlow.Request;
@@ -492,6 +559,32 @@ wss.on('connection', (ws: WebSocket) => {
     showConnections();
   });
 });
+
+/**
+ * A client that answered the last sweep. A protocol-level ping, not the app's.
+ *
+ * The app's `ping` is client-initiated, so nothing here ever asks a silent
+ * socket whether it is still there. A laptop that slept or a phone that walked
+ * off the LAN leaves a half-open socket that `readyState` calls OPEN forever,
+ * and its watch refcounts keep up to four hundred LOM observers armed for a
+ * browser that is gone.
+ */
+const alive = new WeakSet<WebSocket>();
+const HEARTBEAT_MS = 15_000;
+
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== 1) continue;
+    if (!alive.has(ws)) {
+      Max.post('client stopped answering — dropping it');
+      ws.terminate();
+      continue;
+    }
+    alive.delete(ws);
+    ws.ping();
+  }
+}, HEARTBEAT_MS);
+heartbeat.unref?.();
 
 function track(ws: WebSocket, m: OpenFlow.Request, written?: Written): number {
   const reqId = nextReqId++;
@@ -1809,6 +1902,10 @@ Max.addHandler('device_state', (...atoms: unknown[]) => {
 Max.addHandler('ready', () => {
   lomReady = true;
   Max.post('LOM ready');
+  // A walk that was running belonged to a lom.ts that no longer exists, so
+  // nothing will ever answer it. Everything below re-arms; without this the
+  // flight is the one thing that does not, and every later snapshot joins it.
+  if (snapshotFlight) failFlight(snapshotFlight.reqId, 'the LOM restarted mid-walk');
   // `rev` is a counter inside `lom.ts` and a reloaded device starts it again at
   // zero, so anything we hold is from a sequence that no longer runs — every
   // later delta would line up against it by accident rather than by agreement.
@@ -1831,13 +1928,46 @@ Max.addHandler('ready', () => {
 });
 
 /**
+ * A reply from lom.ts that could not be read.
+ *
+ * Every handler below awaits a Dict and then reads the payload's shape bare, so
+ * a name that is already gone or a dict in the wrong shape is an unhandled
+ * rejection — and in Node for Max that is the device dead with its status line
+ * still reading whatever count it was last given. The client that asked is told,
+ * rather than left waiting out its request timeout, and any walk riding on the
+ * same id fails with it.
+ */
+function lomReplyFailed(
+  what: string,
+  reqId: number,
+  req: Pending | undefined,
+  e: unknown,
+  // `snapshot_done` takes its flight before the read it may fail on, so it hands
+  // the joiners over rather than asking for a flight that is already cleared.
+  joined = takeFlight(reqId),
+): void {
+  const message = `${what}: ${describe(e)}`;
+  Max.post(`reply failed — ${message}`);
+  if (req?.ws) send(req.ws, { type: 'error', id: req.clientId, message });
+  for (const j of joined) send(j.ws, { type: 'error', id: j.clientId, message });
+}
+
+/**
  * Locate an old per-set bsv.json for one-time migration.
  *
  * `filePath` is the `.als`; the old vocabulary sits in its folder. This query
  * runs once when the LOM becomes ready and is irrelevant after a pattr restores.
  */
 Max.addHandler('set_info_done', async (dictName: string) => {
-  const info: { filePath?: string; name?: string } = await Max.getDict(dictName);
+  let info: { filePath?: string; name?: string } = {};
+  try {
+    info = await Max.getDict(dictName);
+  } catch (e) {
+    // An unreadable reply means the same thing an empty one does — nothing is
+    // known about where the set lives — and the migration still has to be let
+    // off its hook or it waits for a reply that already came.
+    Max.post(`set_info_done: could not read ${dictName} — ${describe(e)}`);
+  }
   const filePath = typeof info?.filePath === 'string' ? info.filePath : '';
   const dir = filePath ? path.dirname(filePath) : '';
   const name = typeof info?.name === 'string' ? info.name : '';
@@ -1858,6 +1988,20 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
   // stray or a duplicate, and -1 refuses to hold what it carries.
   const walkedGeneration = snapshotFlight?.reqId === reqId ? snapshotFlight.generation : -1;
   const flight = takeFlight(reqId);
+  try {
+    await snapshotDone(req, dictName, dictMs, walkedGeneration, flight);
+  } catch (e) {
+    lomReplyFailed('snapshot_done', reqId, req, e, flight);
+  }
+});
+
+async function snapshotDone(
+  req: Pending | undefined,
+  dictName: string,
+  dictMs: number,
+  walkedGeneration: number,
+  flight: Array<{ ws: WebSocket; clientId?: number }>,
+): Promise<void> {
   const t0 = Date.now();
   const data: OpenFlow.Snapshot = await Max.getDict(dictName);
   const hostMs = Date.now() - t0;
@@ -1923,7 +2067,7 @@ Max.addHandler('snapshot_done', async (reqId: number, dictName: string, dictMs: 
         (req?.ws ? '' : ', plus the bridge’s own request'),
     );
   }
-});
+}
 
 Max.addHandler('snapshot_progress', (reqId: number, done: number, total: number) => {
   const req = pending.get(reqId);
@@ -1975,26 +2119,38 @@ function patchHeldWithApply(req: Pending | undefined, result: OpenFlow.ApplyResu
 Max.addHandler('apply_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const result: OpenFlow.ApplyResult = await Max.getDict(dictName);
-  patchHeldWithApply(req, result);
-  Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
-  send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
-  broadcast({ type: 'changed', kind: 'applied' });
+  try {
+    const result: OpenFlow.ApplyResult = await Max.getDict(dictName);
+    patchHeldWithApply(req, result);
+    Max.post(`apply: ${result.applied} written, ${result.skipped} skipped, ${ms}ms`);
+    send(req?.ws, { type: 'applied', id: req?.clientId, lomMs: ms, ...result });
+    broadcast({ type: 'changed', kind: 'applied' });
+  } catch (e) {
+    // What Live took is unknown, which is exactly the case `patchHeldWithApply`
+    // drops the held set for.
+    dropHeld('an apply finished with a reply that could not be read');
+    lomReplyFailed('apply_done', reqId, req, e);
+  }
 });
 
 Max.addHandler('add_scenes_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const r: OpenFlow.ScenesAddedResult = await Max.getDict(dictName);
-  Max.post(
-    `addScenes: ${r.created} created, ${r.configured} configured, ` +
-      `${r.failed} failed, ${ms}ms` +
-      (r.undoStep ? ' (one undo step)' : ' (NOT grouped in Live undo)'),
-  );
-  send(req?.ws, { type: 'scenesAdded', id: req?.clientId, lomMs: ms, ...r });
-  // Every scene index at or below the insertion point changed. Other clients
-  // must discard their snapshots before another click can address the old row,
-  // and so must we — this renumbers the set rather than editing it.
+  try {
+    const r: OpenFlow.ScenesAddedResult = await Max.getDict(dictName);
+    Max.post(
+      `addScenes: ${r.created} created, ${r.configured} configured, ` +
+        `${r.failed} failed, ${ms}ms` +
+        (r.undoStep ? ' (one undo step)' : ' (NOT grouped in Live undo)'),
+    );
+    send(req?.ws, { type: 'scenesAdded', id: req?.clientId, lomMs: ms, ...r });
+  } catch (e) {
+    lomReplyFailed('add_scenes_done', reqId, req, e);
+  }
+  // Outside the catch: scenes may well have been inserted whether or not the
+  // count came back, and every index at or below the insertion point moved.
+  // Other clients must discard their snapshots before another click can address
+  // the old row, and so must we — this renumbers the set rather than editing it.
   dropHeld('scenes were inserted, which renumbers the set');
   broadcast({ type: 'changed', kind: 'structure' });
   requestInternalSnapshot();
@@ -2008,29 +2164,34 @@ Max.addHandler('move_progress', (reqId: number, done: number, total: number) => 
 Max.addHandler('move_clips_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const r: { copied: number; removed: number; failed: number; undoStep: boolean } =
-    await Max.getDict(dictName);
-  // Every index still means what it meant, so the plan alone says where each
-  // clip ended up — unless something failed, because `lom.ts` then skips the
-  // whole delete pass and the set holds both copies, which the plan does not
-  // describe. Slots only: no scene name moved, so the model still stands.
-  if (held) {
-    if (req?.written?.kind !== 'clips' || r.failed > 0) {
-      dropHeld(
-        r.failed > 0
-          ? `${r.failed} of ${r.copied + r.failed} clip copies failed, so nothing was deleted`
-          : 'a clip move finished with no record of what it moved',
-      );
-    } else {
-      const clips = applyClipMove(held.snapshot.clips, req.written.plan);
-      held.snapshot = { ...held.snapshot, clips, clipCount: clips.length };
+  try {
+    const r: { copied: number; removed: number; failed: number; undoStep: boolean } =
+      await Max.getDict(dictName);
+    // Every index still means what it meant, so the plan alone says where each
+    // clip ended up — unless something failed, because `lom.ts` then skips the
+    // whole delete pass and the set holds both copies, which the plan does not
+    // describe. Slots only: no scene name moved, so the model still stands.
+    if (held) {
+      if (req?.written?.kind !== 'clips' || r.failed > 0) {
+        dropHeld(
+          r.failed > 0
+            ? `${r.failed} of ${r.copied + r.failed} clip copies failed, so nothing was deleted`
+            : 'a clip move finished with no record of what it moved',
+        );
+      } else {
+        const clips = applyClipMove(held.snapshot.clips, req.written.plan);
+        held.snapshot = { ...held.snapshot, clips, clipCount: clips.length };
+      }
     }
+    Max.post(
+      `moveClips: ${r.copied} copied, ${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
+        (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
+    );
+    send(req?.ws, { type: 'clipsMoved', id: req?.clientId, lomMs: ms, ...r });
+  } catch (e) {
+    dropHeld('a clip move finished with a reply that could not be read');
+    lomReplyFailed('move_clips_done', reqId, req, e);
   }
-  Max.post(
-    `moveClips: ${r.copied} copied, ${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
-      (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
-  );
-  send(req?.ws, { type: 'clipsMoved', id: req?.clientId, lomMs: ms, ...r });
   // Not structural the way a scene move is — every index still means what it
   // meant — but the grid's contents moved, so other clients are showing clips
   // where there aren't any.
@@ -2040,17 +2201,22 @@ Max.addHandler('move_clips_done', async (reqId: number, dictName: string, ms: nu
 Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const r: {
-    created: number; copied: number; removed: number;
-    failed: number; undoStep: boolean;
-  } = await Max.getDict(dictName);
-  Max.post(
-    `move: ${r.created} scenes created, ${r.copied} clips copied, ` +
-      `${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
-      (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
-  );
-  send(req?.ws, { type: 'moved', id: req?.clientId, lomMs: ms, ...r });
-  // Structural, so every client's scene indexes just became wrong. This is the
+  try {
+    const r: {
+      created: number; copied: number; removed: number;
+      failed: number; undoStep: boolean;
+    } = await Max.getDict(dictName);
+    Max.post(
+      `move: ${r.created} scenes created, ${r.copied} clips copied, ` +
+        `${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
+        (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
+    );
+    send(req?.ws, { type: 'moved', id: req?.clientId, lomMs: ms, ...r });
+  } catch (e) {
+    lomReplyFailed('move_done', reqId, req, e);
+  }
+  // Outside the catch, and structural, so every client's scene indexes just
+  // became wrong whether or not the counts came back. This is the
   // one change where a stale grid is actively dangerous rather than merely out
   // of date — a click lands on a different scene than it looks like.
   //
@@ -2067,19 +2233,27 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
 Max.addHandler('clip_notes_done', async (reqId: number, dictName: string, ms: number) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const payload: { clips?: OpenFlow.ClipNotes[] } = await Max.getDict(dictName);
-  const clips = Array.isArray(payload?.clips) ? payload.clips : [];
-  const notes = clips.reduce((n, clip) => n + (clip.notes?.length ?? 0), 0);
-  Max.post(`clip notes: ${notes} notes from ${clips.length} clips in ${ms}ms`);
-  send(req?.ws, { type: 'clipNotes', id: req?.clientId, clips });
+  try {
+    const payload: { clips?: OpenFlow.ClipNotes[] } = await Max.getDict(dictName);
+    const clips = Array.isArray(payload?.clips) ? payload.clips : [];
+    const notes = clips.reduce((n, clip) => n + (clip.notes?.length ?? 0), 0);
+    Max.post(`clip notes: ${notes} notes from ${clips.length} clips in ${ms}ms`);
+    send(req?.ws, { type: 'clipNotes', id: req?.clientId, clips });
+  } catch (e) {
+    lomReplyFailed('clip_notes_done', reqId, req, e);
+  }
 });
 
 Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   const req = pending.get(reqId);
   pending.delete(reqId);
-  const p: OpenFlow.Palette = await Max.getDict(dictName);
-  Max.post(`palette diagnostic: ${p.count} colors extracted (not persisted)`);
-  send(req?.ws, { type: 'palette', id: req?.clientId, ...p });
+  try {
+    const p: OpenFlow.Palette = await Max.getDict(dictName);
+    Max.post(`palette diagnostic: ${p.count} colors extracted (not persisted)`);
+    send(req?.ws, { type: 'palette', id: req?.clientId, ...p });
+  } catch (e) {
+    lomReplyFailed('palette_done', reqId, req, e);
+  }
 });
 
 Max.addHandler('changed', (kind: string) => {
@@ -2584,6 +2758,23 @@ if (fs.existsSync(PUBLIC)) {
 }
 
 // --- lifecycle --------------------------------------------------------
+
+/**
+ * The last resort, and not the fix.
+ *
+ * The maxpat runs this as `node.script bridge.js @autostart 1 @watch 1` with
+ * nothing to restart it, so an uncaught throw anywhere is the show over until
+ * someone reloads the device — and it is *silent*, because the Status line keeps
+ * displaying the last count it was given. Staying up with one broken request is
+ * strictly better than that. Every guard elsewhere in this file exists so this
+ * one never fires.
+ */
+process.on('uncaughtException', (e) => {
+  Max.post(`uncaught error — ${describe(e)} · the device is still running`);
+});
+process.on('unhandledRejection', (reason) => {
+  Max.post(`unhandled rejection — ${describe(reason)} · the device is still running`);
+});
 
 // Both listeners are required: WebSocketServer re-emits the http server's error
 // on itself, and an unhandled 'error' event takes down the whole script.

@@ -202,6 +202,26 @@ Max collapses a single-element array into the element itself, so a one-clip writ
 looks empty, and the write reports "0 applied" while doing nothing — silent, and
 indistinguishable from a selection that had nothing to change. `apply()` re-wraps it.
 
+#### A dict read that fails must not be fatal
+
+Every `*_done` handler in `bridge.ts` is `async` and `await Max.getDict(dictName)`, then
+reads the payload's shape bare — `data.timings.elapsed`, `result.applied`, `p.count`. A
+name that is already gone, or a dict in an unexpected shape, therefore throws inside a
+handler nothing awaits, which is an unhandled rejection. Node for Max runs this script
+with no restart on exit, so that is the device gone for the rest of the show — and gone
+*silently*, because the Status line goes on displaying the count it was last handed.
+
+Each of them wraps its body and reports through `lomReplyFailed`, which posts to the Max
+window and answers the waiting client with an `error` rather than leaving it on a request
+timeout — plus every joiner riding the same walk. Where a write may have landed anyway
+(`add_scenes_done`, `move_done`, `move_clips_done`), the "the set moved, drop what you
+hold" half stays *outside* the catch: a reply that could not be read says nothing about
+whether Live took the write.
+
+`process.on('uncaughtException')` and `('unhandledRejection')` sit under all of it as a
+last resort, logging and keeping the process alive. They are not the fix — every guard
+above is — and a device that reaches them has a bug to find in the Max window.
+
 #### Never let an error reach the UI without a message
 
 `fail()` used `String((e as Error)?.message ?? e)`, and `??` doesn't catch `''`. Combined

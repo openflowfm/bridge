@@ -97,6 +97,31 @@ the watch open forever.
 `bridge.ts` keeps a `Set` of sockets per watch kind, releases them on socket close, and
 re-arms from that record when the LOM reports ready again after a device reload.
 
+### A client that stops answering is dropped
+
+Refcounting only works if `close` eventually fires, and for a half-open socket it never
+does. A laptop that slept, a phone that walked off the LAN, a browser killed rather than
+quit — all of them leave a socket `readyState` calls OPEN forever. The device keeps
+writing meter frames to it at 30 Hz, which accumulate in the send buffer inside *Live's*
+Node process, and its watch refcounts keep as many as four hundred LOM observers armed
+for a browser nobody is looking at.
+
+So there are two floors under that, both in `bridge.ts` and neither of them the app's
+`ping` — that one is client-initiated, so a silent client is never asked anything:
+
+- a **15-second protocol ping**, and a socket that misses one whole sweep is terminated;
+- a **4 MB buffered cap** in `send`/`broadcast`, terminating a socket that has stopped
+  draining before the queue is worth anything on the order of megabytes.
+
+Both end in `terminate()`, which fires `close`, which releases the watches. The cost to a
+client that was merely slow is a reconnect, which every client in this protocol already
+does by itself.
+
+A per-socket `'error'` listener sits beside them for a plainer reason: `ws` **throws** on
+a socket whose `'error'` nobody listens for, so one unclean disconnect used to take the
+whole device down — and take it down invisibly, since the Status line keeps displaying
+the last count it was handed.
+
 **Two watches belong to the device, and five to whoever is looking.**
 
 `observe` (the set restructured) and `watch_selection` (the Session cursor, which is how a
@@ -179,6 +204,15 @@ one answered but not held proves nothing about what we know now.
    none of them, and every later request queues behind a walk that is no longer running —
    a worse failure than the one that started it. `takeFlight(reqId)` is the single place
    that closes one out.
+
+   **And a reply that never arrives is one of those paths.** `snapshot_done` and `err`
+   are the only two messages that clear a flight, so a lost one wedges the walk path
+   permanently: `requestInternalSnapshot` and `backstopTick` both early-return on a
+   standing flight, every client `snapshot` joins it, and `ready` re-arms everything
+   *except* this — so even reloading the LOM does not recover. Two things close that:
+   a 45-second watchdog started with the flight, which fails it through the same path
+   `err` uses so joiners get an answer rather than a timeout, and `ready` failing any
+   flight it finds, since that walk was running in a `lom.js` that no longer exists.
 
    Single-flight is now the *walk* path only — held state answers most requests before
    it is reached. It still matters, because the requests that do walk arrive together:
