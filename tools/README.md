@@ -9,12 +9,14 @@ build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
 visuals.ts                   the visuals rig in a dedicated Chrome — npm run visuals:browser
-build-electron.ts            bundles a module's Electron main and preload to CommonJS
+build-electron.ts            bundles a module's Electron main, preload and server
+build-icons.ts               makes an app's .icns from the mark and one colour
 ```
 
 ```sh
 npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
+npm run pack                # both apps as .app and .dmg under release/
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
@@ -43,9 +45,13 @@ window and the display list.
 
 `build-electron.ts` esbuilds `<module>/electron/{main,preload}.ts` to **CommonJS**. Both
 halves are forced: Electron's bundled Node does not strip types the way Node 24 on your PATH
-does, and a `sandbox: true` preload must be CJS. Neither app is part of `npm run build` —
-that script is what CI enforces and what produces the `.amxd`, and it has no business
-needing an Electron binary.
+does, and a `sandbox: true` preload must be CJS. It also bundles visual[flow]'s server, and
+that one to **ESM**, because the server reads `import.meta.url` to find its renderer and its
+Link addon — both empty in a CJS bundle.
+
+`npm run pack` makes real `.app` bundles with `electron-builder`, unsigned for now. Neither
+building nor packing is part of `npm run build` — that script is what CI enforces and what
+produces the `.amxd`, and it has no business needing an Electron binary.
 
 ## `npm run visuals:browser`
 
