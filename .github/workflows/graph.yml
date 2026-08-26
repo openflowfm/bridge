@@ -35,6 +35,10 @@ jobs:
       # Installs gnosis from its repo too — its prepare step compiles it.
       - run: npm ci
 
+      # The graph always builds with gnosis' latest main, regardless of the
+      # SHA the lockfile pins — --no-save leaves the lockfile alone.
+      - run: npm install --no-save github:ryangavin/gnosis
+
       # CI=true makes the posttest graph hook a no-op, so `gnosis trace`
       # below is the only instrumented run; it refuses to merge a trace
       # whose pass/fail counts differ from the baseline run.
