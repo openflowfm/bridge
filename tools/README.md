@@ -17,6 +17,8 @@ build-icons.ts               makes an app's .icns from the mark and one colour
 npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
 npm run pack                # both apps as .app and .dmg under release/
+npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
+npm run dev:visuals-app     # the same for visual[flow], on a server npm run dev is holding
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
