@@ -10,6 +10,11 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Electron ships a ~200 MB Chromium that no CI job here can run — the
+    # typecheck needs its type declarations and nothing else, and those come
+    # with the package rather than the binary.
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v5
 

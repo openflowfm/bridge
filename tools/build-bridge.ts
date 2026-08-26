@@ -19,10 +19,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PUBLIC = path.join(root, 'bridge', 'public');
+const BUILT = path.join(root, 'set', 'dist');
 const OUT = path.join(root, 'bridge', 'bridge.js');
 
-/** Every file under public/, keyed by the URL path the bridge serves it at. */
+/** Every file of the built app, keyed by the URL path the bridge serves it at. */
 function collect(dir: string, prefix = ''): Record<string, string> {
   const out: Record<string, string> = {};
   if (!fs.existsSync(dir)) return out;
@@ -39,12 +39,12 @@ function collect(dir: string, prefix = ''): Record<string, string> {
   return out;
 }
 
-const assets = collect(PUBLIC);
+const assets = collect(BUILT);
 const assetBytes = Object.values(assets).reduce((n, b64) => n + b64.length, 0);
 
 if (!Object.keys(assets).length) {
   console.warn(
-    'build:bridge — public/ is empty, so the UI is NOT inlined. Run build:set first ' +
+    'build:bridge — set/dist is empty, so the UI is NOT inlined. Run build:set first ' +
       '(npm run build does). The device will serve nothing but the API.',
   );
 }
