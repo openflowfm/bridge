@@ -6,7 +6,7 @@ completely different JavaScript environments.
 ```
                     ┌─────────────────────────────────────┐
   browser ──WS/JSON─┤ bridge.js   (Node for Max)          │
-                    │   HTTP + WebSocket, serves the UI   │
+                    │   the WebSocket server              │
                     │   holds the set + the song mapping  │
                     │   makes no LiveAPI call itself      │
                     └──────────────┬──────────────────────┘

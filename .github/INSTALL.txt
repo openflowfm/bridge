@@ -5,7 +5,7 @@ https://github.com/ryangavin/better-session-view
 WHAT'S IN HERE
 
   SessionBridge.amxd   the Max for Live device
-  bridge.js            the Node half — the UI is baked into this file
+  bridge.js            the Node half — the WebSocket server
   lom.js               the [v8] half, the only code that talks to Live
 
 KEEP ALL THREE TOGETHER. The device loads bridge.js and lom.js by name from
@@ -20,8 +20,8 @@ INSTALL
      a straight passthrough, so it's inert on the signal path — the Master
      track is a fine home.
   3. Wait for the status line to read "connected to Live".
-  4. Click "Open Session Manager". It opens http://127.0.0.1:17800 in your
-     browser.
+  4. Open set[flow], the session manager. It is a separate app and it finds
+     the device by itself.
 
 
 THE STATUS LINE

@@ -12,12 +12,12 @@
 //   [pattr openflow-state] -> [prepend device_state] -> [s ---openflow-to-node]
 //   [v8 lom.js] -> [s ---openflow-to-node]
 //   [r ---openflow-to-node] -> [node.script] in0  and  -> [route ready] -> status text
-//   [live.text] -> [; max launchbrowser ...(              (launch, and GitHub)
+//   [live.text] -> [; max launchbrowser ...(                    (the GitHub link)
 //   [plugin~] -> [plugout~]                                (audio passthrough)
 //
-// Presentation view — a display panel reading status and address, the launch
-// button, and a footer carrying the version and a link out. Everything above
-// is hidden. See the layout note above the presentation section.
+// Presentation view — a display panel reading the connection count, and a
+// footer carrying the version and a link out. Everything above is hidden. See
+// the layout note above the presentation section.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,7 +27,6 @@ import { pack } from './amxd.ts';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = path.join(root, 'bridge');
 
-const URL_ = 'http://127.0.0.1:17800';
 const REPO = 'https://github.com/ryangavin/better-session-view';
 const VERSION = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 
@@ -85,12 +84,11 @@ const connect = (src: string, outlet: number, dst: string, inlet: number) =>
 //   0  ┌────────────────────────────────┐  display panel, live_lcd_bg
 //      │ Status                         │  dim label
 //      │ 1 connection                   │  how many clients are attached
-//      │ ──────────────────────────────  │
-//      │ Address         127.0.0.1:17800│  label left, value right
-//  86  └────────────────────────────────┘
-//  98    ╭──────────────────────────────╮
-//        │     Open Session Manager     │
-// 128    ╰──────────────────────────────╯
+//  56  └────────────────────────────────┘
+//
+//                                          nothing else: the device bridges
+//                                          Live, and the apps are their own
+//
 // 139    open[flow] 0.1.0  GitHub
 // 169
 //
@@ -108,7 +106,6 @@ const LIVE_FONT = 'Ableton Sans Medium';
 // Cached fallbacks for the theme colors below, in case an expression can't be
 // resolved. Values are Max's own defaults from interfaces/maxcolors.json.
 const LCD_BG = [0.156863, 0.156863, 0.156863, 1.0];
-const LCD_FRAME = [0.313725, 0.313725, 0.313725, 1.0];
 const LCD_TITLE = [0.807843, 0.807843, 0.807843, 1.0];
 const LCD_DIM = [0.54902, 0.54902, 0.54902, 1.0];
 
@@ -179,7 +176,7 @@ const linkButton = (
 // paint over the text; `bgfillcolor` is the attribute panel actually fills
 // from, while `bgcolor` is the cached literal — the same split Ableton's own
 // devices save.
-box('panel', null, [520, 380, DEVICE_W, 86], {
+box('panel', null, [520, 380, DEVICE_W, 56], {
   numinlets: 1,
   numoutlets: 0,
   mode: 0,
@@ -189,7 +186,7 @@ box('panel', null, [520, 380, DEVICE_W, 86], {
   saved_attribute_attributes: { bgfillcolor: { expression: 'themecolor.live_lcd_bg' } },
   // Bleeds to both edges, the way Ableton's own panels do — a device face has
   // no outer margin.
-  ...pres([0, 0, DEVICE_W, 86]),
+  ...pres([0, 0, DEVICE_W, 56]),
 });
 
 lcdText('Status', [530, 390, 100, 16], [10, 10, 100, 16]);
@@ -198,28 +195,6 @@ const status = lcdText('Starting…', [530, 406, 224, 20], [10, 26, 224, 20], {
   tone: 'title',
   varname: 'status',
 });
-
-box('live.line', null, [530, 432, 224, 8], {
-  numinlets: 1,
-  numoutlets: 0,
-  // Where the rule sits inside its box: 0 draws it against the top edge, 1
-  // centers it. Centered, so the 8px box reads as the gap it looks like.
-  justification: 1,
-  linecolor: LCD_FRAME,
-  saved_attribute_attributes: { linecolor: { expression: 'themecolor.live_lcd_frame' } },
-  ...pres([10, 52, 224, 8]),
-});
-
-lcdText('Address', [530, 442, 70, 16], [10, 62, 70, 16]);
-lcdText('127.0.0.1:17800', [614, 442, 140, 16], [94, 62, 140, 16], { tone: 'title', align: 2 });
-
-const launch = linkButton(
-  'Open Session Manager',
-  'Open the Session Manager in your browser, at 127.0.0.1:17800.',
-  [526, 478, 232, 30],
-  [6, 98, 232, 30],
-  11.0,
-);
 
 // The footer sits on the device surface rather than the display, so this one is
 // a `live.comment` with no color set — that is already the surface text color,
@@ -336,7 +311,6 @@ const msgOne = msg('set "1 connection"', [700, 188, 160, 22]);
 // comment as `set 5 connections` — exactly the list `set` wants.
 const fmtMany = obj('sprintf set %ld connections', [700, 220, 210, 22], 1, 1);
 
-const msgLaunch = msg(`; max launchbrowser ${URL_}`, [160, 400, 300, 22]);
 const msgGithub = msg(`; max launchbrowser ${REPO}`, [160, 432, 340, 22]);
 
 comment('LOM side (v8)', [370, 38, 140, 20], { fontsize: 10.0 });
@@ -390,7 +364,6 @@ connect(prependDeviceState, 0, sToNode, 0);
 // *bang* on click — the text goes out the right outlet — so the `sel 1` that
 // used to sit here matched nothing and the button did nothing. `sel 1` is for
 // Toggle mode, which is the one mode these buttons must not be in.
-connect(launch, 0, msgLaunch, 0);
 connect(github, 0, msgGithub, 0);
 
 connect(pluginIn, 0, pluginOut, 0);

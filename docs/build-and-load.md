@@ -8,25 +8,26 @@ Three files, and the user should only ever have to hold one of them:
 
 ```
 SessionBridge.amxd    the device
-bridge.js             bundled — ws inlined, and the built UI inlined as base64
+bridge.js             bundled — ws inlined
 lom.js                the [v8] script
 ```
 
 `npm run build:bridge` runs [`../tools/build-bridge.ts`](../../tools/build-bridge.ts),
 which esbuilds `src/bridge.ts` into a single self-contained `bridge.js`. That's what
-removes `node_modules/` and `public/` from the shipped folder — a Live device is
-something people download and drag, not a directory tree they're expected to keep
-together.
+removes `node_modules/` from the shipped folder — a Live device is something people
+download and drag, not a directory tree they're expected to keep together.
+
+**It used to carry the session manager as well**, base64'd into the bundle by a `define`:
+595 kB of it, three quarters of the file, parsed by Node inside Live's process on every
+device load. set[flow] is a desktop app now, so `bridge.js` is ~204 kB and the device
+serves nothing at all — a browser pointed at `:17800` gets one sentence saying so.
 
 Two things are deliberately left external: **`max-api`**, which Max itself provides and
 which cannot be bundled, and **`bufferutil` / `utf-8-validate`**, `ws`'s optional native
 speedups that it `require`s inside a `try` and does without.
 
-**`npm run dev` does not use the bundler.** It keeps `tsc --watch`, which is faster, and
-leaves the inlined-asset global undefined — so the bridge serves `public/` off disk while
-vite owns the UI. Serving prefers a real `public/` folder when one exists and falls back
-to the inlined copy, which also means you can drop a rebuilt UI next to a shipped device
-without rebuilding the device.
+**`npm run dev` does not use the bundler.** It keeps `tsc --watch`, which is faster —
+and now that nothing is inlined, that is the only difference between the two paths.
 
 The end goal is **one file**: Live's Freeze button inlines a device's dependencies into
 the `.amxd` itself, which is how a 2 MB single-file device on maxforlive.com works. See
@@ -39,8 +40,8 @@ scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a fr
 1. Drop `SessionBridge.amxd` onto any track. It's an audio effect with a
    `plugin~ → plugout~` passthrough, so it's inert on the signal path — the Master
    track is a fine home.
-2. Wait for the status to read `No connections`, then click **Open Session Manager** —
-   it should go to `1 connection` as the browser attaches.
+2. Wait for the status to read `No connections`, then run `npm run set` — it should go
+   to `1 connection` as the app attaches.
 
 | status | means |
 |---|---|

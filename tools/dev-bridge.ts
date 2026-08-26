@@ -4,10 +4,7 @@
 //
 // bridge.ts now imports core/src, which sits outside bridge/src. Plain tsc
 // refuses to emit outside its rootDir, so this bundles instead — bundling
-// doesn't care where an import lives. Unlike tools/build-bridge.ts, it never
-// defines OPENFLOW_ASSETS, so bridge.ts's `typeof OPENFLOW_ASSETS === 'undefined'` check
-// still takes the "serve public/ off disk" branch and vite keeps owning the UI,
-// same as before this file existed.
+// doesn't care where an import lives.
 //
 // esbuild strips types without checking them, so this gives no type errors.
 // npm run dev's `types` task (`tsc --noEmit --watch`) covers that.

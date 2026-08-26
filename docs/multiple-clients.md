@@ -86,7 +86,7 @@ same bridge), so this is exercised rather than hypothetical.
 
 **Already correct.** `pending` keys by request id and stores the originating socket, so
 replies route to the client that asked. Terminal replies (`snapshot`, `applied`,
-`palette`) go to the requester; `changed`, `delta`, `deviceState` and `reload` broadcast.
+`palette`) go to the requester; `changed`, `delta` and `deviceState` broadcast.
 Each client's `BridgeClient` is its own instance, so `lastWireTiming` is per-client.
 
 **Client watches are refcounted**, which they had to become the moment `useBridge` started

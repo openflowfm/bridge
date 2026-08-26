@@ -5,7 +5,7 @@ these execute straight from source.
 
 ```
 amxd.ts                      pack / unpack / inspect .amxd containers  (library + CLI)
-build-bridge.ts              bundles bridge.js — ws and the built UI inlined
+build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
 visuals.ts                   show night: builds the renderer, supervises the visuals server

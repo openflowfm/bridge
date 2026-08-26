@@ -1,9 +1,12 @@
 // bridge.ts — compiled to bridge/bridge.js and run by Node for Max.
 //
-// Owns the HTTP + WebSocket server. Knows nothing about the Live Object Model;
-// it just relays coarse-grained requests to lom.ts and streams results back.
-// Serving the UI from here is deliberate: the whole app ships as one .amxd plus
-// this folder, with no packaging, signing or updater.
+// Owns the WebSocket server. Knows nothing about the Live Object Model; it just
+// relays coarse-grained requests to lom.ts and streams results back.
+//
+// It used to serve the session manager too, with the built app inlined as base64
+// — 595 kB of web app parsed inside Live's process on every device load. The
+// front ends are desktop apps now and this bridges Live and nothing else, which
+// is the one job that has to happen inside Max.
 //
 // Protocol types come from the global OpenFlow namespace rather than an import, so
 // this can emit to a flat file outside its own rootDir.
@@ -41,7 +44,6 @@ const PORT = Number(process.env.OPENFLOW_PORT) || 17800;
 const CLIP_NOTES_MAX = 32;
 const HOST = '127.0.0.1';
 const WS_PATH = '/ws';
-const PUBLIC = path.join(__dirname, 'public');
 
 /**
  * Where older installs kept role configuration.
@@ -377,17 +379,7 @@ function takeFlight(reqId: number): Array<{ ws: WebSocket; clientId?: number }> 
   return joined;
 }
 
-// --- http -------------------------------------------------------------
-
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.woff2': 'font/woff2',
-  '.map': 'application/json; charset=utf-8',
-};
+// --- the server ---------------------------------------------------------
 
 /**
  * A non-empty description of a thrown value.
@@ -406,64 +398,21 @@ function describe(e: unknown): string {
 }
 
 /**
- * The built UI, inlined at bundle time as `path -> base64`.
+ * There is a server here because a WebSocket needs one, and for nothing else.
  *
- * Substituted by esbuild (`define`), which is why it's a bare global rather than
- * an import: `npm run dev` compiles this file with plain tsc and no substitution
- * happens, so the `typeof` guard below leaves it empty and serving falls through
- * to `public/` on disk. That's the arrangement the dev loop wants anyway — vite
- * owns the UI there. See tools/build-bridge.ts.
+ * It used to serve the session manager, which is why `bridge.js` carried 595 kB
+ * of base64 web app into Live's process. That app is a window of its own now —
+ * see `set/docs/desktop.md` — so what is left is the four lines it takes to
+ * answer somebody who typed the address into a browser out of habit, and the
+ * `http.Server` that `ws` attaches to.
+ *
+ * Kept as an `http.Server` rather than letting `ws` make its own, because
+ * `server.listen`'s callback is this process's whole startup handshake and both
+ * of the error listeners at the bottom of this file are load-bearing.
  */
-declare const OPENFLOW_ASSETS: Record<string, string> | undefined;
-const ASSETS: Record<string, string> =
-  typeof OPENFLOW_ASSETS === 'undefined' ? {} : OPENFLOW_ASSETS;
-
-/** Serve an inlined asset, or 404 if this build has none. */
-function serveEmbedded(rel: string, res: http.ServerResponse): void {
-  const b64 = ASSETS[rel];
-  if (b64 === undefined) {
-    res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
-    return;
-  }
-  res.writeHead(200, {
-    'content-type': MIME[path.extname(rel)] || 'application/octet-stream',
-    'cache-control': 'no-store',
-  });
-  res.end(Buffer.from(b64, 'base64'));
-}
-
 const server = http.createServer((req, res) => {
-  let rel: string;
-  try {
-    // `/%` and `/%zz` are requests a scanner makes without meaning anything by
-    // it, and `decodeURIComponent` answers both with a throw — uncaught here,
-    // which is the device gone.
-    rel = decodeURIComponent(new URL(req.url ?? '/', `http://${HOST}:${PORT}`).pathname);
-  } catch {
-    res.writeHead(400, { 'content-type': 'text/plain' }).end('bad request');
-    return;
-  }
-  if (rel === '/') rel = '/index.html';
-
-  const file = path.join(PUBLIC, path.normalize(rel));
-  if (file !== PUBLIC && !file.startsWith(PUBLIC + path.sep)) {
-    res.writeHead(403).end('forbidden');
-    return;
-  }
-  // Disk first, embedded second. A `public/` folder beside the script wins so a
-  // rebuilt UI can be dropped next to a shipped device without rebuilding it —
-  // and so this stays the path it has always been when the folder is there.
-  fs.readFile(file, (err, buf) => {
-    if (err) {
-      serveEmbedded(rel, res);
-      return;
-    }
-    res.writeHead(200, {
-      'content-type': MIME[path.extname(file)] || 'application/octet-stream',
-      'cache-control': 'no-store',
-    });
-    res.end(buf);
-  });
+  res.writeHead(req.url === '/' ? 200 : 404, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end('open[flow] bridge. The WebSocket is at /ws; the session manager is a desktop app.\n');
 });
 
 const wss = new WebSocketServer({ server, path: WS_PATH });
@@ -2733,29 +2682,6 @@ Max.addHandler('err', (reqId: number, ...rest: unknown[]) => {
 });
 
 Max.addHandler('pong', () => {});
-
-// --- dev: live reload -------------------------------------------------
-// Vite's own HMR covers the dev server. This covers the built output being
-// served straight out of public/.
-
-// A shipped device has no public/ at all — its UI is inlined and cannot change
-// underneath it. That's the normal state, not a degraded one, so it gets no
-// warning; a missing folder is only worth reporting when someone meant it to be
-// there, which is exactly the case where it exists and the watch itself fails.
-let reloadTimer: NodeJS.Timeout | undefined;
-if (fs.existsSync(PUBLIC)) {
-  try {
-    fs.watch(PUBLIC, { recursive: true }, () => {
-      clearTimeout(reloadTimer);
-      reloadTimer = setTimeout(() => {
-        Max.post('public/ changed — reloading clients');
-        broadcast({ type: 'reload' });
-      }, 120); // editors emit several events per save
-    });
-  } catch (e) {
-    Max.post(`could not watch public/ — live reload off (${describe(e)})`);
-  }
-}
 
 // --- lifecycle --------------------------------------------------------
 
