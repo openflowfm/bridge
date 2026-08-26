@@ -11,12 +11,14 @@ lom-reference.ts             rescrapes the LOM page to a scratch file, for diffi
 visuals.ts                   the visuals rig in a dedicated Chrome — npm run visuals:browser
 build-electron.ts            bundles a module's Electron main, preload and server
 build-icons.ts               makes an app's .icns from the mark and one colour
+install-apps.ts              copies the packed apps into /Applications
 ```
 
 ```sh
 npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
 npm run pack                # both apps as .app and .dmg under release/
+npm run install:apps        # copies those into /Applications — or one: install:apps set
 npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
 npm run dev:visuals-app     # the same for visual[flow], on a server npm run dev is holding
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
@@ -51,9 +53,13 @@ does, and a `sandbox: true` preload must be CJS. It also bundles visual[flow]'s 
 that one to **ESM**, because the server reads `import.meta.url` to find its renderer and its
 Link addon — both empty in a CJS bundle.
 
-`npm run pack` makes real `.app` bundles with `electron-builder`, unsigned for now. Neither
-building nor packing is part of `npm run build` — that script is what CI enforces and what
-produces the `.amxd`, and it has no business needing an Electron binary.
+`npm run pack` makes real `.app` bundles with `electron-builder`, unsigned for now, and
+`npm run install:apps` copies them into `/Applications` — a separate step because packing
+writes a build artifact and installing is a decision about the machine. It replaces rather
+than merges, refuses to overwrite an app that is open, and takes `OPENFLOW_APPS` if
+`/Applications` is not yours to write. Neither building nor packing is part of
+`npm run build` — that script is what CI enforces and what produces the `.amxd`, and it has
+no business needing an Electron binary.
 
 ## `npm run visuals:browser`
 
