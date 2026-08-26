@@ -12,6 +12,7 @@ visuals.ts                   the visuals rig in a dedicated Chrome — npm run v
 build-electron.ts            bundles a module's Electron main, preload and server
 build-icons.ts               makes an app's .icns from the mark and one colour
 install-apps.ts              copies the packed apps into /Applications
+install-device.ts            copies the device into the Ableton User Library, as -qa
 ```
 
 ```sh
@@ -20,6 +21,7 @@ npm run set                 # the set[flow] app
 npm run qa                  # build + pack + install:apps — everything, onto this machine
 npm run pack                # both apps as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications — or one: install:apps set
+npm run install:device      # the device into the User Library as SessionBridge-qa
 npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
 npm run dev:visuals-app     # the same for visual[flow], on a server npm run dev is holding
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
@@ -62,12 +64,24 @@ than merges, refuses to overwrite an app that is open, and takes `OPENFLOW_APPS`
 `npm run build` — that script is what CI enforces and what produces the `.amxd`, and it has
 no business needing an Electron binary.
 
-**`npm run qa` is those three in order** — the device, both apps, installed — for when the
-next thing you do is drive the real applications rather than a dev server. It stops at the
-first failure, so a bad build never reaches `/Applications`. It runs neither `typecheck` nor
-`test`: those are fast and belong in the loop before this one, and a script that quietly
-reruns them makes the slow path look like the cheap one. The chart is not in it either — it
-is a page, not an app, and `npm run build:chart` stands alone.
+**`npm run qa` is those four in order** — the device, both apps, and all three installed
+where the machine looks for them — for when the next thing you do is drive the real thing
+rather than a dev server. It stops at the first failure, so a bad build never reaches
+`/Applications`. It runs neither `typecheck` nor `test`: those are fast and belong in the
+loop before this one, and a script that quietly reruns them makes the slow path look like
+the cheap one. The chart is not in it either — it is a page, not an app, and
+`npm run build:chart` stands alone.
+
+`install-device.ts` writes a **folder**, `SessionBridge-qa/`, not three loose files. The
+device is `[node.script bridge.js]` and `[v8 lom.js]`, which Max resolves by name from the
+patcher's own folder, so two devices sharing a folder share one pair of scripts — a `-qa`
+suffix on the `.amxd` alone would overwrite the scripts an installed device runs. The suffix
+names it in Live; the folder is what keeps the two apart. `OPENFLOW_USER_LIBRARY` points at
+the `Max for Live` folder when the User Library has been moved.
+
+Freezing would make this one file instead of three, and is deliberately not done here:
+`amxd.ts` reads the `mx@c` archive a frozen device carries but never writes it, because
+freezing is Live's own operation. A frozen device also has nothing for `@watch 1` to watch.
 
 ## `npm run visuals:browser`
 
