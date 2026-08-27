@@ -571,6 +571,7 @@ const WATCH_MESSAGE = {
   status: 'watch_status',
   sends: 'watch_sends',
   transport: 'watch_transport',
+  scenes: 'watch_scenes',
 } as const;
 
 type WatchKind = keyof typeof WATCH_MESSAGE;
@@ -583,6 +584,7 @@ const watchers: Record<WatchKind, Set<WebSocket>> = {
   status: new Set(),
   sends: new Set(),
   transport: new Set(),
+  scenes: new Set(),
 };
 
 /**
@@ -1791,6 +1793,10 @@ async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'transport', m.on);
       break;
+    case 'watchScenes':
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      setWatch(ws, 'scenes', m.on);
+      break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -2301,6 +2307,17 @@ Max.addHandler('play_state', (...args: number[]) => {
     });
   }
   broadcast({ type: 'playState', isPlaying: Number(args[0]) === 1, tracks });
+});
+
+// One atom, and the reason it is a message of its own rather than a field on
+// play_state: a launch is an *event*, and play_state is a state. Folding an
+// event into a state means every client re-deriving "did this just happen" from
+// two consecutive snapshots, which is the inference `watch_scenes` exists to
+// avoid. See the note above `onSceneTrigger` in lom.ts.
+Max.addHandler('scene_launched', (...args: number[]) => {
+  const s = Number(args[0]);
+  if (!Number.isFinite(s) || s < 0) return;
+  broadcast({ type: 'sceneLaunched', s });
 });
 
 // One coherent frame: master first, then track/level pairs. lom.ts updates the

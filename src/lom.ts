@@ -21,7 +21,7 @@
 //      set_device <encodedTargetAndPatch>
 //      watch_chains <encodedWatchList>
 //      watch_play <0|1> | watch_meters <0|1> | watch_sends <0|1> | watch_transport <0|1>
-//      watch_status <0|1> | watch_selection <0|1> | ping | set_info
+//      watch_status <0|1> | watch_selection <0|1> | watch_scenes <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
 //      snapshot_done <reqId> <dict> <ms> | apply_progress <reqId> <n> <total>
 //      apply_done <reqId> <dict> <ms> | add_scenes_done <reqId> <dict> <ms>
@@ -31,6 +31,7 @@
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
 //      song_position <bar> <beat> <sixteenth>
+//      scene_launched <scene>
 //      transport_state <encodedState>
 //      meter_levels <masterLevel> <track0> <level0> <track1> <level1> …
 //      clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording>
@@ -127,6 +128,8 @@ var helloPending = false;
 var cursorApi: LiveAPI | null = null;
 var observers: LiveAPI[] = [];
 var playObservers: LiveAPI[] = [];
+/** One `is_triggered` per scene, alive only while somebody watches launches. */
+var sceneObservers: LiveAPI[] = [];
 var meterObservers: LiveAPI[] = [];
 /** Activator, Solo, Arm, volume, pan and send observers, alive only with the mixer panel. */
 var mixerObservers: LiveAPI[] = [];
@@ -2633,7 +2636,7 @@ function onParamChange(
   t: number, path: readonly number[], i: number, index: number, args: unknown[],
 ): void {
   if (!chainWatching || chainAttaching) return;
-  const value = mixerValue(args, 'value');
+  const value = observedValue(args, 'value');
   if (value === null) return;
   paramDirty[t + '|' + path.join('.') + '|' + i + '|' + index] = {
     t: t,
@@ -3274,6 +3277,79 @@ function clearPlayObservers(): void {
   playObservers = [];
 }
 
+// --- scene launches ---------------------------------------------------
+// Somebody pressed a scene launch button.
+//
+// This is the one thing in the file that could be *inferred* and deliberately
+// isn't. A scene launch moves every track's `playing_slot_index` at once, so a
+// burst of play state looks like one — but so does a row of clip follow actions
+// walking the grid on their own, and those are the opposite gesture: nobody
+// touched anything. `Scene.is_triggered` is the launch button itself, and clip
+// follow actions never set it.
+//
+// One observer per scene, which is the same order as the play watcher's three
+// per track and nothing like the per-slot cost the protocol rules forbid. It is
+// its own watch rather than a rider on `watch_play` because only the visuals rig
+// asks: a grid that doesn't care shouldn't pay a scene's worth of observers.
+//
+// **The landing, not the press.** `is_triggered` goes 1 when the button is hit
+// and 0 when the scene actually starts, so the falling edge is the downbeat
+// Live chose under its own launch quantisation — the same wait `buildShow` does
+// by hand for the transport, done here by Live for free. With quantisation off
+// the two edges arrive in one tick, which still reports.
+
+/** Scene index whose launch is pending, or -1. See `onSceneTrigger`. */
+var pendingScene = -1;
+
+/**
+ * A scene's blink starting or stopping.
+ *
+ * Only the **pending** scene's falling edge counts. Launching B while A is still
+ * blinking clears A without A ever starting, and reporting that would take the
+ * one from the moment of the second press rather than from a bar line.
+ */
+function onSceneTrigger(s: number, args: unknown[]): void {
+  const value = observedValue(args, 'is_triggered');
+  // Null is the attach-time `['id', N]` frame, which is not an edge.
+  if (value === null) return;
+  if (value === 1) {
+    pendingScene = s;
+    return;
+  }
+  if (pendingScene !== s) return;
+  pendingScene = -1;
+  outlet(0, 'scene_launched', s);
+}
+
+function watch_scenes(on: number): void {
+  clearSceneObservers();
+  if (Number(on) !== 1) return;
+  if (!deviceReady) return fail(-1, 'device not ready');
+  try {
+    const count = at('live_set').getcount('scenes');
+    for (let s = 0; s < count; s++) {
+      const observer = observeAt('live_set scenes ' + s, 'is_triggered', function (args) {
+        onSceneTrigger(s, args);
+      });
+      if (observer) sceneObservers.push(observer);
+    }
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+function clearSceneObservers(): void {
+  pendingScene = -1;
+  for (let i = 0; i < sceneObservers.length; i++) {
+    try {
+      sceneObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  sceneObservers = [];
+}
+
 // --- track status -----------------------------------------------------
 // What each track's stop-row status display shows: how far through a looping
 // clip it is, how long a one-shot has left, or how much of a recording exists.
@@ -3502,7 +3578,7 @@ function readMixerState(): OpenFlow.MixerState {
 }
 
 /** Numeric observer callback: `[property, value]` or the bare `[value]` form. */
-function mixerValue(args: unknown[], property: string): number | null {
+function observedValue(args: unknown[], property: string): number | null {
   let raw: unknown;
   if (args.length >= 2 && String(args[0]) === property) raw = args[1];
   else if (args.length === 1) raw = args[0];
@@ -3525,7 +3601,7 @@ function onMixerTrackChange(
   args: unknown[],
 ): void {
   if (!metersWatching || !mixerState) return;
-  const value = mixerValue(args, property);
+  const value = observedValue(args, property);
   if (value === null) return;
   const track = mixerState.tracks[t];
   if (!track || track.t !== t) return;
@@ -3549,7 +3625,7 @@ function onMixerTrackChange(
 
 function onMixerSendChange(t: number, index: number, args: unknown[]): void {
   if (!metersWatching || !mixerState) return;
-  const value = mixerValue(args, 'value');
+  const value = observedValue(args, 'value');
   if (value === null) return;
   const track = mixerState.tracks[t];
   if (!track || track.t !== t) return;
@@ -3567,7 +3643,7 @@ function onMixerSendChange(t: number, index: number, args: unknown[]): void {
 
 function onMasterParameterChange(field: 'masterVolume' | 'masterPan', args: unknown[]): void {
   if (!metersWatching || !mixerState || !mixerState[field]) return;
-  const value = mixerValue(args, 'value');
+  const value = observedValue(args, 'value');
   if (value === null) return;
   const parameter = mixerState[field];
   if (!parameter) return;
@@ -4311,8 +4387,19 @@ function onMasterColorEdit(): void {
   selTask.schedule(SEL_DEBOUNCE_MS);
 }
 
-/** Attach one observer, or say why not. Never throws into a rebuild. */
-function observeAt(path: string, property: string, cb: () => void): LiveAPI | null {
+/**
+ * Attach one observer, or say why not. Never throws into a rebuild.
+ *
+ * The callback is handed Live's argument frame. Most callers here infer nothing
+ * from it and take none, which is why the parameter is typed rather than the
+ * whole signature: a watcher that needs the *value* — `watch_scenes` reads an
+ * edge out of it — should not have to construct its own `LiveAPI` to get it.
+ */
+function observeAt(
+  path: string,
+  property: string,
+  cb: (args: unknown[]) => void,
+): LiveAPI | null {
   const a = new LiveAPI(cb, path);
   if (!exists(a)) return null;
   a.property = property;
@@ -5283,6 +5370,7 @@ function anything(): void {
 function notifydeleted(): void {
   clearObservers();
   clearPlayObservers();
+  clearSceneObservers();
   clearStatusWatch();
   clearMeterObservers();
   clearTransportObservers();

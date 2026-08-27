@@ -32,6 +32,7 @@ lom.js     ──[s ---openflow-to-node]──> bridge.js
 | `watch_meters <0\|1>` | install / remove track/Master output-level and mixer-control observers |
 | `watch_sends <0\|1>` | add / remove the optional per-track send observers and return-track observer |
 | `watch_transport <0\|1>` | install / remove the seven fixed control-bar observers |
+| `watch_scenes <0\|1>` | install / remove one `Scene.is_triggered` observer per scene, reporting the *landing* of a launch |
 | `watch_chains <encodedUnion>` | **the one watch with a target.** Not `0\|1`: the whole union of device runs anyone is looking at, rebuilt to match. An empty list is how it stops |
 | `observe <0\|1>` | install / remove the `live_set tracks` and `scenes` observers. **Device-owned** |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live*. **Device-owned** |
@@ -63,6 +64,7 @@ which, and what it cost to get wrong, is under *multiple clients*.
 | `changed <kind>` | observer fired |
 | `delta <dict>` | a partial re-read, pushed after a change in Live |
 | `play_state <isPlaying> <playing> <fired> <armed> …` | triples, one per track |
+| `scene_launched <scene>` | somebody pressed a scene launch button and that scene has just *started*. An event, not a state — see `watch_scenes` |
 | `meter_levels <masterLevel> <track> <level> …` | complete current output-level frame |
 | `clip_status <t> <pos> <loopStart> <loopEnd> <looping> <recording> <inSeconds> <sigNum> <sigDen> …` | nine atoms per *playing* track; silent tracks are absent |
 | `mixer_state <encodedState>` | complete cached mixer-control state |

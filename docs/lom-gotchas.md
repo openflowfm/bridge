@@ -137,6 +137,14 @@ behaves the way its name suggests.
   `2 × trackCount` observers; the per-clip equivalent is two per *slot*, which is tens of
   thousands on a real set. There is no "scene is playing" property at all — the UI
   derives it from the tracks.
+- **There is no "scene is playing", but there *is* "scene is launching".** `Scene.is_triggered`
+  is observable and is the launch button blinking — 1 when it is pressed, 0 when the scene
+  actually starts. It is the only way to tell a **launch** from an **arrival**: clip follow
+  actions walk every track to the next row without setting it, which in `playing_slot_index`
+  is indistinguishable from somebody launching the scene. Costs one observer per scene, so it
+  is its own watch (`watch_scenes`) rather than a rider on the play watcher. **The falling
+  edge is the useful one** — Live has already applied launch quantisation by then, so it lands
+  on a downbeat rather than on the beat a hand moved.
 - **`Track.arm` rides the play-state watcher**, one more observer on tracks that report
   `can_be_armed`. It isn't play state, but it decides what an empty slot's button *does*
   (below), so the grid needs it whether or not the mixer footer — which observes arm for
