@@ -10,7 +10,7 @@ build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
 visuals.ts                   the visuals rig in a dedicated Chrome — npm run visuals:browser
 build-electron.ts            bundles a module's Electron main, preload and server
-build-icons.ts               makes an app's .icns from the mark and one colour
+build-icons.ts               makes an app's .icns from its own public/mark.svg
 install-apps.ts              copies the packed apps into /Applications
 install-device.ts            copies the device into the Ableton User Library, as -qa
 ```

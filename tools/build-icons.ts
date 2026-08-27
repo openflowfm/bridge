@@ -1,10 +1,16 @@
 #!/usr/bin/env node
-// Makes an app's `.icns` from the open[flow] mark and one background colour.
+// Makes an app's `.icns` from that app's own mark.
 //
-// The mark is the suite's and is shared on purpose — these are two halves of one
-// thing. What separates them is the colour behind it, and that is the whole
-// design brief: at Dock size, and in a ⌘-Tab strip, hue is the only thing anyone
-// actually reads. A shape difference at 32 pixels is not a difference.
+// Both marks are the same disc — one thing split down the middle, a dot on each
+// side of the divide — and what separates them is hue and what the dots are
+// doing: set[flow] runs rows of clips into its node, visual[flow] throws rays
+// out of it. That is the whole design brief. At Dock size, and in a ⌘-Tab strip,
+// hue is the only thing anyone actually reads, so the shapes are there for the
+// 512 and the colour is there for the 32.
+//
+// The mark is SVG, and every tile is rasterised from it at that tile's own size
+// rather than resampled down from one big render — a 16-pixel icon drawn as
+// vector is a different picture from a 1024 one squeezed.
 //
 // `sips` and `iconutil` ship with macOS, which is the only platform that wants
 // an `.icns` at all. Generated at pack time rather than committed: an icon
@@ -18,18 +24,25 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The mark, and what each app puts behind it. */
-const APPS: Record<string, string> = {
-  // Near-black, the surface the session manager already draws on.
-  set: '1A1A1E',
-  // Amber, because a projector rig should be the one you can pick out at a
-  // glance in the dark.
-  visuals: 'F0B23C',
-};
+/** The apps with a mark of their own, each at `<app>/public/mark.svg`. */
+const APPS = ['set', 'visuals'];
 
-const SOURCE = path.join(root, 'set', 'public', 'logo-white.png');
-/** Every size macOS asks an iconset for. */
+/** Every size macOS asks an iconset for, at 1× and 2×. */
 const SIZES = [16, 32, 128, 256, 512];
+
+/**
+ * How much of a tile the mark is drawn into, and the number is not arbitrary.
+ *
+ * Apple's icon grid puts a circular icon at 824 of 1024 — a little over 80% —
+ * and the mark's outer disc is 440 of its 512 viewBox. Draw the mark at the
+ * ratio between those two and the disc lands exactly on the grid; draw it edge
+ * to edge instead and it overhangs every neighbour in the Dock by 7%, which
+ * doesn't read as a bigger icon so much as a wrong one.
+ */
+const INSET = 824 / 1024 / (440 / 512);
+
+/** The mark's size inside a tile, rounded even so the transparent pad splits evenly. */
+const inner = (tile: number): number => 2 * Math.round((tile * INSET) / 2);
 
 const run = (cmd: string, args: string[]): void => {
   const done = spawnSync(cmd, args, { stdio: ['ignore', 'ignore', 'inherit'] });
@@ -37,15 +50,20 @@ const run = (cmd: string, args: string[]): void => {
 };
 
 const name = process.argv[2];
-const background = name ? APPS[name] : undefined;
-if (!background) {
-  console.error(`build-icons: name a module — ${Object.keys(APPS).join(', ')}`);
+if (!name || !APPS.includes(name)) {
+  console.error(`build-icons: name a module — ${APPS.join(', ')}`);
   process.exit(1);
 }
 
 if (process.platform !== 'darwin') {
   console.log('build-icons: not macOS — nothing to make');
   process.exit(0);
+}
+
+const source = path.join(root, name, 'public', 'mark.svg');
+if (!fs.existsSync(source)) {
+  console.error(`build-icons: no mark at ${path.relative(root, source)}`);
+  process.exit(1);
 }
 
 const out = path.join(root, name, 'electron', 'dist');
@@ -55,29 +73,28 @@ const iconset = path.join(scratch, 'icon.iconset');
 fs.mkdirSync(iconset);
 
 try {
-  // Square first. The mark is 593×530, and an icon that is not square is an
-  // icon macOS squashes.
-  const square = path.join(scratch, 'square.png');
-  run('sips', [
-    '-s', 'format', 'png',
-    '--padToHeightWidth', '1024', '1024',
-    '--padColor', background,
-    SOURCE,
-    '--out', square,
-  ]);
-
   for (const size of SIZES) {
     for (const [scale, suffix] of [[1, ''], [2, '@2x']] as const) {
+      const tile = size * scale;
+      const drawn = path.join(scratch, `mark-${tile}.png`);
       run('sips', [
-        '-z', String(size * scale), String(size * scale),
-        square,
+        '-s', 'format', 'png',
+        '-z', String(inner(tile)), String(inner(tile)),
+        source,
+        '--out', drawn,
+      ]);
+      // Pad rather than draw large: no `--padColor`, so the margin is
+      // transparent and the tile is the disc sitting on Apple's grid.
+      run('sips', [
+        '--padToHeightWidth', String(tile), String(tile),
+        drawn,
         '--out', path.join(iconset, `icon_${size}x${size}${suffix}.png`),
       ]);
     }
   }
 
   run('iconutil', ['-c', 'icns', iconset, '-o', path.join(out, 'icon.icns')]);
-  console.log(`built ${name}/electron/dist/icon.icns — the mark on #${background}`);
+  console.log(`built ${name}/electron/dist/icon.icns — from ${name}/public/mark.svg`);
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
