@@ -19,6 +19,7 @@
 // footer carrying the version and a link out. Everything above is hidden. See
 // the layout note above the presentation section.
 
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +30,46 @@ const outDir = path.join(root, 'bridge');
 
 const REPO = 'https://github.com/ryangavin/better-session-view';
 const VERSION = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+
+/**
+ * A build made to be driven rather than shipped. `npm run qa` sets it, nothing
+ * else does, and a release build is unchanged by any of this.
+ *
+ * It exists because `install-device.ts` puts the device in the User Library as
+ * `SessionBridge-qa` beside a real one, and a name in a browser list is a weak
+ * thing to be leaning on once both are loaded in the same set.
+ */
+const QA = process.env.OPENFLOW_QA === '1';
+
+/**
+ * The commit this was built from, or null outside a checkout.
+ *
+ * Trailing `*` when the tree had uncommitted changes, and that mark is the
+ * point rather than a detail: building from a dirty tree is the *normal* way a
+ * QA build gets made, and a bare hash would be claiming a commit that does not
+ * contain what is running.
+ */
+function commit(): string | null {
+  const git = (args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  const head = git(['rev-parse', '--short', 'HEAD']);
+  if (head.status !== 0) return null;
+  return head.stdout.trim() + (git(['status', '--porcelain']).stdout.trim() ? '*' : '');
+}
+
+const BUILD = QA ? commit() : null;
+
+/**
+ * The device's display title, which is **not** its name.
+ *
+ * Live takes the name from the `.amxd` filename, and that stays `SessionBridge`
+ * in every build — it is what a saved set refers to. `digest` is the separate
+ * thing Live draws in the browser and the Info View, so a QA build can say so
+ * there without any set going looking for a device that no longer exists.
+ */
+const TITLE = QA ? 'Session Bridge (QA)' : 'Session Bridge';
+
+const DESCRIPTION =
+  'Connects this Live Set to open[flow] — naming, color and running order for large sets.';
 
 // Live fixes the height of a device at 169px; every factory Max device it ships
 // is laid out in exactly that box, so anything below it is simply not drawn.
@@ -89,7 +130,7 @@ const connect = (src: string, outlet: number, dst: string, inlet: number) =>
 //                                          nothing else: the device bridges
 //                                          Live, and the apps are their own
 //
-// 139    open[flow] 0.1.0  GitHub
+// 139    open[flow] 0.1.0 · qa 2a8fc15*   GitHub      (the stamp is QA-only)
 // 169
 //
 // The device's own name is not repeated anywhere: Live already draws it in the
@@ -199,11 +240,21 @@ const status = lcdText('Starting…', [530, 406, 224, 20], [10, 26, 224, 20], {
 // The footer sits on the device surface rather than the display, so this one is
 // a `live.comment` with no color set — that is already the surface text color,
 // in whichever theme Live is wearing.
-box('live.comment', `open[flow] ${VERSION}`, [528, 522, 150, 16], {
+//
+// A QA build spends the rest of the line on the commit it came from, because
+// this is the only place the *running* device says which build it is. "Is Live
+// holding the thing I just built, or the copy it cached three reloads ago?" has
+// no other answer from inside Live, and it is the question worth answering on a
+// device you installed specifically in order to drive it.
+//
+// The box is sized for that longer line either way; a comment wider than its
+// text draws the same, and the GitHub button starts at 176.
+const stamp = QA ? ` · qa${BUILD ? ` ${BUILD}` : ''}` : '';
+box('live.comment', `open[flow] ${VERSION}${stamp}`, [528, 522, 164, 16], {
   numinlets: 1,
   numoutlets: 0,
   fontsize: 9.0,
-  ...pres([8, 142, 150, 16]),
+  ...pres([8, 142, 164, 16]),
 });
 
 const github = linkButton(
@@ -218,7 +269,7 @@ const github = linkButton(
 // Patching view — the machinery
 // ---------------------------------------------------------------------
 
-comment('Session Bridge — Live Object Model over WebSocket', [20, 14, 420, 20], {
+comment(`${TITLE} — Live Object Model over WebSocket`, [20, 14, 420, 20], {
   fontsize: 13.0,
   fontface: 1,
 });
@@ -610,10 +661,11 @@ const patcher = {
     enablevscroll: 1,
     devicewidth: DEVICE_W,
     // Live reads these into the browser and the Info View, so they are user
-    // copy, not a note to ourselves about WebSockets.
-    description:
-      'Connects this Live Set to open[flow] — naming, color and running order for large sets.',
-    digest: 'Session Bridge',
+    // copy, not a note to ourselves about WebSockets. `digest` is the title
+    // Live draws there — see TITLE for why a QA build may move it and the
+    // filename may not.
+    description: QA ? `${DESCRIPTION} QA build${BUILD ? ` ${BUILD}` : ''}.` : DESCRIPTION,
+    digest: TITLE,
     tags: 'session manager bridge',
     style: '',
     subpatcher_template: '',
@@ -644,5 +696,6 @@ fs.writeFileSync(
 fs.writeFileSync(path.join(outDir, 'SessionBridge.amxd'), pack(patcher, 'audio'));
 console.log(
   `built bridge/SessionBridge.amxd — ${boxes.length} boxes, ${lines.length} lines, ` +
-    `${boxes.filter((b) => b.box.presentation === 1).length} in presentation`,
+    `${boxes.filter((b) => b.box.presentation === 1).length} in presentation` +
+    (QA ? ` — ${TITLE}, ${BUILD ?? 'no commit'}` : ''),
 );

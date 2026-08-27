@@ -67,7 +67,8 @@ no business needing an Electron binary.
 **`npm run qa` is those four in order** — the device, both apps, and all three installed
 where the machine looks for them — for when the next thing you do is drive the real thing
 rather than a dev server. It stops at the first failure, so a bad build never reaches
-`/Applications`. It runs neither `typecheck` nor `test`: those are fast and belong in the
+`/Applications`. It is also the only thing that sets `OPENFLOW_QA=1`, which is what makes
+the device stamp itself with the commit it came from — see *QA builds say so* below. It runs neither `typecheck` nor `test`: those are fast and belong in the
 loop before this one, and a script that quietly reruns them makes the slow path look like
 the cheap one. The chart is not in it either — it is a page, not an app, and
 `npm run build:chart` stands alone.
@@ -241,6 +242,30 @@ Live's job, and `pack` only writes the unfrozen form. Verified against `Sting 3.
 hand-edited `.maxpat`. Boxes get ids from a counter, `connect()` records patchlines,
 and the whole thing serializes at the end. It also writes `SessionBridge.maxpat`
 alongside the `.amxd` so you can open the same patch in Max to debug.
+
+### QA builds say so, and say which one
+
+`OPENFLOW_QA=1` marks a build as one made to be driven rather than shipped. `npm run qa`
+sets it and nothing else does, so a release build is untouched by all of this.
+
+It changes three display strings and no identity:
+
+- The footer reads `open[flow] 0.1.0 · qa a1b2c3d` — `git rev-parse --short HEAD`, with a
+  trailing `*` when the tree had uncommitted changes. **That mark is the point rather than
+  a detail**: building from a dirty tree is the normal way a QA build gets made, and a bare
+  hash would be claiming a commit that doesn't contain what's running. This is the only
+  place the *running* device says which build it is — "is Live holding the thing I just
+  built, or the copy it cached three reloads ago?" has no other answer from inside Live.
+- `digest` becomes `Session Bridge (QA)`, which is what Live draws in the browser and the
+  Info View, and the description picks up the same hash.
+- The patching-view header follows `digest`, for when the `.maxpat` is open in Max.
+
+**The device's name is not one of them, and must not be.** Live takes the name from the
+`.amxd` filename and a saved set refers to the device by it; `digest` is a separate,
+display-only field, which is what lets a QA build announce itself without any set going
+looking for a device that no longer exists. The `-qa` on the filename is
+`install-device.ts`'s doing and belongs to the installed *copy* — see above. The two
+parameter long names, `openflow-state` and `Song`, are identities too and never move.
 
 ### Patch topology
 

@@ -58,6 +58,19 @@ can't otherwise tell you.
 Stuck on either of the first two? **Options ▸ Max ▸ Open Max Window** — that's where
 every error and every timing line lands.
 
+### Which build is that?
+
+`npm run qa` installs into the User Library as `SessionBridge-qa`, and a device installed
+to be driven should be able to say which build it is without being taken apart. So a QA
+build stamps the footer — `open[flow] 0.1.0 · qa a1b2c3d`, the short commit, with a
+trailing `*` when it was built from a tree with uncommitted changes — and titles itself
+*Session Bridge (QA)* in Live's browser and Info View. A release build carries neither.
+
+**Live caches a loaded device**, so the stamp is also the answer to the question that
+follows from that: reload the device and read the footer, and you know whether Live picked
+up what you just built. See [`../../tools/README.md`](../../tools/README.md) for what the
+flag does and does not touch — the device's *name* is never one of them.
+
 **Keep the three files together.** The device resolves `bridge.js` and `lom.js`
 relative to its own location, so load the `.amxd` from this repo rather than copying it
 into the User Library alone. This is the constraint freezing is meant to remove — see
