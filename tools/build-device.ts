@@ -124,14 +124,21 @@ const connect = (src: string, outlet: number, dst: string, inlet: number) =>
 //
 //   0  ┌────────────────────────────────┐  display panel, live_lcd_bg
 //      │ Status                         │  dim label
-//      │ 1 connection                   │  how many clients are attached
-//  56  └────────────────────────────────┘
-//
-//                                          nothing else: the device bridges
-//                                          Live, and the apps are their own
+//      │ Connected to Live              │  the Live side, which is all it is
+//      │                                │
+//      │  ●  set[flow]                  │  one row per app in the suite, always
+//      │  ○  visual[flow]               │  drawn; the dot is lit when that app
+//      │  ●  chart[flow]                │  is on the socket
+//      │  plus 1 more                   │  anything else attached, when there is
+// 130  └────────────────────────────────┘
 //
 // 139    open[flow] 0.1.0 · qa 2a8fc15*   GitHub      (the stamp is QA-only)
 // 169
+//
+// **The roster is fixed rows, not a list of who is here.** A list would compact
+// upward and leave the same app on a different line depending on what else was
+// running, which is the one thing a glance at a rack can't cope with. Rows that
+// never move mean the answer is a dot's color rather than a line to read.
 //
 // The device's own name is not repeated anywhere: Live already draws it in the
 // title bar above, and every stock device leaves that job to Live.
@@ -213,11 +220,14 @@ const linkButton = (
     ...pres(presRect),
   });
 
+/** How tall the display is. Everything above the footer belongs to it. */
+const LCD_H = 130;
+
 // The display. `background: 1` keeps it in the background layer so it can't
 // paint over the text; `bgfillcolor` is the attribute panel actually fills
 // from, while `bgcolor` is the cached literal — the same split Ableton's own
 // devices save.
-box('panel', null, [520, 380, DEVICE_W, 56], {
+box('panel', null, [520, 380, DEVICE_W, LCD_H], {
   numinlets: 1,
   numoutlets: 0,
   mode: 0,
@@ -227,7 +237,7 @@ box('panel', null, [520, 380, DEVICE_W, 56], {
   saved_attribute_attributes: { bgfillcolor: { expression: 'themecolor.live_lcd_bg' } },
   // Bleeds to both edges, the way Ableton's own panels do — a device face has
   // no outer margin.
-  ...pres([0, 0, DEVICE_W, 56]),
+  ...pres([0, 0, DEVICE_W, LCD_H]),
 });
 
 lcdText('Status', [530, 390, 100, 16], [10, 10, 100, 16]);
@@ -235,6 +245,92 @@ const status = lcdText('Starting…', [530, 406, 224, 20], [10, 26, 224, 20], {
   size: 12.0,
   tone: 'title',
   varname: 'status',
+});
+
+// ---------------------------------------------------------------------
+// The roster
+// ---------------------------------------------------------------------
+//
+// One row per app in the suite: a dot in that app's own colour, lit when the
+// app is on the socket and a dead grey when it isn't, and the app's name beside
+// it. The rows never move — see the note at the top of this section.
+//
+// **The names live here and never cross a message.** `bridge.ts` sends one flag
+// per row and this file draws the word, which is the same bargain the Status
+// line has always made: a bare integer has no quoting to get wrong, where
+// `set[flow]` is a symbol with brackets in it that has to survive Node for Max,
+// the outlet, a `route` and an `unpack` unchanged. Adding an app means adding a
+// row here and a name to `OpenFlow.ClientKind`.
+
+/** Row pitch, and where the first one starts. */
+const ROW_H = 18;
+const ROW_TOP = 54;
+
+/**
+ * A dot's colour when its app is attached — that app's own mark hue.
+ *
+ * set[flow] and visual[flow] take the middle stop of the gradient in
+ * `<app>/public/mark.svg`, which is the hue the Dock reads at 32px and so the
+ * one already standing for that app. chart[flow] has no mark to take one from,
+ * so it gets Live's own amber (`LIVE_PALETTE` index 1) — far enough from the
+ * teal and the magenta to be told apart at 8px, and not an invention.
+ *
+ * **The names here are display names, not the wire's.** `OpenFlow.ClientKind`
+ * is `set | visual | chart`; the rows read `set[flow]`, `visual[flow]` and
+ * `chart[flow]`, because a device face is somewhere a user reads a product name
+ * and a wire is somewhere a program matches a key. Order is what ties the two
+ * together — outlet `i + 1` of the `unpack` is row `i`.
+ */
+const ROSTER: Array<{ name: string; lit: number[] }> = [
+  { name: 'set[flow]', lit: [0.063, 0.843, 0.78, 1.0] }, // #10D7C7
+  { name: 'visual[flow]', lit: [0.847, 0.286, 1.0, 1.0] }, // #D849FF
+  { name: 'chart[flow]', lit: [1.0, 0.647, 0.161, 1.0] }, // #FFA529
+];
+
+/**
+ * A dot's colour when its app is not attached.
+ *
+ * A literal rather than a theme expression, and that is not a shortcut: this
+ * sits on `live_lcd_bg`, which stays dark in Live's light theme, so a surface
+ * colour would be black on near-black exactly the way `lcdText` exists to
+ * avoid. Lifted a little off the panel (0.157) so an unlit row still reads as a
+ * row rather than as a gap.
+ */
+const DOT_UNLIT = [0.31, 0.31, 0.31, 1.0];
+
+/** The dots, in `ROSTER` order — wired further down, once `route` exists. */
+const dots = ROSTER.map(({ name, lit }, i) => {
+  const y = ROW_TOP + i * ROW_H;
+  // `shape: 1` is Circle. Not `background: 1`: the display panel is the
+  // background layer and a second box in it may be painted under the first.
+  //
+  // **Saved as `bgcolor`, driven as `bgfillcolor`** — the same split the display
+  // panel above makes, and the one Ableton's own devices save. `bgcolor` is the
+  // cached literal a patch is *loaded* with; `bgfillcolor` is what a panel
+  // actually fills from and what a message can move. Neither factory device
+  // this was dissected from saves a literal `bgfillcolor`, so nothing here
+  // writes one.
+  const dot = box('panel', null, [532, 436 + i * 20, 8, 8], {
+    numinlets: 1,
+    numoutlets: 0,
+    shape: 1,
+    bgcolor: DOT_UNLIT,
+    varname: `dot-${i}`,
+    ...pres([12, y + 4, 8, 8]),
+  });
+  lcdText(name, [548, 432 + i * 20, 140, 18], [28, y, 140, 16], {
+    size: 10.5,
+    tone: 'title',
+  });
+  return { dot, lit };
+});
+
+// Everything on the socket that no row accounts for — a second window of an app
+// already lit, `tools/diag.ts`, a browser someone pointed at the port. Blank
+// whenever there is none, which is the normal case, so the resting face is the
+// three rows and nothing under them rather than an empty fourth label.
+const extra = lcdText(' ', [548, 492, 200, 18], [28, ROW_TOP + ROSTER.length * ROW_H + 2, 200, 14], {
+  varname: 'extra',
 });
 
 // The footer sits on the device surface rather than the display, so this one is
@@ -291,7 +387,7 @@ const sToLom = obj('s ---openflow-to-lom', [20, 202, 120, 22], 1, 0);
 
 const rToLom = obj('r ---openflow-to-lom', [370, 58, 120, 22], 0, 1);
 const routeStatus = obj(
-  'route status device_state_get device_state_set push_songs push_bank',
+  'route clients device_state_get device_state_set push_songs push_bank',
   [370, 90, 400, 22],
   1,
   6,
@@ -347,20 +443,65 @@ comment('stored in the Live Set — default artist, roles + allowed colors', [37
   fontsize: 10.0,
 });
 
-// Status wiring. bridge.ts sends one number and the patcher spells it: -1 while
-// the LOM handshake is outstanding, otherwise the count of connected clients.
-// Doing the wording here rather than in Node keeps every string a user reads in
-// the file that draws them, and keeps the wire message a bare integer — no
-// quoting, no symbol with a space in it to lose on the way across.
-// One inlet, not two: `select` only grows the second inlet when it has a single
+// The face's wiring. `bridge.ts` sends `clients <ready> <set> <visual> <chart>
+// <extra>` — five integers and not one symbol — and everything a user reads is
+// drawn from them here. That split is the same one the Status line has always
+// made: a bare integer has no quoting to get wrong, where a symbol with
+// brackets or a space in it has to survive Node for Max, an outlet, a `route`
+// and an `unpack` unchanged.
+//
+// **`unpack` rather than five messages**, because the five are one state. Sent
+// separately, a roster mid-update would draw a moment of a set that was never
+// true; `unpack` fires right to left off one list, so the whole face moves at
+// once.
+const unpackClients = obj('unpack 0 0 0 0 0', [700, 90, 200, 22], 1, 5);
+
+// `ready` — the Live side, and the only thing the headline still says. The
+// count moved to the roster, and "how many sockets" was never the question a
+// glance at the rack was asking anyway: which of the apps is on it is.
+//
+// One inlet, not two: `select` only grows a second one when it has a single
 // argument to be set through it.
-const selCount = obj('sel -1 0 1', [700, 90, 110, 22], 1, 4);
-const msgWaiting = msg('set "Waiting for Live"', [700, 124, 160, 22]);
-const msgNone = msg('set "No connections"', [700, 156, 160, 22]);
-const msgOne = msg('set "1 connection"', [700, 188, 160, 22]);
-// sprintf emits its "Formatted String as a Message", so this reaches the
-// comment as `set 5 connections` — exactly the list `set` wants.
-const fmtMany = obj('sprintf set %ld connections', [700, 220, 210, 22], 1, 1);
+const selReady = obj('sel 0 1', [700, 124, 90, 22], 1, 3);
+const msgWaiting = msg('set "Waiting for Live"', [700, 156, 160, 22]);
+const msgReady = msg('set "Connected to Live"', [700, 188, 170, 22]);
+
+// The dots. `bgfillcolor` is the attribute a panel actually fills from — the
+// same one the display's theme expression is bound to — so a lit and an unlit
+// colour are two message boxes into the same inlet. They are literals rather
+// than theme names deliberately: see `DOT_UNLIT`.
+const rgba = (c: number[]) => c.map((v) => (Number.isInteger(v) ? v.toFixed(1) : v)).join(' ');
+const dotSwitches = dots.map(({ dot, lit }, i) => {
+  const x = 700 + i * 190;
+  const sel = obj('sel 0 1', [x, 240, 90, 22], 1, 3);
+  const off = msg(`bgfillcolor ${rgba(DOT_UNLIT)}`, [x, 272, 180, 22]);
+  const on = msg(`bgfillcolor ${rgba(lit)}`, [x, 304, 180, 22]);
+  connect(sel, 0, off, 0);
+  connect(sel, 1, on, 0);
+  connect(off, 0, dot, 0);
+  connect(on, 0, dot, 0);
+  return sel;
+});
+
+// Whatever the rows don't account for. `sel 0` bangs on the left for none, and
+// passes anything else out the right still carrying the number for sprintf to
+// spell. `plus 2 more` and `plus 1 more` are the same sentence, so there is no
+// pluralisation to get wrong and no second message box.
+//
+// **`set " "`, not a bare `set`.** Max's own reference gives `set` a required
+// argument, and a comment cleared by a message that may or may not be legal is
+// a line that may or may not still say `plus 1 more` about a client that left.
+// A quoted space is a symbol, and it draws as nothing.
+//
+// **No `+`**, either. sprintf emits a *string* that Max then parses back into
+// atoms, and whether `+1` comes out of that as a symbol or as the number 1 is
+// not something the reference settles — the plus would simply be missing.
+// **Two inlets, unlike the `sel 0 1`s above.** `select` grows a right inlet to
+// set its match value when it has exactly one argument, and declaring one here
+// wouldn't remove it — it would only make the patch lie about its own shape.
+const selExtra = obj('sel 0', [700, 336, 70, 22], 2, 2);
+const msgNoExtra = msg('set " "', [700, 368, 70, 22]);
+const fmtExtra = obj('sprintf set plus %ld more', [780, 368, 190, 22], 1, 1);
 
 const msgGithub = msg(`; max launchbrowser ${REPO}`, [160, 432, 340, 22]);
 
@@ -386,21 +527,28 @@ connect(nodeScript, 0, sToLom, 0);
 connect(rToNode, 0, nodeScript, 0);
 
 connect(rToLom, 0, routeStatus, 0);
-connect(routeStatus, 0, selCount, 0); // matched "status" -> the connection count
+connect(routeStatus, 0, unpackClients, 0); // matched "clients" -> the five integers
 connect(routeStatus, 1, deviceState, 0); // get -> bang -> current stored value
 connect(routeStatus, 2, deviceState, 0); // set -> new base64url symbol
 // outlet 3 (push_shortname) is wired in the Push song browser section below,
 // where its destination is created; outlet 4 (everything else -> LOM) moved
 // down there too so both stay next to each other.
 
-connect(selCount, 0, msgWaiting, 0); // -1: LOM handshake outstanding
-connect(selCount, 1, msgNone, 0); //  0
-connect(selCount, 2, msgOne, 0); //  1 — the one that doesn't pluralize
-connect(selCount, 3, fmtMany, 0); //  anything else, still carrying the number
+connect(unpackClients, 0, selReady, 0); // ready -> the headline
+connect(selReady, 0, msgWaiting, 0); // 0: LOM handshake outstanding
+connect(selReady, 1, msgReady, 0); // 1
 connect(msgWaiting, 0, status, 0);
-connect(msgNone, 0, status, 0);
-connect(msgOne, 0, status, 0);
-connect(fmtMany, 0, status, 0);
+connect(msgReady, 0, status, 0);
+
+// One outlet per row, in `ROSTER` order — outlet 0 is `ready`, so row `i` is
+// outlet `i + 1`.
+dotSwitches.forEach((sel, i) => connect(unpackClients, i + 1, sel, 0));
+
+connect(unpackClients, 4, selExtra, 0);
+connect(selExtra, 0, msgNoExtra, 0); // none -> clear the line
+connect(selExtra, 1, fmtExtra, 0); // some -> still carrying the number
+connect(msgNoExtra, 0, extra, 0);
+connect(fmtExtra, 0, extra, 0);
 
 connect(deferlow, 0, v8, 0);
 connect(v8, 0, routeV8Boot, 0);

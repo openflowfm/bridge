@@ -119,8 +119,8 @@ does by itself.
 
 A per-socket `'error'` listener sits beside them for a plainer reason: `ws` **throws** on
 a socket whose `'error'` nobody listens for, so one unclean disconnect used to take the
-whole device down — and take it down invisibly, since the Status line keeps displaying
-the last count it was handed.
+whole device down — and take it down invisibly, since the device's face keeps displaying
+the last roster it was handed.
 
 **Two watches belong to the device, and five to whoever is looking.**
 

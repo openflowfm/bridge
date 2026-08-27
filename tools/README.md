@@ -273,12 +273,16 @@ parameter long names, `openflow-state` and `Song`, are identities too and never 
 [live.thisdevice] ─> [initialized latch] ─> [init( ─> [s ---openflow-to-lom]
 [node.script] out0 ──────────────────────-> [s ---openflow-to-lom]
 
-[r ---openflow-to-lom] ─> [route status device_state_get device_state_set]
-                       ├─ status ──────> [sel -1 0 1] ─┬─ set "Waiting for Live"
-                       │                               ├─ set "No connections"
-                       │                               ├─ set "1 connection"
-                       │                               └─ [sprintf set %ld connections(
-                       ├─ state get/set > [pattr openflow-state]    └─> status text
+[r ---openflow-to-lom] ─> [route clients device_state_get device_state_set]
+                       ├─ clients ─────> [unpack 0 0 0 0 0]
+                       │        ready ──> [sel 0 1] ─> set "Waiting for Live" / "Connected
+                       │                                to Live"        ─> status text
+                       │        set ────> [sel 0 1] ─> bgfillcolor …    ─> set[flow] dot
+                       │        visual ─> [sel 0 1] ─> bgfillcolor …    ─> visual[flow] dot
+                       │        chart ──> [sel 0 1] ─> bgfillcolor …    ─> chart[flow] dot
+                       │        extra ──> [sel 0] ──┬─ set " "
+                       │                            └─ [sprintf set plus %ld more( ─> line
+                       ├─ state get/set > [pattr openflow-state]
                        └─ rest ────────> [deferlow] ─> [v8 lom.js]
 [pattr openflow-state] ─> [prepend device_state] ─> [s ---openflow-to-node]
 [v8 lom.js] ─> [route boot] ─┬─ rest ──────────────> [s ---openflow-to-node]
@@ -304,15 +308,35 @@ Notes that matter if you edit this:
   retriggering `live.thisdevice`. On script load `lom.js` emits a private `boot`; once
   the patcher latch says `live.thisdevice` has completed, that signal replays `init`.
   Before the first completion the signal is ignored, preserving the LiveAPI safety gate.
-- **The route peels off device state as well as status.** State travels directly
+- **The route peels off the face as well as device state.** State travels directly
   between Node and the parameter-enabled pattr; it is not part of the Live Object Model.
-- **The Status line is one integer on the wire, spelled here.** Node sends the number
-  of connected clients — or `-1` while the LOM handshake is still outstanding — and the
-  patch turns it into words. Keeping every string a user reads in the file that draws
-  them is half the reason; the other half is that a bare integer has no quoting to get
-  wrong, where a symbol with a space in it does. `select` gets the two counts that don't
-  pluralize and `sprintf` gets the rest; note `sel -1 0 1` has **one** inlet, because
-  `select` only grows a second one when it has a single argument to set through it.
+- **The face is five integers on the wire, spelled here.** Node sends `clients <ready>
+  <set> <visual> <chart> <extra>` and the patch turns it into words and colours. Keeping
+  every string a user reads in the file that draws them is half the reason; the other
+  half is that a bare integer has no quoting to get wrong, where `set[flow]` is a symbol
+  with brackets in it that would have to survive Node for Max, the outlet, a `route` and
+  an `unpack` unchanged. **Adding an app means adding a row here and a name to
+  `OpenFlow.ClientKind`** — nothing else reads the wire message.
+- **`unpack`, not five messages.** The five are one state, and sent separately a roster
+  mid-update would draw a moment of a set that was never true. `unpack` fires right to
+  left off one list, so the whole face moves at once.
+- **A dot is a `panel` with `shape: 1`, saved as `bgcolor` and recoloured by
+  `bgfillcolor` messages.** That's the same split the display panel makes: `bgcolor` is
+  the cached literal a patch loads with, `bgfillcolor` is what a panel fills from and
+  what a message can move. Neither factory device this was dissected from saves a literal
+  `bgfillcolor`, so nothing here writes one. Both colours are literals rather than theme
+  names, for the same reason `lcdText` exists: the display panel stays dark in Live's
+  light theme, so a surface colour would be black on near-black. The lit colour is that
+  app's own mark hue — the middle stop of the gradient in `<app>/public/mark.svg`, which
+  is the hue the Dock reads at 32px.
+- **`sel 0 1` has one inlet; `sel 0` has two.** `select` only grows a right inlet to set
+  its match value when it has a single argument. Declaring one on the latter wouldn't
+  remove it, only make the patch lie about its own shape.
+- **The `plus n more` line uses `set " "` to clear, and carries no `+`.** Max's own
+  reference gives `set` a required argument, so a bare `set` may or may not empty a
+  comment — and a line that may or may not have cleared goes on naming a client that
+  left. `sprintf` emits a *string* Max reparses into atoms, and whether `+1` survives
+  that as a symbol or arrives as the number 1 is not something the reference settles.
 - **`pattr openflow-state` is a Blob parameter registered in the patcher's `parameters`
   map.** Both pieces are required for Live to store the base64url-encoded JSON in the
   `.als`. It is marked Stored Only so it cannot be automated.

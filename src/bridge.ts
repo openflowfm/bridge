@@ -446,26 +446,50 @@ function broadcast(event: OpenFlow.Event): void {
 }
 
 /**
- * Drive the device's Status line.
+ * What each socket said it was, for as long as it is connected.
  *
- * It reads the number of connected clients, because that is the only part of
- * the device's state a glance at the rack can't already tell you — whether a
- * browser is attached at all, and whether you left three tabs open fighting
- * over the same set. "Connected to Live" was true from the moment the device
- * landed on a track, so it said nothing.
+ * A `Map` rather than a `WeakMap` because the roster is built by walking it,
+ * and it is cleared from the same `close` handler that releases the watches —
+ * so a socket cannot outlive its entry the way it could its watches.
+ */
+const identities = new Map<WebSocket, OpenFlow.ClientKind>();
+
+/** The rows the device face draws, in the order it draws them. */
+const CLIENT_ROSTER = ['set', 'visual', 'chart'] as const;
+
+/**
+ * Drive the device's face — the Live-side state, and who is attached.
  *
- * `-1` is the one state that isn't a count: the LOM handshake hasn't completed.
- * That normally resolves within a frame of the server binding, so it stays on
- * screen only when something is actually wrong. The patcher turns the number
- * into words — see `tools/build-device.ts`.
+ * **Five integers, no strings.** `ready`, then one flag per known app in
+ * `CLIENT_ROSTER` order, then however many sockets those flags don't account
+ * for. The patcher owns every word a user reads and every color a dot is drawn
+ * in; this side owns only the arithmetic. That split is what keeps a name with
+ * punctuation in it — `set[flow]` — out of a Max message entirely.
+ *
+ * The flags are booleans rather than counts because a row is a lamp: two
+ * set[flow] windows on one set is a real situation, but it is *the extra one*
+ * that is worth seeing, and `extra` is where it shows up.
+ *
+ * `extra` is therefore everything else on the socket — a second window of an
+ * app already lit, `tools/diag.ts`, a browser someone pointed at the port, a
+ * client that never sent `identify`. All of it is honest to count and none of
+ * it is worth a row.
  */
 function showConnections(): void {
-  let open = 0;
   // readyState rather than wss.clients.size: a socket mid-close still counts as
-  // a client to `ws` for a moment, and a face that reads one connection with
-  // nothing attached is worse than one that lags by a tick.
-  for (const ws of wss.clients) if (ws.readyState === 1) open++;
-  Max.outlet('status', lomReady ? open : -1);
+  // a client to `ws` for a moment, and a face that lights a row with nothing
+  // attached is worse than one that lags by a tick.
+  const open: WebSocket[] = [];
+  for (const ws of wss.clients) if (ws.readyState === 1) open.push(ws);
+
+  const lit = CLIENT_ROSTER.map((kind) => open.some((ws) => identities.get(ws) === kind));
+  const named = lit.filter(Boolean).length;
+  Max.outlet(
+    'clients',
+    lomReady ? 1 : 0,
+    ...lit.map((on) => (on ? 1 : 0)),
+    Math.max(0, open.length - named),
+  );
 }
 
 wss.on('connection', (ws: WebSocket) => {
@@ -504,6 +528,7 @@ wss.on('connection', (ws: WebSocket) => {
     // Before the log line: a client that closed the tab never sent `off`, and
     // its watches would otherwise be held open forever by a socket that is gone.
     releaseWatches(ws);
+    identities.delete(ws);
     Max.post(`client disconnected (${wss.clients.size} left)`);
     showConnections();
   });
@@ -1797,6 +1822,15 @@ async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'scenes', m.on);
       break;
+    case 'identify':
+      // Validated against the roster rather than trusted, because an unknown
+      // name has a defined meaning here — it counts, it just doesn't light a
+      // row — and storing it would make the roster's arithmetic depend on a
+      // string nothing else ever reads.
+      if ((CLIENT_ROSTER as readonly string[]).includes(m.client)) identities.set(ws, m.client);
+      else Max.post(`client identified as ${String(m.client)} — counted, not named`);
+      showConnections();
+      break;
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -1866,7 +1900,7 @@ Max.addHandler('ready', () => {
   // later delta would line up against it by accident rather than by agreement.
   dropHeld('the LOM restarted, so its revision counter began again');
   broadcast({ type: 'status', lomReady: true });
-  showConnections(); // off the -1 holding state and onto a real count
+  showConnections(); // off the waiting state and onto the roster
 
   // Follow Live for our own sake, before anyone asks and whether or not anyone
   // ever does. This is what makes the held set a thing the device maintains
@@ -2739,7 +2773,7 @@ wss.on('error', onServerError);
 
 server.listen(PORT, HOST, () => {
   Max.post(`Session Bridge listening on http://${HOST}:${PORT}`);
-  showConnections(); // drives the device's Status line; routed off before lom
+  showConnections(); // drives the device's face; routed off before lom
   Max.outlet('device_state_get'); // restored pattr -> device_state handler above
   Max.outlet('hello'); // whichever side is late drives the handshake
 });

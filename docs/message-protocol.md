@@ -86,10 +86,14 @@ exact jump rather than repeated `Application.View.scroll_view` calls, so it has 
 dependency on the current row, viewport size or a control surface's unpublished session
 ring.
 
-`status <n>` also travels node → lom's direction but is routed off by `[route status]`
-before reaching `v8`; it only drives the device's Status line. `n` is the number of
-connected clients, or `-1` while the LOM handshake is outstanding — the patcher turns
-the number into words, so no string ever has to survive the crossing.
+`clients <ready> <set> <visual> <chart> <extra>` also travels node → lom's direction but
+is routed off by `[route clients]` before reaching `v8`; it only drives the device's face.
+`ready` is the LOM handshake, then one flag per app row in the order the device draws
+them, then however many connected sockets those flags don't account for. **Five integers
+and not one symbol** — the patcher owns every word a user reads and every colour a dot is
+drawn in, so no string ever has to survive the crossing. `set[flow]` in particular is a
+symbol with brackets in it that would have to come through Node for Max, the outlet, a
+`route` and an `unpack` unchanged, and there is no reason to find out whether it does.
 
 ### Realtime numeric pushes use atoms, not Dicts
 
@@ -211,7 +215,7 @@ reads the payload's shape bare — `data.timings.elapsed`, `result.applied`, `p.
 name that is already gone, or a dict in an unexpected shape, therefore throws inside a
 handler nothing awaits, which is an unhandled rejection. Node for Max runs this script
 with no restart on exit, so that is the device gone for the rest of the show — and gone
-*silently*, because the Status line goes on displaying the count it was last handed.
+*silently*, because the device's face goes on displaying the roster it was last handed.
 
 Each of them wraps its body and reports through `lomReplyFailed`, which posts to the Max
 window and answers the waiting client with an `error` rather than leaving it on a request

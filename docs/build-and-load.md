@@ -40,20 +40,39 @@ scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a fr
 1. Drop `SessionBridge.amxd` onto any track. It's an audio effect with a
    `plugin~ → plugout~` passthrough, so it's inert on the signal path — the Master
    track is a fine home.
-2. Wait for the status to read `No connections`, then run `npm run set` — it should go
-   to `1 connection` as the app attaches.
+2. Wait for the status to read `Connected to Live`, then run `npm run set` — the
+   `set[flow]` dot should light as the app attaches.
 
 | status | means |
 |---|---|
 | `Starting…` | patcher loaded, Node hasn't booted |
 | `Waiting for Live` | Node is listening, LOM handshake hasn't completed |
-| `No connections` | serving, nothing attached — the resting state |
-| `1 connection` / `3 connections` | that many clients are on the socket |
+| `Connected to Live` | serving — the resting state, whether or not anyone is attached |
 
-The count is deliberately the headline: whether the device reached Live is true within a
-frame of it loading and says nothing, whereas whether a browser is attached — and how
-many tabs are quietly fighting over the same set — is the thing a glance at the rack
-can't otherwise tell you.
+Under it, one row per app in the suite, always drawn, its dot lit in that app's own mark
+hue while it is on the socket:
+
+```
+ ●  set[flow]        #10D7C7
+ ○  visual[flow]     #D849FF
+ ●  chart[flow]      #FFA529
+ plus 1 more
+```
+
+`plus n more` appears only when something the rows don't account for is connected — a
+second set[flow] window, `tools/diag.ts`, a browser someone pointed at the port, or a
+client that never sent `identify`.
+
+**The roster is fixed rows rather than a list of who is here**, and a lamp per row rather
+than a count. A list would compact upward and put the same app on a different line
+depending on what else was running, which is the one thing a glance at a rack can't cope
+with; rows that never move make the answer a colour rather than a line to read. A second
+window of an app already lit is a real situation, but it is *the extra one* that is worth
+seeing, so it shows up in `plus n more`.
+
+An app lights its row by sending `identify` when its socket opens. **Nothing is served
+differently for having sent it** — a client that never does is a client the roster is
+poorer about and the device is otherwise identical toward.
 
 Stuck on either of the first two? **Options ▸ Max ▸ Open Max Window** — that's where
 every error and every timing line lands.
