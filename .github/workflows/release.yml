@@ -202,8 +202,21 @@ jobs:
           set -eux
           notes=".github/notes/${GITHUB_REF_NAME}.md"
           if [ -f "$notes" ]; then
-            set -- --notes-file "$notes"
+            notes_args=(--notes-file "$notes")
           else
-            set -- --generate-notes
+            notes_args=(--generate-notes)
           fi
-          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" "$@" assets/*
+
+          # Every asset, found rather than globbed. An upload keeps whatever
+          # directory structure its files had — the device's are flat because
+          # they all sat in `dist/`, the disk images arrive under `set/` and
+          # `visuals/` because they did not — so `assets/*` matches two
+          # directories as well as the files. gh takes files only, and it fails
+          # on a directory *after* creating the release, which leaves a draft
+          # holding whatever it managed to upload first.
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < <(find assets -type f | sort)
+          test "${#files[@]}" -gt 0
+
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" \
+            "${notes_args[@]}" "${files[@]}"
