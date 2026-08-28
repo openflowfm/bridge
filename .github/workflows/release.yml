@@ -7,36 +7,48 @@ on:
 permissions:
   contents: write
 
+# The runner images are pinned rather than `-latest`. `-latest` migrates to a
+# new OS over a month or two with nothing here changing, which is fine for
+# `ci.yml` and wrong for the job that signs a release — the tag would build on a
+# different macOS than the one it was tried on. These are the newest
+# generally-available images: `macos-26` is where `macos-latest` points, and
+# `ubuntu-24.04` is where `ubuntu-latest` does. Ubuntu 26.04 exists and is still
+# preview.
+
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    # Electron ships a ~200 MB Chromium that no CI job here can run — the
+  # Everything that builds the same on any machine: the device, and the three
+  # modules another project could consume. Behind the checks a tag can otherwise
+  # walk straight past — a tag can point at any commit, including one that
+  # nothing ever ran.
+  device:
+    runs-on: ubuntu-24.04
+    # Electron ships a ~200 MB Chromium that no Linux job here can run — the
     # typecheck needs its type declarations and nothing else, and those come
     # with the package rather than the binary.
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: |
             package-lock.json
             bridge/package-lock.json
+            visuals/package-lock.json
 
       # `npm ci` runs the root postinstall, which installs `ws` into
       # bridge/node_modules. That's load-bearing: build:bridge esbuilds
       # bridge/src/bridge.ts, and `ws` lives only there, not at the root.
       - run: npm ci
 
-      # A tag can point at any commit, including one nothing ever checked.
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
 
-      - name: Stage the folder
+      - name: Stage the device
         run: |
           set -eux
           STAGE="SessionBridge-${GITHUB_REF_NAME#v}"
@@ -45,12 +57,153 @@ jobs:
           cp .github/INSTALL.txt "dist/$STAGE/"
           cp LICENSE "dist/$STAGE/LICENSE.txt"
           (cd dist && zip -r "$STAGE.zip" "$STAGE")
-          echo "ASSET=dist/$STAGE.zip" >> "$GITHUB_ENV"
 
-      # One asset, not a bare .amxd alongside it. The device resolves
-      # bridge.js and lom.js from its own folder, so a lone .amxd is broken —
-      # and it's exactly the file someone would click.
+      # The modules that are libraries rather than apps. Not published to npm —
+      # they are `private`, and they ship as TypeScript source rather than as a
+      # build — but a tarball on the release is a thing a reader can open, and
+      # it pins what `@openflow/core` meant at this version.
+      #
+      # widgets' types are built first: its `types` field points into `dist/`,
+      # and nothing else in this workflow makes that.
+      - name: Pack the libraries
+        run: |
+          set -eux
+          npm run build:widgets
+          for module in core protocol widgets; do
+            npm pack --workspace "@openflow/$module" --pack-destination dist
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: device
+          path: |
+            dist/*.zip
+            dist/*.tgz
+          if-no-files-found: error
+
+  # The apps, on the only OS that can sign them. A separate job rather than more
+  # steps above: everything on Linux finishes in a couple of minutes, and none
+  # of it should wait behind two notarisations.
+  apps:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            bridge/package-lock.json
+            visuals/package-lock.json
+
+      # No ELECTRON_SKIP_BINARY_DOWNLOAD here — this is the job that needs the
+      # actual binary. postinstall also compiles the Ableton Link addon against
+      # this machine's toolchain, which is the other reason the apps cannot be
+      # built from the Linux job.
+      - run: npm ci
+
+      # notarytool wants the App Store Connect key as a file on disk and a
+      # secret is a string, so it lands under RUNNER_TEMP, which goes away with
+      # the runner.
+      - name: Write the notary key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -eu
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+
+      # electron-builder reads every one of these itself: CSC_* to import the
+      # certificate into a keychain it creates and throws away, APPLE_API_* to
+      # notarise once the bundle is signed. Nothing in either
+      # `electron-builder.yml` switches them on — their presence is the switch.
+      - name: Pack both apps
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: npm run pack
+
+      # electron-builder notarises the `.app` and stops there, then wraps it in
+      # a disk image it has only signed. The image is the file that travels, and
+      # Gatekeeper assesses it on open — an un-notarised one is refused with
+      # "Apple cannot check it for malicious software" no matter how good the
+      # bundle inside is. So the images are submitted here, and stapled, which
+      # is what makes them open without a network round trip.
+      - name: Notarise the disk images
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -eux
+          for dmg in release/*/*.dmg; do
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$dmg"
+          done
+
+      # electron-builder warns and carries on when it cannot sign or cannot
+      # notarise, so a green pack step proves nothing. This asks what the
+      # receiving Mac asks, of both artifacts. `spctl` is the one that counts:
+      # it is Gatekeeper itself, and it rejects anything signed but never
+      # notarised — which is the exact failure this release exists to avoid.
+      #
+      # The two `spctl` types are not interchangeable. `execute` is the question
+      # asked of an app being launched; `open` with the primary-signature
+      # context is the question asked of a disk image being mounted.
+      - name: Verify what a stranger's Mac will see
+        run: |
+          set -eux
+          for app in release/*/mac-*/*.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+            xcrun stapler validate "$app"
+          done
+          for dmg in release/*/*.dmg; do
+            codesign --verify --strict --verbose=2 "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+            xcrun stapler validate "$dmg"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apps
+          path: release/*/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [device, apps]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+
+      # A draft, always. Release notes get one last human read, and a published
+      # release is what every install instruction points at.
+      #
+      # The notes are written by hand when `.github/notes/<tag>.md` exists,
+      # because `--generate-notes` across a release's worth of commits is a wall
+      # of subject lines. Falls back to generated notes rather than failing, so
+      # a tag pushed without notes still produces a release.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --draft "$ASSET"
+        run: |
+          set -eux
+          notes=".github/notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            set -- --notes-file "$notes"
+          else
+            set -- --generate-notes
+          fi
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" "$@" assets/*
