@@ -23,7 +23,7 @@ npm run pack                # both apps as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications — or one: install:apps set
 npm run install:device      # the device into the User Library as SessionBridge-qa
 npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
-npm run dev:visuals-app     # the same for visual[flow], on a server npm run dev is holding
+npm run dev:visuals-app     # visual[flow]'s HMR shell + backend; npm run dev launches it
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
@@ -90,11 +90,12 @@ The visuals rig in a dedicated Chrome instead of the app. Kept because a second 
 a browser anyway — which is the arrangement the rig was always meant for — and because it is
 the rollback if the app misbehaves on a show night.
 
-`npm run dev` is `concurrently -k` over ten dev processes, and `-k` means **any one of them
-exiting kills all the others** — right for a dev loop, and wrong for a gig, where a chart
-server or a `tsc --watch` falling over would take the wall down with it. `visuals.ts` builds
-`visuals/dist` and then runs `visuals/server/index.ts` alone, restarting it after a second
-if it stops.
+`npm run dev` is `concurrently -k` over ten dev processes, including the visual[flow]
+Electron app on vite's HMR page, and `-k` means **any one of them exiting kills all the
+others** — right for a dev loop, and wrong for a gig, where a chart server or a
+`tsc --watch` falling over would take the wall down with it. In that stack the app owns and
+supervises its backend. `visuals.ts`, the show-browser alternative, builds `visuals/dist`
+and runs `visuals/server/index.ts` itself, restarting it after a second if it stops.
 
 Two exits it does **not** restart, because neither is fixed by trying again: a clean one,
 which is the server's own Ctrl-C path, and status **2**, which is the port already being
