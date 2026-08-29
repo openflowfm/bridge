@@ -123,8 +123,10 @@ is still here now.
 manager there was a URL to point a browser at, so "Chrome or Electron" was a real choice and
 Chrome won it. The device serves nothing now, so the choice is "ship a window or ship a
 server", and only one of those leaves the device carrying nothing. Tauri was not an option
-either way: its macOS webview is WKWebView rather than Chromium, and every shader in
-`visuals/` has been validated against one engine.
+either way, though the shader-portability argument this used to make was wrong — Safari and
+Chrome both reach the GPU through ANGLE onto Metal. What rules it out is that its macOS
+webview is WKWebView and `visuals/` draws its show *inside* the webview, so the switches
+below would have no equivalent. See `visuals/docs/engine.md`.
 
 Three of the flags are about a projector specifically:
 

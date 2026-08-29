@@ -14,6 +14,7 @@ npm run dev:diag -- scroll 1    # one Session-view step down; -1 goes up
 npm run dev:diag -- selectscene 42  # select scene 42 directly; zero-based
 npm run dev:diag -- param       # what Live thinks this device's parameters are
 npm run dev:diag -- labels 8    # write 8 synthetic value labels, then re-read
+npm run dev:diag -- census      # every observer held, per pool, and its peak
 ```
 
 **The answers land in the Max window, not on the wire**, which is why this message has
@@ -34,6 +35,39 @@ Live open, so the readout has to be somewhere you can watch without leaving Live
 | `labels <n>` | write `n` synthetic value labels to the Push song parameter, then re-read. `0` clears the list |
 | `labelspaces` | the same write, with one two-word label spaced normally and one joined by a non-breaking space — the shipped form against the retired one |
 | `bank` | redefine the `live.banks` page, so a label written after the page appeared gets a second chance to be seen |
+| `census` | every LOM observer this device holds, per pool, with the peak each has reached |
+
+## The observer census, and the standing leak watch
+
+An observer is the one resource here that leaks silently. `new LiveAPI(cb, path)` with a
+`property` assigned registers a callback **inside Live**, and the only thing that
+unregisters it is assigning `property = ''`. A pool reassigned without being cleared, or an
+array built and then abandoned by a throw, leaves callbacks attached to a set nothing is
+watching — firing, costing Live time on its own main thread, and reachable from nothing that
+could ever detach them. Nothing in JavaScript notices. The device gets slower over a night
+and the Max window says nothing.
+
+So the invariant is written down instead: **a pool is non-empty only while its watch is on.**
+`auditObservers` checks exactly that, at the moment it is supposed to hold — as a watch goes
+off — and prints a `LEAK` line naming the pool.
+
+**`censusTick` is the other half, and it is silent by design.** It runs once a minute and
+says nothing at all unless the total has grown *within one structure epoch* — the epoch moves
+on every `onStructureChange`, so a set that gained eight tracks and gained observers with them
+starts a fresh comparison rather than being reported. Growth inside an epoch is the case that
+cannot be explained by a bigger set. It can still be explained by a panel being opened, which
+is why the message prints the whole census: opening the mixer moves `mixer` and nothing else,
+and a leak moves a pool nobody touched.
+
+A counter somebody has to switch on is off on the night it would have caught something, so
+this starts in `init` and is never switched off. It costs one array walk a minute.
+
+**Two leaks it found while being written**, both the same shape and both now closed:
+`rebuildCursorObservers` and `watch_selection` each attached observers into a local array and
+published that array to the pool only on success — so a throw partway through left up to
+seven observers attached, firing, and unreachable. The pool would have read as empty, which
+means the audit above could never have caught it. Both now publish the pool *before* filling
+it, so a partial build is a partial pool and the next rebuild clears it.
 
 `scroll` established that one call moves the selected scene exactly one row and centers
 it in Session View. A synchronous loop of calls produced only one move, so the probe now

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Makes an app's `.icns` from that app's own mark.
 //
-// Both marks are the same disc — one thing split down the middle, a dot on each
-// side of the divide — and what separates them is hue and what the dots are
+// Both marks are the same square — one thing split down the middle by an S, a
+// dot on each side of the divide — and what separates them is hue and what the dots are
 // doing: set[flow] runs rows of clips into its node, visual[flow] throws rays
 // out of it. That is the whole design brief. At Dock size, and in a ⌘-Tab strip,
 // hue is the only thing anyone actually reads, so the shapes are there for the
@@ -31,17 +31,15 @@ const APPS = ['set', 'visuals'];
 const SIZES = [16, 32, 128, 256, 512];
 
 /**
- * How much of a tile the mark is drawn into, and the number is not arbitrary.
+ * How much of a tile the mark is drawn into.
  *
- * Apple's icon grid puts a circular icon at 824 of 1024 — a little over 80% —
- * and the mark's outer disc is 440 of its 512 viewBox. Draw the mark at the
- * ratio between those two and the disc lands exactly on the grid; draw it edge
- * to edge instead and it overhangs every neighbour in the Dock by 7%, which
- * doesn't read as a bigger icon so much as a wrong one.
+ * Apple's icon grid puts a rounded-square icon at 824 of 1024, and the mark is
+ * drawn edge to edge in its own viewBox, so the ratio is the grid's outright.
+ * Draw it full bleed instead and it overhangs every neighbour in the Dock by a
+ * fifth, which doesn't read as a bigger icon so much as a wrong one.
  */
-const INSET = 824 / 1024 / (440 / 512);
+const INSET = 824 / 1024;
 
-/** The mark's size inside a tile, rounded even so the transparent pad splits evenly. */
 const inner = (tile: number): number => 2 * Math.round((tile * INSET) / 2);
 
 const run = (cmd: string, args: string[]): void => {
@@ -84,7 +82,7 @@ try {
         '--out', drawn,
       ]);
       // Pad rather than draw large: no `--padColor`, so the margin is
-      // transparent and the tile is the disc sitting on Apple's grid.
+      // transparent and the tile is the mark sitting on Apple's grid.
       run('sips', [
         '--padToHeightWidth', String(tile), String(tile),
         drawn,

@@ -408,6 +408,10 @@ function ensureDicts(): void {
 function init(): void {
   deviceReady = true;
   ensureDicts();
+  // Always on, because a leak watch you have to switch on is off on the night it
+  // would have caught something. It costs one array walk a minute and says
+  // nothing at all unless the count climbs.
+  startCensusWatch();
   if (helloPending) {
     helloPending = false;
     hello();
@@ -2797,6 +2801,7 @@ function clearChainObservers(): void {
   }
   chainObservers = [];
   chainAttaching = was;
+  auditObservers('chains cleared');
 }
 
 /**
@@ -4115,6 +4120,7 @@ function clearMeterObservers(): void {
     }
   }
   meterObservers = [];
+  auditObservers('meters off');
 }
 
 // --- following Live ---------------------------------------------------
@@ -4426,7 +4432,16 @@ function rebuildCursorObservers(): void {
   clearCursorObservers();
   if (t < 0 || s < 0) return;
   try {
+    // **Published before it is filled, and that is the point.** Everything below
+    // attaches a live callback inside Live, and the only handle that can ever
+    // detach one is the entry in this pool. Building a local array and assigning
+    // it at the end means a throw halfway down leaves every observer made so far
+    // attached, firing, and reachable from nothing — the exact silent leak
+    // `auditObservers` exists to catch, and one it could never catch here
+    // because the pool would read as empty. Sharing the reference makes a
+    // partial build a partial pool, which the next rebuild clears.
     const next: LiveAPI[] = [];
+    cursorObservers = next;
     const add = (a: LiveAPI | null) => {
       if (a) next.push(a);
     };
@@ -4459,7 +4474,9 @@ function rebuildCursorObservers(): void {
     add(observeAt('live_set tracks ' + t, 'name', onCursorTrackEdit));
     add(observeAt('live_set tracks ' + t, 'color', onCursorTrackEdit));
 
-    cursorObservers = next;
+    // Only the *position* is recorded on success. The pool is already published;
+    // leaving `cursorAt` empty after a throw is what makes the next flush rebuild
+    // rather than see a match and skip.
     cursorAt = where;
   } catch (e) {
     // Never fatal to the flush: the delta this was called alongside is still
@@ -4747,11 +4764,14 @@ function watch_selection(on: number): void {
   clearSelObservers();
   if (Number(on) !== 1) return;
   try {
+    // Pooled before the properties are assigned, for the reason in
+    // `rebuildCursorObservers`: an attached observer that no pool holds cannot
+    // be detached by anything, ever.
     const t = new LiveAPI(onSelectionChange, 'live_set view');
-    t.property = 'selected_track';
     const s = new LiveAPI(onSelectionChange, 'live_set view');
-    s.property = 'selected_scene';
     selObservers = [t, s];
+    t.property = 'selected_track';
+    s.property = 'selected_scene';
 
     // Master is outside Song.tracks, so the cursor's ordinary-track observer
     // cannot ever cover it. Keep this addition isolated: if the documented
@@ -4811,6 +4831,10 @@ function clearSelObservers(): void {
 // the selection instead — see *following Live* above.
 
 function onStructureChange(): void {
+  // The observer watch below compares like with like. A set that gained eight
+  // tracks legitimately gained observers with them, so the epoch moves and the
+  // next census starts a fresh comparison rather than calling that a leak.
+  structureEpoch++;
   // Every index now means something different, so anything addressed by one is
   // stale: both id caches, the dirty set, and the cursor's previous position.
   // Clients re-walk on `changed`, which is the only honest answer to a set that
@@ -5104,6 +5128,180 @@ function diagWatch(on: number): void {
   );
 }
 
+// --- the observer census ----------------------------------------------
+//
+// **Every LOM observer this device holds, counted, and checked against whether
+// anything still wants it.**
+//
+// This exists because an observer is the one resource here that leaks silently.
+// `new LiveAPI(cb, path)` with a `property` assigned registers a callback inside
+// *Live*, and the only thing that unregisters it is assigning `property = ''`.
+// A pool reassigned without being cleared, or an array built and then abandoned
+// by a throw, leaves callbacks attached to a set nobody is watching any more —
+// firing, costing Live time on its own main thread, and reachable from nothing
+// that could ever detach them. Nothing in JavaScript notices. The device gets
+// slower over a night and the Max window says nothing at all.
+//
+// So the invariant is stated out loud instead: **a pool is non-empty only while
+// its watch is on.** That is exact, it is cheap to check, and it is checked at
+// the moment it is supposed to hold — as a watch goes off — rather than left for
+// somebody to notice.
+//
+// The high-water mark is the other half. A pool that is *supposed* to hold forty
+// observers and holds four hundred has leaked without ever breaking the rule
+// above, so the peak per pool is kept and reported. A count that only climbs,
+// across a set whose shape has not changed, is the signature.
+
+interface PoolCensus {
+  name: string;
+  count: number;
+  /** Whether anything still wants this pool. `null` where nothing says. */
+  wanted: boolean | null;
+  peak: number;
+}
+
+/** Peak seen per pool this session, so slow growth has something to show against. */
+var observerPeaks: { [name: string]: number } = {};
+
+/**
+ * Every pool, its size, and whether its watch is on.
+ *
+ * `wanted` is `null` for the pools nothing switches — the cursor and structure
+ * observers live for as long as the device does, so "should this be empty?" has
+ * no answer for them and a census that guessed one would cry leak on every line.
+ */
+function observerCensus(): PoolCensus[] {
+  const pools: PoolCensus[] = [
+    { name: 'structure', count: observers.length, wanted: null, peak: 0 },
+    { name: 'cursor', count: cursorObservers.length, wanted: null, peak: 0 },
+    { name: 'play', count: playObservers.length, wanted: null, peak: 0 },
+    { name: 'scenes', count: sceneObservers.length, wanted: null, peak: 0 },
+    { name: 'meters', count: meterObservers.length, wanted: metersWatching, peak: 0 },
+    { name: 'mixer', count: mixerObservers.length, wanted: null, peak: 0 },
+    {
+      name: 'mixerStructure',
+      count: mixerStructureObserver ? 1 : 0,
+      wanted: null,
+      peak: 0,
+    },
+    { name: 'transport', count: transportObservers.length, wanted: null, peak: 0 },
+    { name: 'chains', count: chainObservers.length, wanted: chainWatching, peak: 0 },
+    { name: 'selection', count: selObservers.length, wanted: null, peak: 0 },
+    { name: 'diag', count: diagObservers.length, wanted: null, peak: 0 },
+    { name: 'diagAttached', count: diagAttached.length, wanted: null, peak: 0 },
+  ];
+  for (let i = 0; i < pools.length; i++) {
+    const pool = pools[i];
+    const was = observerPeaks[pool.name] || 0;
+    if (pool.count > was) observerPeaks[pool.name] = pool.count;
+    pool.peak = observerPeaks[pool.name] || 0;
+  }
+  return pools;
+}
+
+/** Every observer this device holds. The one number worth watching over a night. */
+function observerTotal(): number {
+  const pools = observerCensus();
+  let total = 0;
+  for (let i = 0; i < pools.length; i++) total += pools[i].count;
+  return total;
+}
+
+/**
+ * Say so if a pool is holding observers nothing wants.
+ *
+ * Called where a watch is turned off, which is the moment the invariant is meant
+ * to hold. Deliberately a `post` and not an `error`: a leak is worth seeing in
+ * the Max window and is never worth interrupting a set over.
+ */
+function auditObservers(when: string): void {
+  const pools = observerCensus();
+  for (let i = 0; i < pools.length; i++) {
+    const pool = pools[i];
+    if (pool.wanted === false && pool.count > 0) {
+      post(
+        'openflow LEAK: ' + pool.name + ' holds ' + pool.count +
+          ' observer(s) with its watch off (' + when + ')\n',
+      );
+    }
+  }
+}
+
+/**
+ * Bumped whenever the set renumbers. Growth is only suspicious within one epoch.
+ */
+var structureEpoch = 0;
+
+/** The last total reported, and the epoch it was taken in. */
+var lastCensusTotal = -1;
+var lastCensusEpoch = -1;
+
+/** How often the standing watch looks. Slow, because a leak is measured in hours. */
+var CENSUS_INTERVAL_MS = 60000;
+
+/**
+ * The standing leak watch: silent while the count holds, loud when it climbs.
+ *
+ * **Silent is the whole design.** A counter somebody has to remember to read is
+ * a counter nobody reads, and a heartbeat that prints a healthy number every
+ * minute is a log nobody reads either — both fail the same way at 1am. So this
+ * says nothing at all until the total grows *within one structure epoch*, which
+ * is the case that cannot be explained by the set having got bigger.
+ *
+ * It can still be explained by a panel being opened, which legitimately attaches
+ * observers. That is why the message prints the whole census rather than only
+ * the total: opening the mixer moves `mixer` and nothing else, and a leak moves
+ * a pool nobody touched.
+ */
+function censusTick(): void {
+  const total = observerTotal();
+  if (structureEpoch !== lastCensusEpoch) {
+    lastCensusEpoch = structureEpoch;
+    lastCensusTotal = total;
+    return;
+  }
+  if (total > lastCensusTotal && lastCensusTotal >= 0) {
+    post(
+      'openflow observers: ' + lastCensusTotal + ' -> ' + total +
+        ' with the set unchanged. If no panel was opened, this is a leak:\n',
+    );
+    diagCensus();
+  }
+  lastCensusTotal = total;
+}
+
+var censusTask = new Task(censusTick);
+
+/** Start the standing watch. Idempotent — `repeat` on a running task restarts it. */
+function startCensusWatch(): void {
+  censusTask.interval = CENSUS_INTERVAL_MS;
+  censusTask.repeat();
+}
+
+/**
+ * The census, in the Max window. `diag census`.
+ *
+ * Read it twice: once when the rig has settled, and again an hour later with the
+ * same set open and the same panels up. Every `now` should match, and any that
+ * has climbed is the pool to go and read.
+ */
+function diagCensus(): void {
+  const pools = observerCensus();
+  let total = 0;
+  post('openflow diag census: LOM observers held by this device\n');
+  for (let i = 0; i < pools.length; i++) {
+    const pool = pools[i];
+    total += pool.count;
+    const wanted =
+      pool.wanted === null ? '' : pool.wanted ? '  watch:on' : '  watch:OFF';
+    const leaked = pool.wanted === false && pool.count > 0 ? '   <-- LEAK' : '';
+    post(
+      '  ' + pool.name + ': now ' + pool.count + '  peak ' + pool.peak + wanted + leaked + '\n',
+    );
+  }
+  post('  total: ' + total + '\n');
+}
+
 function clearDiagObservers(): void {
   for (let i = 0; i < diagObservers.length; i++) {
     try {
@@ -5351,11 +5549,12 @@ function diag(what: string, arg: number): void {
     else if (w === 'scroll') diagScroll(arg);
     else if (w === 'selectscene') diagSelectScene(arg);
     else if (w === 'param') diagParam();
+    else if (w === 'census') diagCensus();
     else {
       post(
         'openflow diag: unknown "' + w + '". Try: ids | slot | sel | watch 0|1 | ' +
           'scan <track> | attach <n> | detach | scroll <signed steps> | ' +
-          'selectscene <index> | param\n',
+          'selectscene <index> | param | census\n',
       );
     }
   } catch (e) {
