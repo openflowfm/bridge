@@ -7,9 +7,11 @@
 //
 // **rAF cannot answer it.** A browser paces `requestAnimationFrame` to the
 // display, so a machine capable of 300fps and one barely holding 60 both report
-// 60 through it. The page this opens runs free instead — see `visuals/bench.ts`
-// for why it times a batch rather than a frame, and why the barrier is a
-// one-pixel `readPixels` rather than the `gl.finish()` that does not work.
+// 60 through it. The page this opens runs free instead, drawing each flow for a
+// real window of music and counting the frames that fit — see `visuals/bench.ts`
+// for why the window is wall-clock rather than a frame count, and why the
+// barrier is a one-pixel `readPixels` rather than the `gl.finish()` that does
+// not work.
 //
 // Electron rather than the Chrome in `tools/visuals.ts`, for one reason: it is
 // already a dependency and it is the same Chromium the app ships, so the number
@@ -21,10 +23,11 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mediaRoot, serveMedia } from '../visuals/server/media.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** Anything passed straight through to the page, for probes rather than readings. */
-const passed = ['samples', 'warmup', 'flows']
+const passed = ['bars', 'warmup', 'flows']
   .map((name) => {
     const found = process.argv.find((arg) => arg.startsWith(`--${name}=`));
     return found ? `&${name}=${found.slice(name.length + 3)}` : '';
@@ -49,15 +52,18 @@ interface FlowResult {
   id: string;
   name: string;
   work: number;
+  frames: number;
+  windowMs: number;
   msPerFrame: number;
   fps: number;
-  frames: number;
   error: string | null;
 }
 interface Pass {
   width: number;
   height: number;
   tracks: number;
+  bars: number;
+  tempo: number;
   flows: FlowResult[];
 }
 interface BenchReport {
@@ -165,8 +171,11 @@ const boot = async () => {
       app.exit(1);
       return;
     }
-    if (Date.now() - started > 600000) {
-      process.stderr.write('benchmark timed out after ten minutes\\n');
+    // Generous, because a full scheme at eight bars is minutes by design and a
+    // --sweep of four resolutions is most of an hour. The flag to reach for when
+    // that is too long is --bars, not this.
+    if (Date.now() - started > 3600000) {
+      process.stderr.write('benchmark timed out after an hour\\n');
       app.exit(1);
       return;
     }
@@ -198,13 +207,20 @@ function report(found: BenchReport): void {
 
   for (const pass of found.passes) {
     const ranked = [...pass.flows].sort((a, b) => a.fps - b.fps);
-    console.log(`${pass.width}x${pass.height}, ${pass.tracks} tracks playing`);
+    const seconds = ((pass.bars * 4 * 60) / pass.tempo).toFixed(1);
     console.log(
-      `  ${pad('flow', nameWidth)}  ${padStart('work', 5)}  ${padStart('ms', 7)}  ${padStart('fps', 7)}`,
+      `${pass.width}x${pass.height}, ${pass.tracks} tracks playing, ` +
+        `${pass.bars} bar${pass.bars === 1 ? '' : 's'} at ${pass.tempo}bpm ` +
+        `(${seconds}s a flow)`,
+    );
+    console.log(
+      `  ${pad('flow', nameWidth)}  ${padStart('work', 5)}  ${padStart('frames', 7)}  ` +
+        `${padStart('ms', 7)}  ${padStart('fps', 7)}`,
     );
     for (const flow of ranked) {
       const line =
         `  ${pad(flow.name, nameWidth)}  ${padStart(String(flow.work), 5)}  ` +
+        `${padStart(String(flow.frames), 7)}  ` +
         `${padStart(flow.msPerFrame.toFixed(2), 7)}  ${padStart(flow.fps.toFixed(0), 7)}`;
       console.log(flow.error ? `${line}   ${flow.error}` : line);
     }
@@ -225,9 +241,12 @@ function report(found: BenchReport): void {
     console.log(`Measured with ${busy.join(', ')} also on this GPU. These are floors, not ceilings.\n`);
   }
   console.log(
-    'Throughput: a batch of frames issued back to back and closed with one GPU\n' +
-      'barrier, divided by the count. Not paced by requestAnimationFrame, so these\n' +
-      'are ceilings rather than the display’s refresh rate.\n' +
+    'Each flow is drawn for a real window of music — the beat comes off the wall\n' +
+      'clock, so decoders and envelope followers run at the rate a show runs them —\n' +
+      'and the score is how many frames fit. Not paced by requestAnimationFrame, so\n' +
+      'these are ceilings rather than the display’s refresh rate — though ceilings\n' +
+      'a real show should beat, since the GPU is drained every 16ms to be counted\n' +
+      'and a show never stops to be counted.\n' +
       'work is the compiler’s own prediction against its ceiling of 64 — it charges\n' +
       'only field, fractal, light and spread nodes, so 0 is ordinary. Where work and\n' +
       'ms disagree, the cost model in src/render/circuit.ts is what needs revisiting.\n',
@@ -263,8 +282,22 @@ const TYPES: Record<string, string> = {
 };
 
 const dir = path.join(root, 'visuals', 'bench-dist');
+const media = mediaRoot();
 const serving = http.createServer((request, response) => {
   const asked = decodeURIComponent((request.url ?? '/').split('?')[0]);
+
+  // **Media is served, and it has to be.** A `video` node only uploads a texture
+  // when a decoded frame arrives, so with the real clock this now measures the
+  // per-frame upload a show actually pays — and it can only do that if the file
+  // is there. Against the old frame-counted window it barely mattered; a
+  // fifteen-second window is four hundred frames of decode that would otherwise
+  // be four hundred 404s.
+  if (asked.startsWith('/media/')) {
+    if (serveMedia(request, response, media, asked.slice('/media/'.length))) return;
+    response.writeHead(404).end('media not found');
+    return;
+  }
+
   const file = path.join(dir, asked === '/' ? 'bench.html' : asked);
   // Never outside the build. The page asks for its own assets and nothing else.
   if (!file.startsWith(dir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
