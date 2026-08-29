@@ -117,8 +117,11 @@ app.on('window-all-closed', () => app.quit());
 
 const boot = async () => {
   const win = new BrowserWindow({
-    width: 900,
-    height: 560,
+    // Big enough that the picture is worth looking at. The page fits its canvas
+    // to this, and the drawing buffer is the resolution being measured rather
+    // than the size of this window — the readout along the bottom says which.
+    width: 1200,
+    height: 715,
     show: !process.env.OPENFLOW_BENCH_HIDDEN,
     webPreferences: { backgroundThrottling: false, offscreen: false },
   });
