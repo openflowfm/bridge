@@ -52,11 +52,13 @@ jobs:
       - if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
         run: node --disable-warning=ExperimentalWarning tools/coverage-summary.ts
 
+      # report/ is the vitest ui with the coverage report copied in under
+      # coverage/ — one directory that is both the artifact and the site.
       - if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-${{ github.sha }}
-          path: coverage/
+          name: test-report-${{ github.sha }}
+          path: report/
           if-no-files-found: error
           retention-days: 14
 
@@ -78,9 +80,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # The html report at a URL, rather than inside a zip somebody has to download
-  # and unpack. Pages was already enabled for this repo with Actions as its
-  # source and had never once been built; this is what builds it.
+  # The report at a URL, rather than inside a zip somebody has to download and
+  # unpack: the vitest ui at the site root, and the coverage report it carries
+  # at /coverage/, which is where the badge and the README point.
   #
   # `needs: check` on purpose: the artifact uploads even when a test fails, and
   # a report from a failed run is not one to publish.
@@ -103,19 +105,18 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: coverage-${{ github.sha }}
-          path: site/coverage
+          name: test-report-${{ github.sha }}
+          path: site
 
-      # The bare site URL lands on the report while the report is all there is.
-      # Anything published here later replaces this file and leaves /coverage/
-      # where the badge and the README both expect to find it.
+      # The vitest ui's own coverage tab belongs to `vitest --ui`, which is a
+      # dev server; the static report has no way through to the coverage it
+      # carries. So the site gets one, appended where the app cannot overwrite
+      # it.
       - run: |
-          cat > site/index.html <<'HTML'
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>open[flow] coverage</title>
-          <meta http-equiv="refresh" content="0; url=coverage/">
-          <a href="coverage/">Coverage report</a>
+          cat >> site/index.html <<'HTML'
+          <a href="coverage/" style="position:fixed;right:12px;bottom:12px;z-index:9;padding:6px 12px;
+             border-radius:6px;background:#1e1e20;color:#c8c8c8;border:1px solid #3a3a3d;
+             font:13px system-ui,sans-serif;text-decoration:none">Coverage &rarr;</a>
           HTML
 
       - uses: actions/upload-pages-artifact@v5

@@ -5,9 +5,10 @@
 // endpoint for the README badge.
 //
 // The markdown goes to $GITHUB_STEP_SUMMARY when CI sets it, stdout otherwise.
-// The badge is written into coverage/, which is what gets published to Pages.
+// The badge is written into report/, which is the whole published site: the
+// vitest ui at its root, and the coverage report copied in under coverage/.
 
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 
 type Counts = { total: number; covered: number; pct: number };
@@ -64,7 +65,7 @@ const markdown = [
       `| \`${area}\` | ${cell(sum.statements)} | ${cell(sum.branches)} | ${cell(sum.functions)} | ${cell(sum.lines)} |`,
   ),
   '',
-  'Line-by-line: the `coverage-<sha>` artifact on this run, `coverage/index.html` inside it.',
+  'Line-by-line: [the published report](https://ryangavin.github.io/better-session-view/coverage/), or the `test-report-<sha>` artifact on this run.',
   '',
 ].join('\n');
 
@@ -78,8 +79,11 @@ const colour = (percent: number) =>
   : percent >= 30 ? 'orange'
   : 'red';
 
+// After the html reporter, which copies coverage/ in before this runs — so the
+// badge belongs to the report directory rather than the one it was copied from.
+mkdirSync(resolve(root, 'report'), { recursive: true });
 writeFileSync(
-  resolve(root, 'coverage/badge.json'),
+  resolve(root, 'report/badge.json'),
   `${JSON.stringify({
     schemaVersion: 1,
     label: 'coverage',
