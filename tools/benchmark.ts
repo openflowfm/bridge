@@ -345,7 +345,7 @@ function report(found: BenchReport): void {
       'its budget is spent on. Run --paced for the headroom number.\n' +
       'work is the compiler’s own prediction against its ceiling of 64 — it charges\n' +
       'only field, fractal, light and spread nodes, so 0 is ordinary. Where work and\n' +
-      'ms disagree, the cost model in src/render/circuit.ts is what needs revisiting.\n',
+      'ms disagree, the cost model in client/render/circuit.ts is what needs revisiting.\n',
   );
 }
 
