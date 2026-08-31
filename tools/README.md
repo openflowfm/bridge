@@ -1,6 +1,6 @@
 # tools/
 
-Build tooling. Not compiled — Node 24 runs `.ts` directly via type stripping, so
+Build tooling. Not compiled — Node 26 runs `.ts` directly via type stripping, so
 these execute straight from source.
 
 ```
@@ -61,7 +61,7 @@ with `build-electron.ts`, and launch it. Where the reasoning lives:
 window and the display list.
 
 `build-electron.ts` esbuilds `<module>/electron/{main,preload}.ts` to **CommonJS**. Both
-halves are forced: Electron's bundled Node does not strip types the way Node 24 on your PATH
+halves are forced: Electron's bundled Node does not strip types the way Node 26 on your PATH
 does, and a `sandbox: true` preload must be CJS. It also bundles visual[flow]'s server, and
 that one to **ESM**, because the server reads `import.meta.url` to find its renderer and its
 Link addon — both empty in a CJS bundle.

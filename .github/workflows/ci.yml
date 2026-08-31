@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -66,6 +66,18 @@ jobs:
       # remembered. A clean checkout is the only place it's honestly tested —
       # a file that's untracked but imported passes locally and fails here.
       - run: npm run build
+
+      # The app builds, which `npm run build` does not cover — it is the device,
+      # and these are the four things a person actually opens. build:widgets is
+      # the one that matters most: it emits declarations from its own
+      # tsconfig.build.json, whose `include` overrides the one `npm run
+      # typecheck` reads, so it is the only step that ever compiles that file
+      # list. A TypeScript 7 upgrade broke exactly it, and every other check
+      # here stayed green.
+      - run: npm run build:widgets
+      - run: npm run build:set
+      - run: npm run build:visuals
+      - run: npm run build:chart
 
       # lom.ts has no automated coverage: it needs Live open with the device
       # loaded. Attaching the build to every run is the compensating control —
