@@ -39,7 +39,26 @@ jobs:
 
       - run: npm run typecheck
 
-      - run: npm test
+      # Coverage rather than a plain run: same tests, V8's own counters, and a
+      # table on the build page instead of a number that only ever existed in
+      # somebody's terminal.
+      - id: coverage
+        run: npm run test:coverage
+
+      # A failing test is exactly when the table is worth reading, and the run
+      # stops at the step above without this — but a report that was never
+      # written because the typecheck failed first is not worth a second error
+      # about a missing file, so the condition is "coverage ran", not "always".
+      - if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+        run: node --disable-warning=ExperimentalWarning tools/coverage-summary.ts
+
+      - if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          if-no-files-found: error
+          retention-days: 14
 
       # The "must build from a clean tree" rule, enforced rather than
       # remembered. A clean checkout is the only place it's honestly tested —

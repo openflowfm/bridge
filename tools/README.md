@@ -13,6 +13,7 @@ build-electron.ts            bundles a module's Electron main, preload and serve
 build-icons.ts               makes an app's .icns from its own public/mark.svg
 install-apps.ts              copies the packed apps into /Applications
 install-device.ts            copies the device into the Ableton User Library, as -qa
+coverage-summary.ts          renders coverage-summary.json as markdown, for CI's build page
 ```
 
 ```sh
