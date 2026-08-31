@@ -21,8 +21,8 @@
 // `git checkout -- <file>` and nothing is lost.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { relative, resolve } from 'node:path';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, relative, resolve } from 'node:path';
 import ts from 'typescript';
 
 interface Mutant {
@@ -61,11 +61,11 @@ if (!arg) {
 }
 
 const file = resolve(root, arg);
-const spec = file.replace(/\.tsx?$/, (ext) => `.test${ext}`);
 const shown = relative(root, file);
+const specs = specsFor(file);
 
-if (!existsSync(spec)) {
-  console.error(`no spec beside ${shown} — expected ${relative(root, spec)}`);
+if (specs.length === 0) {
+  console.error(`no spec beside ${shown} — expected ${basename(file).replace(/\.tsx?$/, '.test$&')}`);
   process.exit(1);
 }
 
@@ -92,14 +92,17 @@ if (mutants.length === 0) {
 const step = Math.max(1, Math.ceil(mutants.length / budget));
 const chosen = mutants.filter((_, i) => i % step === 0);
 
-console.log(`${shown}: ${chosen.length} mutants of ${mutants.length}, against ${relative(root, spec)}`);
+console.log(
+  `${shown}: ${chosen.length} mutants of ${mutants.length}, against ` +
+    specs.map((s) => basename(s)).join(' + '),
+);
 
 const survivors: Mutant[] = [];
 process.on('exit', () => writeFileSync(file, original));
 
 for (const [i, mutant] of chosen.entries()) {
   writeFileSync(file, splice(original, mutant));
-  const run = spawnSync(vitest, ['run', spec, '--reporter=dot'], {
+  const run = spawnSync(vitest, ['run', ...specs, '--reporter=dot'], {
     cwd: root,
     stdio: 'ignore',
   });
@@ -122,6 +125,22 @@ for (const mutant of survivors) {
   console.log(`  ${shown}:${mutant.line}  ${mutant.from} -> ${mutant.to}`);
 }
 process.exitCode = 1;
+
+/**
+ * Every spec that speaks for this file: `X.test.ts`, and any `X.<aspect>.test.ts`
+ * beside it. A hook whose gestures need a DOM keeps them in a second file so the
+ * derivation half stays in `environment: node` — and a gate that ran only the
+ * first would call the gestures unwatched when they are the best-watched part.
+ */
+function specsFor(source: string): string[] {
+  const base = basename(source).replace(/\.tsx?$/, '');
+  const pattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}(\\.[^.]+)?\\.test\\.tsx?$`);
+  const dir = dirname(source);
+  return readdirSync(dir)
+    .filter((entry) => pattern.test(entry))
+    .sort()
+    .map((entry) => resolve(dir, entry));
+}
 
 function collect(node: ts.SourceFile, text: string): Mutant[] {
   const found: Mutant[] = [];
