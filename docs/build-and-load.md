@@ -110,14 +110,19 @@ delete it from the track and re-drag.
 
 This is the part that surprises people, and it's all forced by Max.
 
-**`lom.ts` compiles with `module: "none"` and `alwaysStrict: false`.**
+**`lom.ts` compiles as a script, not a module.**
 
 - Max's `[v8]` discovers message handlers as **top-level global function
   declarations**. A message `snapshot 7` calls `function snapshot(reqId)`. Any module
-  wrapper — ESM, CJS, IIFE — hides them and nothing works.
+  wrapper — ESM, CJS, IIFE — hides them and nothing works. The file imports and
+  exports nothing, so with `moduleDetection: "legacy"` it stays a script and the
+  emit is the statements verbatim; the `module` setting never gets to do anything.
+  It used to say `module: "none"`, which TypeScript 7 removed.
 - `autowatch`, `inlets`, `outlets` are pre-existing globals the script assigns to.
-  `strict: true` injects `"use strict"`, which puts those assignments at risk. The
-  hand-written predecessor ran without it, so we keep it that way.
+  This used to compile with `alwaysStrict: false` so those assignments could not
+  trip a strict-mode `ReferenceError`. TypeScript 7 removed that option too, so the
+  emit now opens with `"use strict"` and `lom.ts` declares the three with `var`,
+  which is a legal write to a global however Max provides it.
 - Consequence: **`lom.ts` cannot `import` anything.** That's why the protocol lives in
   a global `OpenFlow` namespace rather than a module, and why atom-parsing logic is
   duplicated into `core/src/lomAtoms.ts` so it can be unit-tested.

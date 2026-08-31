@@ -7,9 +7,10 @@
 // — clip names contain spaces, commas and semicolons, all of which are special
 // in Max messages.
 //
-// NO IMPORTS ARE POSSIBLE HERE. Compiled with `module: "none"` so that message
-// handlers stay top-level globals where Max can find them. Protocol types come
-// from the global OpenFlow namespace (see protocol/global.d.ts).
+// NO IMPORTS ARE POSSIBLE HERE. Nothing is imported or exported, so the file
+// compiles as a script and message handlers stay top-level globals where Max
+// can find them. Protocol types come from the global OpenFlow namespace (see
+// protocol/global.d.ts).
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      add_scenes <reqId> <dictName>
@@ -40,9 +41,9 @@
 //      chain_state <encodedState> | chain_values <encodedChanges>
 //      pong
 
-autowatch = 1;
-inlets = 1;
-outlets = 1;
+var autowatch = 1;
+var inlets = 1;
+var outlets = 1;
 
 const SNAPSHOT_DICT = 'openflow_snapshot';
 const RESULT_DICT = 'openflow_result';

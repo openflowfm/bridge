@@ -18,6 +18,11 @@ record-session.ts            records a real session off the bridge, as test corp
 mutate.ts                    breaks a file one edit at a time — would its spec notice?
 ```
 
+**`mutate.ts` imports `typescript-syntax`, not `typescript`.** TypeScript 7's package
+is a launcher for a Go compiler and ships no JavaScript parser, so there is no AST to
+walk. `typescript-syntax` is an npm alias pinned to `typescript@5.9.3` — the parser
+this tool's mutant set was tuned against — and Dependabot is told to leave it alone.
+
 ```sh
 npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app

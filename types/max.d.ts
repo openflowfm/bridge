@@ -2,7 +2,7 @@
 //
 // This is NOT Node. There is no module system, no require, no fs. Message
 // handlers are discovered by Max as top-level global function declarations,
-// which is why lom.ts compiles with `module: "none"`.
+// which is why lom.ts compiles as a script rather than a module.
 
 /** Set to 1 to make Max reload the script when the file changes. */
 declare var autowatch: number;

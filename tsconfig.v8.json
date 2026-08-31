@@ -1,16 +1,19 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "module": "None",
+    // Not "None" — TypeScript 7 removed it. With no imports or exports and
+    // moduleDetection "legacy", the file is still a script, so the emit is the
+    // statements verbatim and message handlers stay top-level globals where Max
+    // looks for them. The module setting never gets to do anything.
+    "module": "commonjs",
     "lib": ["ES2022"],
     "types": [],
     "moduleDetection": "legacy",
     "resolveJsonModule": false,
-    "esModuleInterop": false,
-    // Max's v8 pre-defines autowatch/outlets/inlets as globals we assign to.
-    // The hand-written predecessor ran without "use strict"; keep it that way
-    // rather than risk a strict-mode ReferenceError on those assignments.
-    "alwaysStrict": false,
+    // TypeScript 7 also removed alwaysStrict:false, so the emit now opens with
+    // "use strict". Max's v8 pre-defines autowatch/inlets/outlets as globals we
+    // assign to; lom.ts declares them with `var` so those writes are legal under
+    // strict mode however Max provides them.
     "rootDir": "src",
     "outDir": ".",
     "sourceMap": false

@@ -23,7 +23,11 @@
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, relative, resolve } from 'node:path';
-import ts from 'typescript';
+// TypeScript 7's npm package is a launcher for the Go compiler and ships no
+// JavaScript parser, so `typescript` no longer has an AST to walk. The old
+// syntactic API is pinned separately, at the exact version this tool's mutant
+// set was tuned against — a parser change here would silently change the gate.
+import ts from 'typescript-syntax';
 
 interface Mutant {
   /** Offset into the source, and what replaces what. */
