@@ -58,7 +58,14 @@ if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 600) {
 // consecutive frames to drive a store through real motion without committing a
 // megabyte of decimals. The count that was dropped is reported, because "we
 // kept 200 of 1,840" is a fact about the recording rather than a detail.
+//
+// Two caps, because a count is not a size: one `mixerState` carries every
+// parameter of every track and runs 16KB, so 200 of them is a megabyte on their
+// own and the meters, the clip status and the chains are rounding error beside
+// them. Whichever cap a type reaches first is where it stops, and no one stream
+// of chatter can crowd out the rest of the recording.
 const CAP = 200;
+const CAP_BYTES = 512 * 1024;
 
 /** The six on/off viewport watches. `watchChains` is the seventh, and has a target. */
 const WATCHES = [
@@ -90,6 +97,7 @@ await new Promise<void>((done, fail) => {
 const startedAt = performance.now();
 const stream: Recorded[] = [];
 const kept = new Map<string, number>();
+const bytes = new Map<string, number>();
 const dropped = new Map<string, number>();
 let snapshot: Event | null = null;
 
@@ -110,11 +118,13 @@ ws.addEventListener('message', (message) => {
   }
 
   const seen = kept.get(event.type) ?? 0;
-  if (seen >= CAP) {
+  const weight = bytes.get(event.type) ?? 0;
+  if (seen >= CAP || weight >= CAP_BYTES) {
     dropped.set(event.type, (dropped.get(event.type) ?? 0) + 1);
     return;
   }
   kept.set(event.type, seen + 1);
+  bytes.set(event.type, weight + String(message.data).length);
   stream.push({ at: Math.round(performance.now() - startedAt), event });
 });
 
@@ -169,12 +179,16 @@ const dir = resolve(root, 'set/test/corpus', name);
 mkdirSync(dir, { recursive: true });
 
 const recordedAt = new Date().toISOString();
-const snapshotBytes = write('snapshot.json', { recordedAt, bridge: url, event: snapshot });
+// The snapshot is indented and the stream is not, which is the difference
+// between a file somebody reads and a file something replays: one set, laid out
+// so a scene can be found in it, against several hundred frames of decimals.
+const snapshotBytes = write('snapshot.json', { recordedAt, bridge: url, event: snapshot }, 2);
 const streamBytes = write('stream.json', {
   recordedAt,
   bridge: url,
   seconds: Math.round((performance.now() - startedAt) / 1000),
   cap: CAP,
+  capBytes: CAP_BYTES,
   dropped: Object.fromEntries([...dropped].sort()),
   events: stream,
 });
@@ -191,8 +205,8 @@ console.log();
 console.log('This is your set: song names, artists, tempos, keys and every clip name.');
 console.log('Read it before committing it — this repository is public.');
 
-function write(file: string, body: unknown): number {
-  const json = `${JSON.stringify(body, null, 2)}\n`;
+function write(file: string, body: unknown, indent?: number): number {
+  const json = `${JSON.stringify(body, null, indent)}\n`;
   writeFileSync(resolve(dir, file), json);
   return Buffer.byteLength(json);
 }
