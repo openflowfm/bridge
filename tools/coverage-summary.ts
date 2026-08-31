@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// Renders coverage/coverage-summary.json as markdown, for GitHub's job summary
-// — the build page itself, rather than an artifact somebody has to download.
+// Renders coverage/coverage-summary.json for the two places outside a terminal
+// that a coverage number is any use: GitHub's job summary — the build page
+// itself, rather than an artifact somebody has to download — and a shields.io
+// endpoint for the README badge.
 //
-// Writes to $GITHUB_STEP_SUMMARY when CI sets it, stdout otherwise.
+// The markdown goes to $GITHUB_STEP_SUMMARY when CI sets it, stdout otherwise.
+// The badge is written into coverage/, which is what gets published to Pages.
 
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 
 type Counts = { total: number; covered: number; pct: number };
@@ -64,6 +67,26 @@ const markdown = [
   'Line-by-line: the `coverage-<sha>` artifact on this run, `coverage/index.html` inside it.',
   '',
 ].join('\n');
+
+// A shields.io endpoint, published with the report: a number in the README
+// without an account anywhere holding it.
+const colour = (percent: number) =>
+  percent >= 90 ? 'brightgreen'
+  : percent >= 75 ? 'green'
+  : percent >= 60 ? 'yellowgreen'
+  : percent >= 45 ? 'yellow'
+  : percent >= 30 ? 'orange'
+  : 'red';
+
+writeFileSync(
+  resolve(root, 'coverage/badge.json'),
+  `${JSON.stringify({
+    schemaVersion: 1,
+    label: 'coverage',
+    message: `${total.lines.pct.toFixed(1)}%`,
+    color: colour(total.lines.pct),
+  })}\n`,
+);
 
 const out = process.env.GITHUB_STEP_SUMMARY;
 if (out) appendFileSync(out, markdown);

@@ -77,3 +77,50 @@ jobs:
             bridge/lom.js
           if-no-files-found: error
           retention-days: 14
+
+  # The html report at a URL, rather than inside a zip somebody has to download
+  # and unpack. Pages was already enabled for this repo with Actions as its
+  # source and had never once been built; this is what builds it.
+  #
+  # `needs: check` on purpose: the artifact uploads even when a test fails, and
+  # a report from a failed run is not one to publish.
+  pages:
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    # Deploys queue rather than race, and a running one is never cancelled.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: coverage-${{ github.sha }}
+          path: site/coverage
+
+      # The bare site URL lands on the report while the report is all there is.
+      # Anything published here later replaces this file and leaves /coverage/
+      # where the badge and the README both expect to find it.
+      - run: |
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>open[flow] coverage</title>
+          <meta http-equiv="refresh" content="0; url=coverage/">
+          <a href="coverage/">Coverage report</a>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5
