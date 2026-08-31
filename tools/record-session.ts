@@ -18,6 +18,14 @@
 // It also does not `identify`. The roster's client kinds are the three real
 // apps, and a recorder is not one of them; it shows up as an anonymous
 // connection, which is what it is. Nothing is served differently for it.
+//
+// It *does* arm the viewport watches, because without them there is nothing to
+// record: meters, play state, the mixer, the stop row and the device chains are
+// all things a client asks for, and a recorder that only listens hears a set
+// nobody is looking at. They are the recorder's own watches, released on the
+// way out — none of this touches the two the device holds. Rule 5's question
+// for a new watch is "whose is it": all seven here are a viewport's, held for
+// as long as the recording and no longer.
 
 import { DEFAULT_PORT, WS_PATH, type Event, type Request } from '@openflow/protocol/index.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -51,6 +59,19 @@ if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 600) {
 // megabyte of decimals. The count that was dropped is reported, because "we
 // kept 200 of 1,840" is a fact about the recording rather than a detail.
 const CAP = 200;
+
+/** The six on/off viewport watches. `watchChains` is the seventh, and has a target. */
+const WATCHES = [
+  'watchPlay',
+  'watchMeters',
+  'watchStatus',
+  'watchSends',
+  'watchTransport',
+  'watchScenes',
+] as const satisfies readonly OpenFlow.RequestType[];
+
+/** How many tracks' device runs to watch. Each one costs Live observers. */
+const CHAINS = 4;
 
 const url = process.env.OPENFLOW_WS || `ws://127.0.0.1:${DEFAULT_PORT}${WS_PATH}`;
 const ws = new WebSocket(url);
@@ -117,7 +138,16 @@ if (!waited) {
 }
 
 console.log(`snapshot: ${describe(snapshot!)}`);
-console.log(`now play, click, drag and open a device chain for ${seconds}s — ⌃C stops early`);
+
+for (const type of WATCHES) ws.send(JSON.stringify({ type, on: true } satisfies Request));
+const subs = chainSubs(snapshot!);
+ws.send(JSON.stringify({ type: 'watchChains', subs } satisfies Request));
+console.log(`watching: ${WATCHES.join(', ')}, chains on ${subs.map((s) => s.t).join(', ')}`);
+console.log();
+console.log(`for the next ${seconds}s — ⌃C stops early:`);
+console.log('  press play, and let a song run so meters and play state move');
+console.log('  drag a volume fader down to -inf, and a send up');
+console.log('  select a track with devices, and open one to see its parameters');
 
 await new Promise<void>((done) => {
   const timer = setTimeout(done, seconds * 1000);
@@ -127,6 +157,12 @@ await new Promise<void>((done) => {
   });
 });
 
+// Released explicitly rather than left to the socket closing. The bridge would
+// drop them either way, but a recorder that hangs up mid-frame teaches nothing
+// about what a well-behaved client does, and this file is read as an example.
+for (const type of WATCHES) ws.send(JSON.stringify({ type, on: false } satisfies Request));
+ws.send(JSON.stringify({ type: 'watchChains', subs: [] } satisfies Request));
+await new Promise((done) => setTimeout(done, 100));
 ws.close();
 
 const dir = resolve(root, 'set/test/corpus', name);
@@ -165,6 +201,24 @@ function size(bytes: number): string {
   return bytes < 1024 * 1024 ?
       `${(bytes / 1024).toFixed(0)} KB`
     : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * Which device runs to watch, read off the set rather than asked for.
+ *
+ * Group tracks hold no devices of their own worth drawing, so the first few
+ * ordinary tracks are the ones most likely to have a real chain on them — and a
+ * real chain is the point: every device fixture in this repository is a guess at
+ * what Live calls its parameters, and one recording of one running device
+ * settles it. Device 0 is opened in each, which is what makes parameters arrive
+ * rather than just the shell.
+ */
+function chainSubs(event: Event): OpenFlow.ChainWatch[] {
+  if (event.type !== 'snapshot') return [];
+  return event.data.tracks
+    .filter((track) => !track.isGroup)
+    .slice(0, CHAINS)
+    .map((track) => ({ t: track.i, path: [], open: [0] }));
 }
 
 function describe(event: Event): string {
