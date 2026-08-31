@@ -14,6 +14,7 @@ build-icons.ts               makes an app's .icns from its own public/mark.svg
 install-apps.ts              copies the packed apps into /Applications
 install-device.ts            copies the device into the Ableton User Library, as -qa
 coverage-summary.ts          coverage-summary.json as a build-page table and a shields badge
+record-session.ts            records a real session off the bridge, as test corpus
 ```
 
 ```sh
@@ -29,6 +30,7 @@ npm run visuals:browser     # the visuals rig in a dedicated Chrome — see belo
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
+npm run dev:record -- <name> [seconds]   # a real session into set/test/corpus/<name>/
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined files
