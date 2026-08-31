@@ -27,6 +27,8 @@ import { mediaRoot, serveMedia } from '../visuals/server/media.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** Anything passed straight through to the page, for probes rather than readings. */
+const PACED = process.argv.includes('--paced');
+
 const passed = ['bars', 'warmup', 'flows']
   .map((name) => {
     const found = process.argv.find((arg) => arg.startsWith(`--${name}=`));
@@ -48,6 +50,18 @@ const EDGES = named
     : '1920';
 const runner = path.join(root, 'visuals', 'bench-dist', 'runner.cjs');
 
+interface PacedResult {
+  hz: number;
+  late: number;
+  lateShare: number;
+  intervalP50: number;
+  intervalP99: number;
+  cpuP50: number;
+  cpuP99: number;
+  gpuP50: number | null;
+  gpuP99: number | null;
+  budgetShare: number;
+}
 interface FlowResult {
   id: string;
   name: string;
@@ -56,12 +70,14 @@ interface FlowResult {
   windowMs: number;
   msPerFrame: number;
   fps: number;
+  paced: PacedResult | null;
   error: string | null;
 }
 interface Pass {
   width: number;
   height: number;
   tracks: number;
+  mode: 'ceiling' | 'paced';
   bars: number;
   tempo: number;
   flows: FlowResult[];
@@ -129,6 +145,10 @@ const boot = async () => {
     width: 1200,
     height: 715,
     show: !process.env.OPENFLOW_BENCH_HIDDEN,
+    // A paced run is driven by requestAnimationFrame, and a window nothing can
+    // see is given none — so it stays in front for the length of the run rather
+    // than stalling the moment something is opened over it.
+    alwaysOnTop: !!process.env.OPENFLOW_BENCH_PACED,
     webPreferences: { backgroundThrottling: false, offscreen: false },
   });
   // Anything the page says, said out loud. A benchmark that fails silently is
@@ -193,6 +213,66 @@ app.whenReady().then(boot).catch((err) => {
 });
 `;
 
+/**
+ * The paced table, which is the one that answers "do we make the budget".
+ *
+ * Ranked by how much of a refresh interval a frame took, worst first, because
+ * that is the number a show lives or dies on. `late` beside it is what actually
+ * happened: a flow can be cheap and still drop frames if something outside our
+ * work is in the way, and the two columns disagreeing is the interesting case.
+ */
+function reportPaced(pass: Pass, nameWidth: number): void {
+  const seconds = ((pass.bars * 4 * 60) / pass.tempo).toFixed(1);
+  const ranked = [...pass.flows].sort(
+    (a, b) => (b.paced?.budgetShare ?? 0) - (a.paced?.budgetShare ?? 0),
+  );
+  const hz = ranked[0]?.paced?.hz ?? 0;
+  console.log(
+    `${pass.width}x${pass.height}, ${pass.tracks} tracks playing, ` +
+      `${pass.bars} bar${pass.bars === 1 ? '' : 's'} at ${pass.tempo}bpm ` +
+      `(${seconds}s a flow) — PACED to the display at ${hz.toFixed(0)}Hz`,
+  );
+  console.log(
+    `  ${pad('flow', nameWidth)}  ${padStart('work', 5)}  ${padStart('cpu p99', 8)}  ` +
+      `${padStart('budget', 7)}  ${padStart('late', 7)}  ${padStart('gpu p99', 8)}`,
+  );
+  for (const flow of ranked) {
+    const at = flow.paced;
+    if (!at) continue;
+    const line =
+      `  ${pad(flow.name, nameWidth)}  ${padStart(String(flow.work), 5)}  ` +
+      `${padStart(at.cpuP99.toFixed(2) + 'ms', 8)}  ` +
+      `${padStart((at.budgetShare * 100).toFixed(1) + '%', 7)}  ` +
+      `${padStart((at.lateShare * 100).toFixed(2) + '%', 7)}  ` +
+      `${padStart(at.gpuP99 === null ? '—' : at.gpuP99.toFixed(2) + 'ms', 8)}`;
+    console.log(flow.error ? `${line}   ${flow.error}` : line);
+  }
+  const worst = ranked[0];
+  if (worst?.paced) {
+    const at = worst.paced;
+    const interval = at.hz > 0 ? 1000 / at.hz : 0;
+    const spent = Math.max(at.cpuP99, at.gpuP99 ?? 0);
+    console.log(
+      `  worst: ${worst.name} took ${spent.toFixed(2)}ms of a ${interval.toFixed(1)}ms ` +
+        `budget — ${(1 / at.budgetShare).toFixed(1)}x headroom, ` +
+        `${(at.lateShare * 100).toFixed(2)}% of frames late`,
+    );
+    console.log(
+      `  its medians: cpu ${at.cpuP50.toFixed(2)}ms, ` +
+        `gpu ${at.gpuP50 === null ? '—' : at.gpuP50.toFixed(2) + 'ms'}\n`,
+    );
+  }
+  console.log(
+    'Paced draws one frame per display refresh, the way a show does, so every cost\n' +
+      'paid per *presentation* rather than per draw is inside these numbers — the\n' +
+      'unpaced run amortises those over thirty draws and cannot see them.\n' +
+      'budget is the larger of cpu and gpu p99 against one refresh interval, because\n' +
+      'the two overlap and the one that does not fit is the one that decides. late is\n' +
+      'frames the display had to repeat. This mode cannot exceed the refresh rate and\n' +
+      'is not trying to — it needs a visible window, since a hidden one gets no rAF.\n',
+  );
+}
+
 /** Right-pad, so a column of names reads as a column. */
 const pad = (text: string, width: number): string =>
   text.length >= width ? text.slice(0, width) : text + ' '.repeat(width - text.length);
@@ -206,6 +286,10 @@ function report(found: BenchReport): void {
   const nameWidth = Math.max(12, ...names.map((flow) => flow.name.length));
 
   for (const pass of found.passes) {
+    if (pass.mode === 'paced') {
+      reportPaced(pass, nameWidth);
+      continue;
+    }
     const ranked = [...pass.flows].sort((a, b) => a.fps - b.fps);
     const seconds = ((pass.bars * 4 * 60) / pass.tempo).toFixed(1);
     console.log(
@@ -215,24 +299,30 @@ function report(found: BenchReport): void {
     );
     console.log(
       `  ${pad('flow', nameWidth)}  ${padStart('work', 5)}  ${padStart('frames', 7)}  ` +
-        `${padStart('ms', 7)}  ${padStart('fps', 7)}`,
+        `${padStart('ms', 7)}  ${padStart('fps', 7)}  ${padStart('gpu p50', 8)}`,
     );
     for (const flow of ranked) {
+      const gpu = flow.paced?.gpuP50;
       const line =
         `  ${pad(flow.name, nameWidth)}  ${padStart(String(flow.work), 5)}  ` +
         `${padStart(String(flow.frames), 7)}  ` +
-        `${padStart(flow.msPerFrame.toFixed(2), 7)}  ${padStart(flow.fps.toFixed(0), 7)}`;
+        `${padStart(flow.msPerFrame.toFixed(2), 7)}  ${padStart(flow.fps.toFixed(0), 7)}  ` +
+        `${padStart(gpu === null || gpu === undefined ? '—' : gpu.toFixed(2) + 'ms', 8)}`;
       console.log(flow.error ? `${line}   ${flow.error}` : line);
     }
     const worst = ranked[0];
     // The slowest flow is the only one that matters. A rotation is only as fast
     // as the frame it is on when the frame is worst, and every flow in the
     // scheme is one somebody put in the rotation.
+    //
+    // **It does not claim headroom, and it used to.** Dividing this throughput
+    // by 60 said Vortex had eighteen times a 60Hz budget; the paced run says it
+    // has two and a half. Both numbers are real and they measure different
+    // things — see the note below.
     if (worst) {
-      const headroom = worst.fps / 60;
       console.log(
-        `  slowest: ${worst.name} at ${worst.fps.toFixed(0)}fps — ` +
-          `${headroom.toFixed(1)}x a 60Hz budget, ${(worst.fps / 120).toFixed(1)}x a 120Hz one\n`,
+        `  slowest: ${worst.name} at ${worst.fps.toFixed(0)}fps throughput, ` +
+          `gpu ${worst.paced?.gpuP50?.toFixed(2) ?? '—'}ms a frame\n`,
       );
     }
   }
@@ -240,13 +330,19 @@ function report(found: BenchReport): void {
   if (busy.length) {
     console.log(`Measured with ${busy.join(', ')} also on this GPU. These are floors, not ceilings.\n`);
   }
+  if (found.passes.every((pass) => pass.mode === 'paced')) return;
   console.log(
     'Each flow is drawn for a real window of music — the beat comes off the wall\n' +
       'clock, so decoders and envelope followers run at the rate a show runs them —\n' +
       'and the score is how many frames fit. Not paced by requestAnimationFrame, so\n' +
-      'these are ceilings rather than the display’s refresh rate — though ceilings\n' +
-      'a real show should beat, since the GPU is drained every 16ms to be counted\n' +
-      'and a show never stops to be counted.\n' +
+      'these are ceilings rather than the display’s refresh rate.\n' +
+      '\n' +
+    'THROUGHPUT IS NOT HEADROOM. fps here is how many frames of this flow the GPU\n' +
+      'will chew through in a second with several in flight at once. gpu p50 beside\n' +
+      'it is how long *one* frame takes, and it is several times larger — Vortex\n' +
+      'runs 1092fps with a 3.2ms frame, because the pipeline overlaps them. A show\n' +
+      'presents one frame per refresh and cannot overlap, so the frame cost is what\n' +
+      'its budget is spent on. Run --paced for the headroom number.\n' +
       'work is the compiler’s own prediction against its ceiling of 64 — it charges\n' +
       'only field, fractal, light and spread nodes, so 0 is ordinary. Where work and\n' +
       'ms disagree, the cost model in src/render/circuit.ts is what needs revisiting.\n',
@@ -309,7 +405,8 @@ const serving = http.createServer((request, response) => {
 });
 await new Promise<void>((ready) => serving.listen(0, '127.0.0.1', ready));
 const port = (serving.address() as { port: number }).port;
-const url = `http://127.0.0.1:${port}/bench.html?edges=${EDGES}${passed}`;
+const url =
+  `http://127.0.0.1:${port}/bench.html?edges=${EDGES}${passed}` + (PACED ? '&paced=1' : '');
 
 fs.writeFileSync(runner, MAIN);
 
@@ -325,7 +422,12 @@ fs.writeFileSync(runner, MAIN);
 const collected = await new Promise<string>((done, fail) => {
   const child = spawn(path.join(root, 'node_modules', '.bin', 'electron'), [runner], {
     cwd: root,
-    env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1', OPENFLOW_BENCH_URL: url },
+    env: {
+      ...process.env,
+      ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
+      OPENFLOW_BENCH_URL: url,
+      ...(PACED ? { OPENFLOW_BENCH_PACED: '1' } : {}),
+    },
     // stdout is captured for the payload; stderr goes straight through so a
     // failure inside the window is readable rather than swallowed.
     stdio: ['ignore', 'pipe', 'inherit'],
