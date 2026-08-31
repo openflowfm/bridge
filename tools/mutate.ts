@@ -34,6 +34,12 @@ interface Mutant {
   line: number;
 }
 
+/** Collapsed to one line and shortened, so a survivor reads as one grep-able row. */
+const label = (text: string) => {
+  const flat = text.replace(/\s+/g, ' ');
+  return flat.length > 42 ? `${flat.slice(0, 39)}...` : flat;
+};
+
 /** Operator swaps, both ways. Each pair is two mutants wherever it appears. */
 const SWAPS: [string, string][] = [
   ['<', '<='],
@@ -122,6 +128,19 @@ function collect(node: ts.SourceFile, text: string): Mutant[] {
   const at = (pos: number) => node.getLineAndCharacterOfPosition(pos).line + 1;
 
   const visit = (n: ts.Node): void => {
+    // `a ?? b` becomes `b`: the fallback, always. Plumbing code is mostly
+    // fallbacks and has no operator to swap, so without this a file that only
+    // reshapes data reports nothing to mutate — which reads like a pass and is
+    // the opposite of one.
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) {
+      found.push({
+        start: n.getStart(node),
+        end: n.getEnd(),
+        from: label(n.getText()),
+        to: label(n.right.getText()),
+        line: at(n.getStart(node)),
+      });
+    }
     if (ts.isBinaryExpression(n)) {
       const token = n.operatorToken;
       const from = token.getText();
