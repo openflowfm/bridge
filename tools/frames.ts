@@ -27,6 +27,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EXAMPLES, merge } from '../visuals/server/scheme.ts';
+import { MODEL_HASH } from '../visuals/model.ts';
+import { modelPlace, openModelStore } from '../visuals/server/models.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name: string, fallback: string): string => {
@@ -43,6 +45,9 @@ const SETTLE = arg('settle', '90');
 const OUT = path.resolve(arg('out', path.join(root, 'visuals', 'frames-out')));
 /** `examples`, a user-scheme id, or an explicit JSON file for a scratch comparison. */
 const SCHEME = arg('scheme', 'examples');
+/** Optional isolated model library root; defaults to the product's real one. */
+const MODEL_ROOT = arg('models', '');
+const modelStore = openModelStore(MODEL_ROOT ? modelPlace(path.resolve(MODEL_ROOT)) : modelPlace());
 
 // Merged here rather than in the page: `merge` is the one door every scheme
 // comes through, and a tool that skipped it would be drawing something the app
@@ -89,6 +94,13 @@ interface FramesReport {
   height: number;
   stats: FrameStat[];
   sequences: SequenceStat[];
+  models: {
+    peakInstances: number;
+    peakGeometries: number;
+    peakTargets: number;
+    loadingAtCapture: number;
+    instancesAfterRelease: number;
+  };
   errors: string[];
 }
 
@@ -140,6 +152,27 @@ const serving = http.createServer((request, response) => {
   if (asked === '/scheme.json') {
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(chosen));
+    return;
+  }
+
+  if (asked === '/models.json') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(modelStore.library()));
+    return;
+  }
+
+  const modelAsset = asked.match(/^\/models\/assets\/([a-f0-9]{64})\.glb$/)?.[1];
+  if (modelAsset && MODEL_HASH.test(modelAsset)) {
+    const file = modelStore.assetFile(modelAsset);
+    if (!file) {
+      response.writeHead(404).end('model asset not found');
+      return;
+    }
+    response.writeHead(200, {
+      'content-type': 'model/gltf-binary',
+      'cache-control': 'public, max-age=31536000, immutable',
+    });
+    response.end(fs.readFileSync(file));
     return;
   }
 

@@ -24,8 +24,19 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mediaRoot, serveMedia } from '../visuals/server/media.ts';
+import { MODEL_HASH } from '../visuals/model.ts';
+import { modelPlace, openModelStore } from '../visuals/server/models.ts';
+import { merge } from '../visuals/server/scheme.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const arg = (name: string, fallback: string): string => {
+  const found = process.argv.find((each) => each.startsWith(`--${name}=`));
+  return found ? found.slice(name.length + 3) : fallback;
+};
+const SCHEME = path.resolve(arg('scheme', path.join(root, 'visuals', 'scheme.json')));
+const MODEL_ROOT = arg('models', '');
+const chosen = merge(JSON.parse(fs.readFileSync(SCHEME, 'utf8')));
+const modelStore = openModelStore(MODEL_ROOT ? modelPlace(path.resolve(MODEL_ROOT)) : modelPlace());
 /** Anything passed straight through to the page, for probes rather than readings. */
 const PACED = process.argv.includes('--paced');
 
@@ -395,6 +406,33 @@ const serving = http.createServer((request, response) => {
   if (asked.startsWith('/media/')) {
     if (serveMedia(request, response, media, asked.slice('/media/'.length))) return;
     response.writeHead(404).end('media not found');
+    return;
+  }
+
+  if (asked === '/scheme.json') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(chosen));
+    return;
+  }
+
+  if (asked === '/models.json') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(modelStore.library()));
+    return;
+  }
+
+  const modelAsset = asked.match(/^\/models\/assets\/([a-f0-9]{64})\.glb$/)?.[1];
+  if (modelAsset && MODEL_HASH.test(modelAsset)) {
+    const file = modelStore.assetFile(modelAsset);
+    if (!file) {
+      response.writeHead(404).end('model asset not found');
+      return;
+    }
+    response.writeHead(200, {
+      'content-type': 'model/gltf-binary',
+      'cache-control': 'public, max-age=31536000, immutable',
+    });
+    response.end(fs.readFileSync(file));
     return;
   }
 

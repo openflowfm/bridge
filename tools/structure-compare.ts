@@ -8,7 +8,13 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { structuralDifference, structureOf } from '../visuals/structuralMetrics.ts';
+import { cyclicMotion } from '../visuals/frameMetrics.ts';
+import {
+  materialStructureDifference,
+  materialStructureOf,
+  structuralDifference,
+  structureOf,
+} from '../visuals/structuralMetrics.ts';
 
 const arg = (name: string, fallback = ''): string => {
   const found = process.argv.find((each) => each.startsWith(`--${name}=`));
@@ -45,21 +51,25 @@ const rawReference = run('ffmpeg', [
   '-vf', `fps=${samples}/${period},scale=${width}:${height}:flags=lanczos,format=rgba`,
   '-frames:v', String(samples), '-f', 'rawvideo', '-',
 ], frameBytes * samples + 1024 * 1024);
-const references = Array.from({ length: samples }, (_, index) =>
-  structureOf(new Uint8Array(rawReference.buffer, rawReference.byteOffset + index * frameBytes, frameBytes), width, height));
+const referencePixels = Array.from({ length: samples }, (_, index) =>
+  new Uint8Array(rawReference.buffer, rawReference.byteOffset + index * frameBytes, frameBytes));
+const references = referencePixels.map((pixels) => structureOf(pixels, width, height));
+const referenceMaterials = referencePixels.map((pixels) => materialStructureOf(pixels, width, height));
 
 const report = JSON.parse(fs.readFileSync(path.join(graph, 'stats.json'), 'utf8'));
-const beats = report.stats.filter((entry: { flow: string }) => entry.flow === flow)
+const beats: number[] = report.stats.filter((entry: { flow: string }) => entry.flow === flow)
   .map((entry: { beat: number }) => entry.beat);
 if (beats.length !== samples) throw new Error(`${flow}: expected ${samples} graph frames, found ${beats.length}`);
-const graphs = beats.map((beat: number) => {
+const graphPixels: Uint8Array[] = beats.map((beat: number) => {
   const file = path.join(graph, `${flow}@${beat}.png`);
   const raw = run('ffmpeg', [
     '-v', 'error', '-i', file, '-vf', `scale=${width}:${height}:flags=lanczos,format=rgba`,
     '-frames:v', '1', '-f', 'rawvideo', '-',
   ], frameBytes + 1024 * 1024);
-  return structureOf(new Uint8Array(raw.buffer, raw.byteOffset, frameBytes), width, height);
+  return new Uint8Array(raw.buffer, raw.byteOffset, frameBytes);
 });
+const graphs = graphPixels.map((pixels) => structureOf(pixels, width, height));
+const graphMaterials = graphPixels.map((pixels) => materialStructureOf(pixels, width, height));
 
 let best: {
   shift: number;
@@ -69,6 +79,7 @@ let best: {
   holes: number;
   endpoints: number;
   junctions: number;
+  material: number;
 } | null = null;
 for (const direction of [1, -1]) {
   for (let shift = 0; shift < samples; shift++) {
@@ -77,6 +88,7 @@ for (const direction of [1, -1]) {
     let holes = 0;
     let endpoints = 0;
     let junctions = 0;
+    let material = 0;
     for (let index = 0; index < samples; index++) {
       const target = (shift + direction * index + samples * 2) % samples;
       const compared = structuralDifference(graphs[index], references[target], width, height);
@@ -85,6 +97,7 @@ for (const direction of [1, -1]) {
       holes += Math.abs(compared.leftHoles - compared.rightHoles);
       endpoints += Math.abs(compared.leftEndpoints - compared.rightEndpoints);
       junctions += Math.abs(compared.leftJunctions - compared.rightJunctions);
+      material += materialStructureDifference(graphMaterials[index], referenceMaterials[target]);
     }
     const candidate = {
       shift,
@@ -94,6 +107,7 @@ for (const direction of [1, -1]) {
       holes: holes / samples,
       endpoints: endpoints / samples,
       junctions: junctions / samples,
+      material: material / samples,
     };
     if (!best || candidate.contour < best.contour) best = candidate;
   }
@@ -107,3 +121,40 @@ console.log(`silhouette IoU ${(best!.iou * 100).toFixed(1)}%`);
 console.log(`mean enclosed-region mismatch ${best!.holes.toFixed(2)}`);
 console.log(`mean curve-endpoint mismatch ${best!.endpoints.toFixed(2)}`);
 console.log(`mean junction mismatch ${best!.junctions.toFixed(2)}`);
+console.log(`spatial material/colour difference ${(best!.material * 100).toFixed(1)}%`);
+
+const persistence = (frames: ReturnType<typeof structureOf>[]): number => {
+  if (frames.length < 2) return 1;
+  let sum = 0;
+  for (let index = 0; index < frames.length; index++) {
+    sum += structuralDifference(frames[index], frames[(index + 1) % frames.length], width, height).silhouetteIoU;
+  }
+  return sum / frames.length;
+};
+const graphMotion = cyclicMotion(graphPixels);
+const referenceMotion = cyclicMotion(referencePixels);
+const graphPersistence = persistence(graphs);
+const referencePersistence = persistence(references);
+console.log(`cyclic RGB motion graph ${(graphMotion * 100).toFixed(2)}%, reference ${(referenceMotion * 100).toFixed(2)}%`);
+console.log(`topology persistence graph ${(graphPersistence * 100).toFixed(1)}%, reference ${(referencePersistence * 100).toFixed(1)}%`);
+
+if (process.argv.includes('--assert')) {
+  const limit = (name: string, fallback: number): number => Number(arg(name, String(fallback)));
+  const checks: [boolean, string][] = [
+    [best!.contour <= limit('max-contour', 0.025), 'contour'],
+    [best!.iou >= limit('min-iou', 0.1), 'silhouette IoU'],
+    [best!.holes <= limit('max-holes', 12), 'enclosed regions'],
+    [best!.endpoints <= limit('max-endpoints', 35), 'curve endpoints'],
+    [best!.junctions <= limit('max-junctions', 35), 'junction/occlusion structure'],
+    [best!.material <= limit('max-material', 0.3), 'material/colour structure'],
+    [graphMotion >= limit('min-motion', 0.01), 'cyclic motion floor'],
+    [Math.abs(graphMotion - referenceMotion) <= limit('max-motion-gap', 0.18), 'cyclic motion comparison'],
+    // More stable than compressed reference highlights is not a failure. This
+    // gate asks the semantic question: do the same projected rails persist
+    // across the loop instead of being replaced by unrelated silhouettes?
+    [graphPersistence >= limit('min-persistence', 0.3), 'topology persistence'],
+  ];
+  const failed = checks.filter(([passed]) => !passed).map(([, name]) => name);
+  if (failed.length) throw new Error(`structural comparison failed: ${failed.join(', ')}`);
+  console.log('structural comparison PASS');
+}
