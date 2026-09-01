@@ -13,8 +13,8 @@
 // same page works over HTTP.
 //
 // What the stub cannot do is anything that needs a process: importing, choosing
-// a folder, and separating all answer honestly that they need the app. This is
-// for looking at the window, not for using it.
+// a folder, separating and transcribing all answer honestly that they need the
+// app. This is for looking at the window, not for using it.
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -85,6 +85,14 @@ const bridge = `window.openflow = {
     busy: async () => null,
     run: async (ask) => ({ ok: false, trackId: ask.trackId, says: 'separating needs the app — this is a hosted preview of the window', cancelled: false }),
     cancel: async () => {},
+    onProgress: () => () => {},
+    onFinished: () => () => {},
+  },
+  transcribe: {
+    busy: async () => null,
+    run: async (ask) => ({ ok: false, trackId: ask.trackId, says: 'transcribing needs the app — this is a hosted preview of the window', cancelled: false }),
+    cancel: async () => {},
+    reveal: async () => {},
     onProgress: () => () => {},
     onFinished: () => () => {},
   },
