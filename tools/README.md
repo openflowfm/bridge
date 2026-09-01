@@ -16,6 +16,7 @@ install-device.ts            copies the device into the Ableton User Library, as
 coverage-summary.ts          coverage-summary.json as a build-page table and a shields badge
 record-session.ts            records a real session off the bridge, as test corpus
 mutate.ts                    breaks a file one edit at a time — would its spec notice?
+version.ts                   sets one version across every package.json and lock
 ```
 
 **`mutate.ts` imports `typescript-syntax`, not `typescript`.** TypeScript 7's package
@@ -38,6 +39,7 @@ npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
 npm run dev:record -- <name> [seconds]   # a real session into set/test/corpus/<name>/
 npm run dev:mutate -- <source file>      # mutation score for its colocated spec
+npm run dev:version -- <version>         # 0.2.0-dev, 0.2.0-rc.1, 0.2.0 — then commit
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined files

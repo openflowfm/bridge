@@ -1,0 +1,282 @@
+name: nightly
+
+# Last night's main, built the way a release is built — signed, notarised,
+# stapled — and published to one rolling prerelease whose download URLs never
+# change.
+#
+# It is `release.yml` with three differences, and they are the whole file:
+#
+#   * no tag, so no version guard — a nightly is whatever main's manifests say,
+#     which under the -dev scheme is the same string every night. The commit is
+#     what tells two nightlies apart, so OPENFLOW_STAMP puts it on the device
+#     face.
+#   * the assets are named `nightly` rather than after the version, because a
+#     rolling release exists to be a bookmark.
+#   * it skips itself when main has not moved.
+#
+# Notarised on purpose. This repo is public, so every runner minute here is
+# free, and the whole thing takes under ten. An un-notarised build published at
+# a public URL greets a stranger with "Apple cannot check it for malicious
+# software" — the three minutes it saves are the only three that were never
+# worth saving.
+
+on:
+  schedule:
+    # 07:17 UTC — small hours in America/New_York, and off the hour because
+    # GitHub queues everything scheduled on the hour and runs it late.
+    - cron: '17 7 * * *'
+  # Also by hand, off whichever branch you pick. That build lands in the same
+  # rolling release, which is the point of it and also the footgun: a nightly
+  # dispatched off a branch is what `nightly` holds until the next one.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One nightly at a time. They all write the same tag and the same assets, so two
+# in flight is a race over which one wins — but a running build is worth more
+# than a queued one, so the running one is never cancelled.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # Did main actually move? A nightly that rebuilds identical bits and re-uploads
+  # them is noise in the release history and a runner nobody needed.
+  #
+  # The check is the age of HEAD rather than a diff against what last night
+  # built, because that needs no stored state and no deep fetch — the default
+  # depth-1 checkout already carries the one commit it asks about. 25 hours
+  # rather than 24 so that a schedule GitHub ran late does not skip a day.
+  moved:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: check
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo "asked for by hand — building $GITHUB_REF_NAME whatever its age"
+            exit 0
+          fi
+          age=$(( $(date +%s) - $(git log -1 --format=%ct) ))
+          if [ "$age" -lt 90000 ]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo "main moved $((age / 3600))h ago — building"
+          else
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            echo "nothing in $((age / 3600))h — leaving the last nightly where it is"
+          fi
+
+  # Everything that builds the same on any machine. The libraries are not packed
+  # here the way `release.yml` packs them: a tarball of `@openflow/core` is a
+  # thing you read at a version, and a nightly does not have one worth citing.
+  device:
+    needs: moved
+    if: needs.moved.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # The commit, on the device face. Without it every nightly for months
+      # reads `open[flow] 0.1.0-dev` and there is no way to tell from inside
+      # Live which one is loaded.
+      OPENFLOW_STAMP: '1'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            bridge/package-lock.json
+            visuals/package-lock.json
+
+      - run: npm ci
+
+      # A nightly is still held to the suite. `publish` needs this job, so a
+      # failure here means nothing is published rather than a broken nightly
+      # replacing a working one.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Stage the device
+        run: |
+          set -eux
+          STAGE="SessionBridge-nightly"
+          mkdir -p "dist/$STAGE"
+          cp bridge/SessionBridge.amxd bridge/bridge.js bridge/lom.js "dist/$STAGE/"
+          cp .github/INSTALL.txt "dist/$STAGE/"
+          cp LICENSE "dist/$STAGE/LICENSE.txt"
+          (cd dist && zip -r "$STAGE.zip" "$STAGE")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: device
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # The apps, signed and notarised exactly as `release.yml` does it. Every
+  # comment there about why both halves are needed applies here unchanged; this
+  # job differs only in what the files end up called.
+  apps:
+    needs: moved
+    if: needs.moved.outputs.build == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            bridge/package-lock.json
+            visuals/package-lock.json
+
+      - run: npm ci
+
+      - name: Write the notary key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -eu
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+
+      - name: Pack both apps
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: npm run pack
+
+      - name: Notarise the disk images
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -eux
+          for dmg in release/*/*.dmg; do
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$dmg"
+          done
+
+      - name: Verify what a stranger's Mac will see
+        run: |
+          set -eux
+          for app in release/*/mac-*/*.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+            xcrun stapler validate "$app"
+          done
+          for dmg in release/*/*.dmg; do
+            codesign --verify --strict --verbose=2 "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+            xcrun stapler validate "$dmg"
+          done
+
+      # electron-builder names each image after its own package.json, so these
+      # arrive as `set-flow-0.1.0-dev-arm64.dmg` — a name that is the same every
+      # night while the file behind it is not. Renamed to `nightly`, the URL is
+      # a bookmark that always points at the newest one, and the version it
+      # actually is stays on the device face and in the release body.
+      #
+      # After stapling on purpose: the ticket is written inside the image and
+      # nothing in a signature covers the filename, so a rename here is free.
+      - name: Name them for a rolling release
+        run: |
+          set -eux
+          for dmg in release/*/*.dmg; do
+            dir=$(dirname "$dmg")
+            base=$(basename "$dmg")
+            # set-flow-0.1.0-dev-arm64.dmg -> set-flow-nightly-arm64.dmg
+            mv "$dmg" "$dir/$(printf '%s' "$base" |
+              sed -E 's/^([a-z-]+)-.*-([a-z0-9]+)\.dmg$/\1-nightly-\2.dmg/')"
+          done
+          ls -l release/*/*.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apps
+          path: release/*/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [device, apps]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          version=$(node -p "require('./package.json').version")
+          short=$(git rev-parse --short HEAD)
+
+          cat > notes.md <<EOF
+          Built from \`${GITHUB_REF_NAME}\` and notarised, so it opens with a
+          double-click. **This is not a release** — it is whatever was on the
+          branch that morning, and it can be broken in ways a release is not.
+
+          | | |
+          |---|---|
+          | version | \`${version}\` |
+          | commit | [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |
+          | built | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          The device carries \`open[flow] ${version} ${short}\` along its bottom
+          edge, which is how you tell a running one from the copy Live cached.
+
+          Installing is unchanged — see
+          [Installing](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/wiki/Installing).
+          These filenames never change, so a bookmark always finds the newest
+          nightly.
+          EOF
+
+          # The tag is a moving pointer rather than a record, which is what a
+          # rolling release needs and the opposite of what `v*` tags are. It
+          # cannot set this workflow off again: a push made with GITHUB_TOKEN
+          # triggers nothing, and `nightly` does not match `v*` regardless.
+          git tag -f nightly "$GITHUB_SHA"
+          git push -f origin refs/tags/nightly
+
+          # Created once, edited every night after. Deleting and recreating
+          # would be simpler and would 404 the download URLs for a few seconds
+          # each night, which is the one thing a bookmarkable release must not
+          # do.
+          #
+          # `--prerelease` is what keeps it out of /releases/latest, so the
+          # README's link goes on meaning the last real release.
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --title nightly --notes-file notes.md --prerelease
+          else
+            gh release create nightly --title nightly --notes-file notes.md --prerelease
+          fi
+
+          # Same reasoning as `release.yml`: gh takes files only and fails on a
+          # directory, and the download unpacks into two of them.
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < <(find assets -type f | sort)
+          test "${#files[@]}" -gt 0
+
+          gh release upload nightly --clobber "${files[@]}"

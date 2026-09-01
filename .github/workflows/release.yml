@@ -16,11 +16,41 @@ permissions:
 # preview.
 
 jobs:
+  # The tag and the manifests have to agree before anything is built, because
+  # nothing downstream checks. `release.yml` names the device zip after the tag,
+  # electron-builder names each .dmg after that app's own package.json, and the
+  # npm tarballs after theirs — so a `v0.2.0` tag on a tree that still says
+  # 0.1.0 produces a `v0.2.0` release full of `0.1.0` files, signed and
+  # notarised and wrong.
+  #
+  # Its own job rather than a step, so it fails in fifteen seconds instead of
+  # nine minutes into a notarisation. `npm run dev:version` is the thing that
+  # keeps you from ever seeing it.
+  guard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The tag is the version
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          for manifest in package.json set/package.json visuals/package.json; do
+            found=$(node -p "require('./$manifest').version")
+            if [ "$found" != "$tag" ]; then
+              echo "::error file=$manifest::tag says $tag, $manifest says $found." \
+                   "Run 'npm run dev:version $tag', commit, and re-tag."
+              exit 1
+            fi
+          done
+          echo "tag and manifests agree on $tag"
+
   # Everything that builds the same on any machine: the device, and the three
   # modules another project could consume. Behind the checks a tag can otherwise
   # walk straight past — a tag can point at any commit, including one that
   # nothing ever ran.
   device:
+    needs: guard
     runs-on: ubuntu-24.04
     # Electron ships a ~200 MB Chromium that no Linux job here can run — the
     # typecheck needs its type declarations and nothing else, and those come
@@ -85,6 +115,7 @@ jobs:
   # steps above: everything on Linux finishes in a couple of minutes, and none
   # of it should wait behind two notarisations.
   apps:
+    needs: guard
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7

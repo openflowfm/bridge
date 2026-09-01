@@ -42,12 +42,25 @@ const VERSION = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf
 const QA = process.env.OPENFLOW_QA === '1';
 
 /**
+ * Put the commit on the device face, and change nothing else. `nightly.yml`
+ * sets it; `npm run qa` gets it for free by being a QA build.
+ *
+ * The separation is the point. A nightly is a device a set will load and save a
+ * reference to, so it has to keep the name, the title and the description a
+ * release build has — everything QA moves. What it needs from QA is the one
+ * thing that answers "which build is this?", and nightlies need that answer
+ * more than anything else here does: every one of them says `0.1.0-dev` on its
+ * face, and the commit is the only part of that line that differs.
+ */
+const STAMPED = QA || process.env.OPENFLOW_STAMP === '1';
+
+/**
  * The commit this was built from, or null outside a checkout.
  *
  * Trailing `*` when the tree had uncommitted changes, and that mark is the
  * point rather than a detail: building from a dirty tree is the *normal* way a
  * QA build gets made, and a bare hash would be claiming a commit that does not
- * contain what is running.
+ * contain what is running. CI builds from a clean checkout and never shows it.
  */
 function commit(): string | null {
   const git = (args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -56,7 +69,7 @@ function commit(): string | null {
   return head.stdout.trim() + (git(['status', '--porcelain']).stdout.trim() ? '*' : '');
 }
 
-const BUILD = QA ? commit() : null;
+const BUILD = STAMPED ? commit() : null;
 
 /**
  * The device's display title, which is **not** its name.
@@ -132,7 +145,7 @@ const connect = (src: string, outlet: number, dst: string, inlet: number) =>
 //      │  plus 1 more                   │  anything else attached, when there is
 // 130  └────────────────────────────────┘
 //
-// 139    open[flow] 0.1.0 · qa 2a8fc15*   GitHub      (the stamp is QA-only)
+// 139    open[flow] 0.1.0 · qa 2a8fc15*   GitHub      (the commit only when stamped)
 // 169
 //
 // **The roster is fixed rows, not a list of who is here.** A list would compact
@@ -345,7 +358,7 @@ const extra = lcdText(' ', [548, 492, 200, 18], [28, ROW_TOP + ROSTER.length * R
 //
 // The box is sized for that longer line either way; a comment wider than its
 // text draws the same, and the GitHub button starts at 176.
-const stamp = QA ? ` · qa${BUILD ? ` ${BUILD}` : ''}` : '';
+const stamp = QA ? ` · qa${BUILD ? ` ${BUILD}` : ''}` : BUILD ? ` ${BUILD}` : '';
 box('live.comment', `open[flow] ${VERSION}${stamp}`, [528, 522, 164, 16], {
   numinlets: 1,
   numoutlets: 0,
@@ -845,5 +858,5 @@ fs.writeFileSync(path.join(outDir, 'SessionBridge.amxd'), pack(patcher, 'audio')
 console.log(
   `built bridge/SessionBridge.amxd — ${boxes.length} boxes, ${lines.length} lines, ` +
     `${boxes.filter((b) => b.box.presentation === 1).length} in presentation` +
-    (QA ? ` — ${TITLE}, ${BUILD ?? 'no commit'}` : ''),
+    (QA ? ` — ${TITLE}, ${BUILD ?? 'no commit'}` : BUILD ? ` — ${BUILD}` : ''),
 );
