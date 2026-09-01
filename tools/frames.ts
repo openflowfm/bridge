@@ -183,9 +183,17 @@ for (const flag of [
 ]) app.commandLine.appendSwitch(flag);
 app.on('window-all-closed', () => app.quit());
 app.whenReady().then(async () => {
+  // This is a capture process, not a presentation window. Keeping it hidden is
+  // also not the same constraint as the paced benchmark: frames.ts drives the
+  // compositor directly and never waits for requestAnimationFrame, while the
+  // three command-line switches above keep Chromium from suspending its hidden
+  // renderer. Do not let an analysis run steal focus from the user's desktop.
+  if (process.platform === 'darwin') app.dock.hide();
   const win = new BrowserWindow({
     width: 1200, height: 720,
-    show: !process.env.OPENFLOW_FRAMES_HIDDEN,
+    show: false,
+    focusable: false,
+    skipTaskbar: true,
     webPreferences: { backgroundThrottling: false, offscreen: false },
   });
   win.webContents.on('console-message', (...a) => {
