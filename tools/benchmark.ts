@@ -421,6 +421,18 @@ const serving = http.createServer((request, response) => {
     return;
   }
 
+  const modelTexture = asked.match(/^\/models\/textures\/([a-f0-9]{64})$/)?.[1];
+  if (modelTexture && MODEL_HASH.test(modelTexture)) {
+    const stored = modelStore.textureFile(modelTexture);
+    if (!stored) {
+      response.writeHead(404).end('texture not found');
+      return;
+    }
+    response.writeHead(200, { 'content-type': stored.mimeType, 'cache-control': 'public, max-age=31536000, immutable' });
+    response.end(fs.readFileSync(stored.file));
+    return;
+  }
+
   const modelAsset = asked.match(/^\/models\/assets\/([a-f0-9]{64})\.glb$/)?.[1];
   if (modelAsset && MODEL_HASH.test(modelAsset)) {
     const file = modelStore.assetFile(modelAsset);
