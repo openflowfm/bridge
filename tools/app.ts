@@ -13,7 +13,8 @@
 // works the day the registry names it.
 //
 //   build     the renderer, with vite
-//   electron  main, preload and — if it has one — the server, with esbuild
+//   electron  main, preload and — if it has one — the server, with esbuild.
+//             Runs `<app>/tools/prepare.ts` first, for an app that has one
 //   icons     the .icns, from that app's own mark
 //   run       build, electron, and open it
 //   watch     its dev server and its window, together — the one to type
@@ -25,6 +26,7 @@
 // `npm run pack:set -- -c.mac.identity="Developer ID Application: …"` working.
 
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NAMES } from '@openflow/desktop/apps.ts';
@@ -48,7 +50,29 @@ function run(cmd: string, args: string[], env?: NodeJS.ProcessEnv): void {
 }
 
 const build = (name: string) => run(bin('vite'), ['build', '--config', `${name}/vite.config.ts`]);
-const electron = (name: string) => node('tools/build-electron.ts', [name]);
+
+/**
+ * An app's own build step, if it has one: `<app>/tools/prepare.ts`.
+ *
+ * The seam exists for the thing neither vite nor esbuild makes. mix[flow] is
+ * the one app with such a thing — it carries a pinned `uv` so a packaged build
+ * can install its own Python engine — and the alternative was a mix-shaped
+ * branch in here or a mix-shaped field in the registry, neither of which is
+ * about apps in general.
+ *
+ * Run from `electron`, which is the step every path that produces a runnable
+ * app goes through: `run`, `dev`, `watch` and `pack` alike.
+ */
+const prepare = (name: string) => {
+  if (fs.existsSync(path.join(root, name, 'tools', 'prepare.ts'))) {
+    node(`${name}/tools/prepare.ts`, []);
+  }
+};
+
+const electron = (name: string) => {
+  prepare(name);
+  node('tools/build-electron.ts', [name]);
+};
 const icons = (name: string) => node('tools/build-icons.ts', [name]);
 
 /**
