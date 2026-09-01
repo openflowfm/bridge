@@ -22,8 +22,17 @@ name: nightly
 
 on:
   schedule:
-    # 07:17 UTC — small hours in America/New_York, and off the hour because
-    # GitHub queues everything scheduled on the hour and runs it late.
+    # 2am Eastern, as close as this gets. GitHub's cron is UTC and has no
+    # notion of DST, so one expression cannot be 2am all year: 07:17 UTC is
+    # 02:17 EST in winter and 03:17 EDT in summer.
+    #
+    # Erring an hour late rather than an hour early is the whole point. The
+    # deadline this exists to serve is "get it in before the build" — a nightly
+    # that runs at 3am has waited longer for your evening's work, one that runs
+    # at 1am has stopped waiting an hour before you expected it to.
+    #
+    # Off the hour because GitHub queues everything scheduled on :00 together
+    # and runs it late.
     - cron: '17 7 * * *'
   # Also by hand, off whichever branch you pick. That build lands in the same
   # rolling release, which is the point of it and also the footgun: a nightly
