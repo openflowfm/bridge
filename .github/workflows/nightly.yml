@@ -262,30 +262,41 @@ jobs:
           nightly.
           EOF
 
-          # The tag is a moving pointer rather than a record, which is what a
-          # rolling release needs and the opposite of what `v*` tags are. It
-          # cannot set this workflow off again: a push made with GITHUB_TOKEN
-          # triggers nothing, and `nightly` does not match `v*` regardless.
-          git tag -f nightly "$GITHUB_SHA"
-          git push -f origin refs/tags/nightly
-
-          # Created once, edited every night after. Deleting and recreating
-          # would be simpler and would 404 the download URLs for a few seconds
-          # each night, which is the one thing a bookmarkable release must not
-          # do.
-          #
-          # `--prerelease` is what keeps it out of /releases/latest, so the
-          # README's link goes on meaning the last real release.
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly --title nightly --notes-file notes.md --prerelease
-          else
-            gh release create nightly --title nightly --notes-file notes.md --prerelease
-          fi
-
           # Same reasoning as `release.yml`: gh takes files only and fails on a
           # directory, and the download unpacks into two of them.
           files=()
           while IFS= read -r file; do files+=("$file"); done < <(find assets -type f | sort)
           test "${#files[@]}" -gt 0
 
-          gh release upload nightly --clobber "${files[@]}"
+          # Torn down and rebuilt rather than edited in place, because the tag
+          # has to move and there is exactly one way this token can move it.
+          #
+          # `git push` cannot: GITHUB_TOKEN is refused any ref whose tree holds
+          # `.github/workflows/**` — "refusing to allow a GitHub App to create
+          # or update workflow ... without `workflows` permission` — and no
+          # such permission exists to grant a GITHUB_TOKEN. It is a PAT scope.
+          # The tree here has three workflows in it, so every night is refused.
+          #
+          # The Releases API is the way through, and it sets a tag only when it
+          # creates the release: `--target` is ignored once one is published. So
+          # the release is deleted with its tag and made again pointing at
+          # tonight's commit.
+          #
+          # The cost is a few seconds around 3am where the download URLs 404,
+          # and it buys a `nightly` tag that always means what it says. A tag
+          # left pointing at whatever the first nightly built would be worse:
+          # every link off this release would show code that is not in it.
+          #
+          # Both removals are best-effort — on the first night there is nothing
+          # to remove, and `set -e` would otherwise stop the job there.
+          gh release delete nightly --yes --cleanup-tag || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" || true
+
+          # `--prerelease` is what keeps it out of /releases/latest, so the
+          # README's link goes on meaning the last real release.
+          gh release create nightly \
+            --target "$GITHUB_SHA" \
+            --title nightly \
+            --notes-file notes.md \
+            --prerelease \
+            "${files[@]}"
