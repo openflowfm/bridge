@@ -138,13 +138,17 @@ for (const flag of [
 app.on('window-all-closed', () => app.quit());
 
 const boot = async () => {
+  const hidden = !!process.env.OPENFLOW_BENCH_HIDDEN;
+  if (hidden && process.platform === 'darwin') app.dock.hide();
   const win = new BrowserWindow({
     // Big enough that the picture is worth looking at. The page fits its canvas
     // to this, and the drawing buffer is the resolution being measured rather
     // than the size of this window — the readout along the bottom says which.
     width: 1200,
     height: 715,
-    show: !process.env.OPENFLOW_BENCH_HIDDEN,
+    show: !hidden,
+    focusable: !hidden,
+    skipTaskbar: hidden,
     // A paced run is driven by requestAnimationFrame, and a window nothing can
     // see is given none — so it stays in front for the length of the run rather
     // than stalling the moment something is opened over it.
@@ -426,7 +430,9 @@ const collected = await new Promise<string>((done, fail) => {
       ...process.env,
       ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
       OPENFLOW_BENCH_URL: url,
-      ...(PACED ? { OPENFLOW_BENCH_PACED: '1' } : {}),
+      ...(PACED
+        ? { OPENFLOW_BENCH_PACED: '1' }
+        : { OPENFLOW_BENCH_HIDDEN: '1' }),
     },
     // stdout is captured for the payload; stderr goes straight through so a
     // failure inside the window is readable rather than swallowed.
