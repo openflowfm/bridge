@@ -99,9 +99,15 @@ interface FramesReport {
     peakGeometries: number;
     peakTargets: number;
     peakShadows: number;
+    peakTextures: number;
+    peakTextureBytes: number;
+    textureReuse: number;
     loadingAtCapture: number;
+    decodingAtCapture: number;
     instancesAfterRelease: number;
     shadowsAfterRelease: number;
+    texturesAfterRelease: number;
+    textureBytesAfterRelease: number;
   };
   errors: string[];
 }
@@ -358,6 +364,11 @@ if (report.models.peakInstances > 0) {
     `models: ${report.models.peakInstances} instance(s), ${report.models.peakGeometries} geometries, ` +
       `${report.models.peakTargets} HDR target(s), ${report.models.peakShadows} shadow target(s); ` +
       `${report.models.instancesAfterRelease} instance(s) and ${report.models.shadowsAfterRelease} shadow(s) after release`,
+  );
+  console.log(
+    `textures: ${report.models.peakTextures} uploaded (${(report.models.peakTextureBytes / 1048576).toFixed(1)} MiB), ` +
+      `${report.models.textureReuse} shared acquisition(s), ${report.models.decodingAtCapture} decoding at capture; ` +
+      `${report.models.texturesAfterRelease} texture(s) / ${(report.models.textureBytesAfterRelease / 1048576).toFixed(1)} MiB after release`,
   );
 }
 console.log(`\n${written} frames in ${OUT}`);
