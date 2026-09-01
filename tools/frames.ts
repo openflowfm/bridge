@@ -98,8 +98,10 @@ interface FramesReport {
     peakInstances: number;
     peakGeometries: number;
     peakTargets: number;
+    peakShadows: number;
     loadingAtCapture: number;
     instancesAfterRelease: number;
+    shadowsAfterRelease: number;
   };
   errors: string[];
 }
@@ -339,4 +341,11 @@ if (report.sequences.length > 0) {
   }
 }
 for (const said of report.errors) console.error(`  ${said}`);
+if (report.models.peakInstances > 0) {
+  console.log(
+    `models: ${report.models.peakInstances} instance(s), ${report.models.peakGeometries} geometries, ` +
+      `${report.models.peakTargets} HDR target(s), ${report.models.peakShadows} shadow target(s); ` +
+      `${report.models.instancesAfterRelease} instance(s) and ${report.models.shadowsAfterRelease} shadow(s) after release`,
+  );
+}
 console.log(`\n${written} frames in ${OUT}`);
