@@ -11,7 +11,7 @@ lom-reference.ts             rescrapes the LOM page to a scratch file, for diffi
 visuals.ts                   the visuals rig in a dedicated Chrome — npm run visuals:browser
 build-electron.ts            bundles a module's Electron main, preload and server
 build-icons.ts               makes an app's .icns from its own public/mark.svg
-install-apps.ts              copies the packed apps into /Applications
+install-apps.ts              copies the packed apps into /Applications/open[flow]
 install-device.ts            copies the device into the Ableton User Library, as -qa
 coverage-summary.ts          coverage-summary.json as a build-page table and a shields badge
 record-session.ts            records a real session off the bridge, as test corpus
@@ -29,7 +29,7 @@ npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
 npm run qa                  # build + pack + install:apps — everything, onto this machine
 npm run pack                # every app as .app and .dmg under release/
-npm run install:apps        # copies those into /Applications — or one: install:apps set
+npm run install:apps        # copies those into /Applications/open[flow] — or one: install:apps set
 npm run install:device      # the device into the User Library as SessionBridge-qa
 npm run dev:set             # just set[flow]: its dev server and its window — dev:visuals, dev:mix too
 npm run dev:set-app         # the set[flow] shell alone, on a dev server already up
@@ -100,17 +100,19 @@ the registry says it has one — and that to **ESM**, because the server reads
 `import.meta.url` to find its renderer and its Link addon, both empty in a CJS bundle.
 
 `npm run pack` makes real `.app` bundles with `electron-builder` from a config shared by
-every app, and `npm run install:apps` copies them into `/Applications` — a separate step
-because packing writes a build artifact and installing is a decision about the machine. It
-replaces rather than merges, refuses to overwrite an app that is open, and takes
-`OPENFLOW_APPS` if `/Applications` is not yours to write. Neither building nor packing is
+every app, and `npm run install:apps` copies them into `/Applications/open[flow]` — a
+separate step because packing writes a build artifact and installing is a decision about the
+machine. They go in a folder of their own so the suite arrives as one thing rather than as
+three unrelated icons, and an install sweeps away the loose copy an earlier one left in
+`/Applications` itself. It replaces rather than merges, refuses to overwrite an app that is
+open, and takes `OPENFLOW_APPS` if `/Applications` is not yours to write. Neither building nor packing is
 part of `npm run build` — that script is what CI enforces and what produces the `.amxd`, and
 it has no business needing an Electron binary.
 
 **`npm run qa` is those four in order** — the device, every app, and all three installed
 where the machine looks for them — for when the next thing you do is drive the real thing
 rather than a dev server. It stops at the first failure, so a bad build never reaches
-`/Applications`. It is also the only thing that sets `OPENFLOW_QA=1`, which is what makes
+`/Applications/open[flow]`. It is also the only thing that sets `OPENFLOW_QA=1`, which is what makes
 the device stamp itself with the commit it came from — see *QA builds say so* below. It runs neither `typecheck` nor `test`: those are fast and belong in the
 loop before this one, and a script that quietly reruns them makes the slow path look like
 the cheap one. The chart is not in it either — it is a page, not an app, and

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copies the packed apps into /Applications. `npm run install:apps`.
+// Copies the packed apps into /Applications/open[flow]. `npm run install:apps`.
 //
 // The last step `npm run pack` deliberately does not take. Packing writes a
 // bundle under `release/`, which is a build artifact; putting it where the Dock
@@ -25,6 +25,23 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
  * the same way — it just has to exist first.
  */
 const DEST = process.env.OPENFLOW_APPS || '/Applications';
+
+/**
+ * The folder inside it that they land in.
+ *
+ * Three bundles loose in /Applications are three unrelated icons that someone
+ * has to already know are related. In a folder of their own they sort together,
+ * read as one suite, and the Dock can hold the whole thing as a single stack.
+ *
+ * Brackets, like the apps themselves. Nothing here shells out — `ditto`, `xattr`
+ * and `pgrep` are each spawned with an argument array, and `running()` escapes
+ * the path before it becomes a pattern — so the only place they bite is a human
+ * typing the path into zsh unquoted, which `set[flow].app` has always done too.
+ */
+const FOLDER = 'open[flow]';
+
+/** Where a bundle actually ends up. */
+const HOME = path.join(DEST, FOLDER);
 
 if (process.platform !== 'darwin') {
   console.log('install-apps: not macOS — nothing to install');
@@ -88,6 +105,20 @@ if (!fs.existsSync(DEST)) {
   process.exit(1);
 }
 
+// Made rather than assumed — and this is the first thing here that writes to
+// DEST, so a machine where /Applications is not yours says so now, before
+// anything has been copied or deleted.
+try {
+  fs.mkdirSync(HOME, { recursive: true });
+} catch {
+  console.error(
+    `install-apps: could not create ${HOME}.\n` +
+      `      If ${DEST} is not yours to write, install for yourself instead:\n` +
+      `        mkdir -p ~/Applications && OPENFLOW_APPS=~/Applications npm run install:apps`,
+  );
+  process.exit(1);
+}
+
 let installed = 0;
 for (const name of names) {
   const src = bundle(name);
@@ -96,10 +127,26 @@ for (const name of names) {
     process.exit(1);
   }
 
-  const dst = path.join(DEST, path.basename(src));
+  const dst = path.join(HOME, path.basename(src));
   if (running(dst)) {
     console.error(`install-apps: ${path.basename(dst)} is open — quit it first`);
     process.exit(1);
+  }
+
+  // Where every install before this one put it. Left alone it is a second bundle
+  // by the same name one directory up: Spotlight offers both, the Dock may still
+  // hold the stale one, and a QA pass can end up driving the build it meant to
+  // replace. It is our own copy of a build artifact, so it goes.
+  const loose = path.join(DEST, path.basename(src));
+  if (loose !== dst && fs.existsSync(loose)) {
+    if (running(loose)) {
+      console.error(
+        `install-apps: the older ${path.basename(loose)} in ${DEST} is open — quit it first`,
+      );
+      process.exit(1);
+    }
+    fs.rmSync(loose, { recursive: true, force: true });
+    console.log(`cleared the older ${path.basename(loose)} out of ${DEST}`);
   }
 
   // Removed rather than copied over. `ditto` merges into an existing directory,
@@ -113,7 +160,7 @@ for (const name of names) {
   const done = spawnSync('ditto', [src, dst], { stdio: ['ignore', 'ignore', 'inherit'] });
   if (done.status !== 0) {
     console.error(
-      `install-apps: could not write to ${DEST}.\n` +
+      `install-apps: could not write to ${HOME}.\n` +
         `      If it is not yours to write, install for yourself instead:\n` +
         `        mkdir -p ~/Applications && OPENFLOW_APPS=~/Applications npm run install:apps`,
     );
@@ -139,10 +186,10 @@ for (const name of names) {
     process.exit(1);
   }
 
-  console.log(`installed ${path.basename(dst)} → ${DEST}`);
+  console.log(`installed ${path.basename(dst)} → ${HOME}`);
   installed += 1;
 }
 
 console.log(
-  `${installed} app${installed === 1 ? '' : 's'} in ${DEST}, unquarantined — double-click and go.`,
+  `${installed} app${installed === 1 ? '' : 's'} in ${HOME}, unquarantined — double-click and go.`,
 );
