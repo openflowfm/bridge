@@ -10,21 +10,24 @@
 // since a sandboxed preload is the whole reason the renderer can be trusted with
 // `contextIsolation`.
 //
-// One script for both apps, because the difference between them is entirely in
-// what their `main.ts` does. `node tools/build-electron.ts set`.
+// One script for every app, because the difference between them is entirely in
+// what their `main.ts` does — and most of what it does is now
+// `@openflow/desktop`, bundled in from here. `node tools/build-electron.ts set`.
 
 import esbuild from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { app, NAMES } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const name = process.argv[2];
 
-if (!name) {
-  console.error('build-electron: name a module — set, or visuals');
+const name = process.argv[2];
+if (!name || !NAMES.includes(name)) {
+  console.error(`build-electron: name an app — ${NAMES.join(', ')}`);
   process.exit(1);
 }
+const one = app(name);
 
 const here = path.join(root, name, 'electron');
 if (!fs.existsSync(path.join(here, 'main.ts'))) {
@@ -33,7 +36,7 @@ if (!fs.existsSync(path.join(here, 'main.ts'))) {
 }
 
 /**
- * A module's own server, bundled to run beside the app rather than from source.
+ * The app's own server, bundled to run beside it rather than from source.
  *
  * visual[flow] spawns one. Unpackaged that could be `node server/index.ts` off
  * disk, but a packaged `.app` has no source tree — and, launched from Finder, no
@@ -46,11 +49,12 @@ if (!fs.existsSync(path.join(here, 'main.ts'))) {
  * *and* Electron versions. Verified by loading it: no rebuild, no per-upgrade
  * repair. It stays external and ships unpacked, because a `.node` binary cannot
  * be inlined into a bundle or read out of an asar.
+ *
+ * Which apps have one is `desktop/src/apps.ts`, so adding a third is an entry in
+ * the registry rather than an edit here.
  */
-const servers: Record<string, string> = { visuals: 'server/index.ts' };
-
 const entries = [path.join(here, 'main.ts'), path.join(here, 'preload.ts')];
-const server = servers[name];
+const server = one.server?.entry;
 
 await esbuild.build({
   entryPoints: entries,

@@ -31,11 +31,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Every tracked manifest, rather than a list of the three that matter most.
+      # `npm run dev:version` sets all of them to one string, so all of them
+      # should read the tag — and asking that way means a new app or a new
+      # workspace is guarded the day it exists, with nothing to remember here.
       - name: The tag is the version
         run: |
           set -eu
           tag="${GITHUB_REF_NAME#v}"
-          for manifest in package.json set/package.json visuals/package.json; do
+          for manifest in $(git ls-files '*package.json'); do
             found=$(node -p "require('./$manifest').version")
             if [ "$found" != "$tag" ]; then
               echo "::error file=$manifest::tag says $tag, $manifest says $found." \
@@ -150,7 +154,7 @@ jobs:
       # certificate into a keychain it creates and throws away, APPLE_API_* to
       # notarise once the bundle is signed. Nothing in either
       # `electron-builder.yml` switches them on — their presence is the switch.
-      - name: Pack both apps
+      - name: Pack the apps
         env:
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}

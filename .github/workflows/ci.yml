@@ -68,15 +68,18 @@ jobs:
       - run: npm run build
 
       # The app builds, which `npm run build` does not cover — it is the device,
-      # and these are the four things a person actually opens. build:widgets is
+      # and these are the things a person actually opens. build:widgets is
       # the one that matters most: it emits declarations from its own
       # tsconfig.build.json, whose `include` overrides the one `npm run
       # typecheck` reads, so it is the only step that ever compiles that file
       # list. A TypeScript 7 upgrade broke exactly it, and every other check
       # here stayed green.
       - run: npm run build:widgets
-      - run: npm run build:set
-      - run: npm run build:visuals
+      # Every app, from the registry in `desktop/src/apps.ts` — renderer first,
+      # then the Electron main and preload. A new app is covered here the day it
+      # is added rather than the day somebody remembers this file.
+      - run: npm run app -- build
+      - run: npm run app -- electron
       - run: npm run build:chart
 
       # lom.ts has no automated coverage: it needs Live open with the device

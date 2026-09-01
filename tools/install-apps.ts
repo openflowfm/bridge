@@ -15,11 +15,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NAMES } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-/** The modules that produce an app, and the script that packs each one. */
-const APPS = ['set', 'visuals'];
 
 /**
  * Where they land. Overridable because `/Applications` needs admin rights on a
@@ -77,11 +75,11 @@ function running(app: string): boolean {
 }
 
 const wanted = process.argv.slice(2);
-const names = wanted.length ? wanted : APPS;
+const names = wanted.length ? wanted : NAMES;
 
-const unknown = names.filter((name) => !APPS.includes(name));
+const unknown = names.filter((name) => !NAMES.includes(name));
 if (unknown.length) {
-  console.error(`install-apps: no such app — ${unknown.join(', ')}. Try: ${APPS.join(', ')}`);
+  console.error(`install-apps: no such app — ${unknown.join(', ')}. Try: ${NAMES.join(', ')}`);
   process.exit(1);
 }
 

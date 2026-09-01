@@ -28,11 +28,12 @@ this tool's mutant set was tuned against — and Dependabot is told to leave it 
 npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
 npm run qa                  # build + pack + install:apps — everything, onto this machine
-npm run pack                # both apps as .app and .dmg under release/
+npm run pack                # every app as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications — or one: install:apps set
 npm run install:device      # the device into the User Library as SessionBridge-qa
 npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
 npm run dev:visuals-app     # visual[flow]'s HMR shell + backend; npm run dev launches it
+npm run app -- <cmd> [app…] # build | electron | icons | pack | run | dev — see below
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
@@ -54,29 +55,51 @@ Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
 no enums, no runtime `namespace`, no decorators.
 
-## Two desktop apps
+## The desktop apps
 
-`npm run set` and `npm run visuals` each build their renderer, build their Electron shell
-with `build-electron.ts`, and launch it. Where the reasoning lives:
-[`set/docs/desktop.md`](../set/docs/desktop.md) for the custom scheme and where state goes,
-[`visuals/docs/desktop.md`](../visuals/docs/desktop.md) for the supervised server, the wall
-window and the display list.
+`app.ts` is the driver, and every per-app script is a one-line alias onto it:
+
+```sh
+npm run app -- build [app…]      # the renderer, with vite
+npm run app -- electron [app…]   # main, preload, and a server if it has one
+npm run app -- icons [app…]      # the .icns, from that app's own mark
+npm run app -- pack [app…]       # all three, then electron-builder
+npm run app -- run <app>         # build, electron, and open it
+npm run app -- dev <app>         # electron, and open it against a running dev server
+```
+
+With no app named, everything but `run` and `dev` does all of them — which is why
+`npm run pack` and the CI build step need no editing when an app is added. Which apps
+there *are* is `desktop/src/apps.ts`, and so are their names, their dev-server offsets
+and their backend ports;
+[`desktop/docs/registry.md`](../desktop/docs/registry.md) is the doc for adding one.
+
+There used to be five npm scripts per app, and `pack:set` was a two-hundred-character line
+that differed from `pack:visuals` in one word. That is the thing this replaced: a third app
+meant five more, written by copying, which is how the QA overrides in one of them stop
+matching the other. Anything that looks like a flag is still forwarded to electron-builder,
+so `npm run pack:set -- -c.mac.identity="…"` works as it did.
+
+Where the reasoning lives: [`desktop/README.md`](../desktop/README.md) for everything the
+apps share, [`set/docs/desktop.md`](../set/docs/desktop.md) for the custom scheme and where
+state goes, [`visuals/docs/desktop.md`](../visuals/docs/desktop.md) for the supervised
+server, the wall window and the display list.
 
 `build-electron.ts` esbuilds `<module>/electron/{main,preload}.ts` to **CommonJS**. Both
 halves are forced: Electron's bundled Node does not strip types the way Node 26 on your PATH
-does, and a `sandbox: true` preload must be CJS. It also bundles visual[flow]'s server, and
-that one to **ESM**, because the server reads `import.meta.url` to find its renderer and its
-Link addon — both empty in a CJS bundle.
+does, and a `sandbox: true` preload must be CJS. It also bundles a module's own server — if
+the registry says it has one — and that to **ESM**, because the server reads
+`import.meta.url` to find its renderer and its Link addon, both empty in a CJS bundle.
 
-`npm run pack` makes real `.app` bundles with `electron-builder`, unsigned for now, and
-`npm run install:apps` copies them into `/Applications` — a separate step because packing
-writes a build artifact and installing is a decision about the machine. It replaces rather
-than merges, refuses to overwrite an app that is open, and takes `OPENFLOW_APPS` if
-`/Applications` is not yours to write. Neither building nor packing is part of
-`npm run build` — that script is what CI enforces and what produces the `.amxd`, and it has
-no business needing an Electron binary.
+`npm run pack` makes real `.app` bundles with `electron-builder` from a config shared by
+every app, and `npm run install:apps` copies them into `/Applications` — a separate step
+because packing writes a build artifact and installing is a decision about the machine. It
+replaces rather than merges, refuses to overwrite an app that is open, and takes
+`OPENFLOW_APPS` if `/Applications` is not yours to write. Neither building nor packing is
+part of `npm run build` — that script is what CI enforces and what produces the `.amxd`, and
+it has no business needing an Electron binary.
 
-**`npm run qa` is those four in order** — the device, both apps, and all three installed
+**`npm run qa` is those four in order** — the device, every app, and all three installed
 where the machine looks for them — for when the next thing you do is drive the real thing
 rather than a dev server. It stops at the first failure, so a bad build never reaches
 `/Applications`. It is also the only thing that sets `OPENFLOW_QA=1`, which is what makes

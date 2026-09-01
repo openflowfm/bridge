@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Makes an app's `.icns` from that app's own mark.
 //
-// Both marks are the same square — one thing split down the middle by an S, a
+// Every mark is the same square — one thing split down the middle by an S, a
 // dot on each side of the divide — and what separates them is hue and what the dots are
 // doing: set[flow] runs rows of clips into its node, visual[flow] throws rays
 // out of it. That is the whole design brief. At Dock size, and in a ⌘-Tab strip,
@@ -21,11 +21,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NAMES } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-/** The apps with a mark of their own, each at `<app>/public/mark.svg`. */
-const APPS = ['set', 'visuals'];
 
 /** Every size macOS asks an iconset for, at 1× and 2×. */
 const SIZES = [16, 32, 128, 256, 512];
@@ -47,9 +45,10 @@ const run = (cmd: string, args: string[]): void => {
   if (done.status !== 0) throw new Error(`${cmd} failed`);
 };
 
+// Every app has a mark of its own, at `<app>/public/mark.svg`.
 const name = process.argv[2];
-if (!name || !APPS.includes(name)) {
-  console.error(`build-icons: name a module — ${APPS.join(', ')}`);
+if (!name || !NAMES.includes(name)) {
+  console.error(`build-icons: name an app — ${NAMES.join(', ')}`);
   process.exit(1);
 }
 

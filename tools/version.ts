@@ -22,8 +22,16 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NAMES } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// `--list` prints the manifests and stops, which is how `release.yml`'s tag
+// guard asks what it has to check without keeping a copy of the list.
+if (process.argv[2] === '--list') {
+  for (const file of manifests()) console.log(path.relative(root, file));
+  process.exit(0);
+}
 
 const version = process.argv[2];
 if (!version) {
@@ -43,15 +51,17 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
 /**
  * Every package.json that carries a version, found rather than listed.
  *
- * The workspaces come from the root manifest so that adding one is not also a
- * silent way to leave it behind here. `visuals` and `bridge` are appended by
- * name because nothing in the manifest mentions them — that separateness is
- * exactly the bug this file exists to prevent.
+ * Three sources, and none of them is a list kept here. The workspaces come from
+ * the root manifest, so adding one is not also a silent way to leave it behind.
+ * The apps come from `desktop/src/apps.ts`, because an app names a `.dmg` and
+ * not every app is a workspace — `visuals` is not, deliberately. `bridge` is
+ * appended by name, being neither: nothing else in the repo mentions it, and
+ * that separateness is exactly the bug this file exists to prevent.
  */
 function manifests(): string[] {
   const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  const dirs = ['.', ...(rootPkg.workspaces ?? []), 'visuals', 'bridge'];
-  return dirs
+  const dirs = new Set(['.', ...(rootPkg.workspaces ?? []), ...NAMES, 'bridge']);
+  return [...dirs]
     .map((dir) => path.join(root, dir, 'package.json'))
     .filter((file) => fs.existsSync(file));
 }
