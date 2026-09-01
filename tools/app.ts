@@ -16,6 +16,7 @@
 //   electron  main, preload and — if it has one — the server, with esbuild
 //   icons     the .icns, from that app's own mark
 //   run       build, electron, and open it
+//   watch     its dev server and its window, together — the one to type
 //   dev       electron, and open it against a dev server that is already up
 //   pack      build, electron, icons, and electron-builder
 //
@@ -88,6 +89,41 @@ function open(name: string): void {
 }
 
 /**
+ * Working on one app: its dev server and its window, in one command.
+ *
+ * `watch` is `dev` plus the vite server `dev` refuses to start, and it is the
+ * thing to type. Two terminals is the honest arrangement when `npm run dev` is
+ * already running every server in the repo, and a nuisance when it is not —
+ * which is most of the time, because most work is on one app.
+ *
+ * `-k` is what makes it one command rather than two in a trench coat: closing
+ * the window takes vite with it, and a vite that cannot bind takes the window's
+ * retry loop with it rather than leaving it asking forever.
+ *
+ * Both halves are named by absolute path. This may be run from an npm script,
+ * which puts `node_modules/.bin` on the PATH, or straight from a shell, which
+ * does not — and the path to this repo has a space in it.
+ */
+function watch(name: string): void {
+  const quoted = (what: string) => `"${what}"`;
+  run(bin('concurrently'), [
+    '-k',
+    '-n',
+    `${name}-ui,${name}-app`,
+    '-c',
+    'gray,green',
+    `${quoted(bin('vite'))} --config ${name}/vite.config.ts`,
+    [
+      quoted(process.execPath),
+      '--disable-warning=ExperimentalWarning',
+      quoted(path.join(root, 'tools', 'app.ts')),
+      'dev',
+      name,
+    ].join(' '),
+  ]);
+}
+
+/**
  * The window, on a dev server somebody else is running.
  *
  * It does not start one: the dev servers are `npm run dev`'s to own, and an app
@@ -143,13 +179,16 @@ switch (command) {
   case 'run':
     one(open);
     break;
+  case 'watch':
+    one(watch);
+    break;
   case 'dev':
     one(dev);
     break;
   default:
     console.error(
       `app: no such command — ${command ?? '(none named)'}.\n` +
-        '     Try: build, electron, icons, pack, run, dev',
+        '     Try: build, electron, icons, pack, run, watch, dev',
     );
     process.exit(1);
 }

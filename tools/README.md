@@ -31,7 +31,8 @@ npm run qa                  # build + pack + install:apps — everything, onto t
 npm run pack                # every app as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications — or one: install:apps set
 npm run install:device      # the device into the User Library as SessionBridge-qa
-npm run dev:set-app         # the set[flow] shell on its dev server — HMR in the real window
+npm run dev:set             # just set[flow]: its dev server and its window — dev:visuals, dev:mix too
+npm run dev:set-app         # the set[flow] shell alone, on a dev server already up
 npm run dev:visuals-app     # visual[flow]'s HMR shell + backend; npm run dev launches it
 npm run app -- <cmd> [app…] # build | electron | icons | pack | run | dev — see below
 npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
@@ -65,6 +66,7 @@ npm run app -- electron [app…]   # main, preload, and a server if it has one
 npm run app -- icons [app…]      # the .icns, from that app's own mark
 npm run app -- pack [app…]       # all three, then electron-builder
 npm run app -- run <app>         # build, electron, and open it
+npm run app -- watch <app>       # its dev server and its window, together
 npm run app -- dev <app>         # electron, and open it against a running dev server
 ```
 
@@ -73,6 +75,12 @@ With no app named, everything but `run` and `dev` does all of them — which is 
 there *are* is `desktop/src/apps.ts`, and so are their names, their dev-server offsets
 and their backend ports;
 [`desktop/docs/registry.md`](../desktop/docs/registry.md) is the doc for adding one.
+
+`watch` is the one to type while working. `-k` is what makes it one command rather than
+two in a trench coat: closing the window takes vite with it, and a vite that cannot bind
+takes the window's retry loop with it rather than leaving it asking forever. `npm run dev`
+is the other arrangement — every server in the repo at once, and `dev:<app>-app` to attach
+a window to one of them.
 
 There used to be five npm scripts per app, and `pack:set` was a two-hundred-character line
 that differed from `pack:visuals` in one word. That is the thing this replaced: a third app
