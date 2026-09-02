@@ -20,11 +20,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { peaksOf, readWav, type Peak } from '../mix/src/audio.ts';
+import type { IndexEntry, KnownTempo, Report } from '../mix/harness/types.ts';
+import { peaksOf, readWav } from '../mix/src/audio.ts';
 import { followOf, type Follow } from '../mix/src/follow.ts';
-import { fitOf, type Fit } from '../mix/src/tempo.ts';
+import { fitOf } from '../mix/src/tempo.ts';
 import type { Trace } from '../mix/src/trace.ts';
-import { heardIn, type Heard } from '../mix/src/transients.ts';
+import { heardIn } from '../mix/src/transients.ts';
 import { tempoOf, type Beats } from '../mix/src/warp.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -42,16 +43,6 @@ function appLibrary(): string {
   return read.library;
 }
 
-interface Truth {
-  /** A word of the title. */
-  title: string;
-  /** The tempo, or the tempo the song opens at. */
-  bpm: number;
-  /** Where the tempo changes: from this second on, this tempo. */
-  sections?: { from: number; bpm: number }[];
-  note?: string;
-}
-
 interface Track {
   id: string;
   title: string;
@@ -59,27 +50,14 @@ interface Track {
   sources: string[];
 }
 
-/** What one run of the pipeline saw on one track, as the harness page reads it. */
-export interface Report {
-  track: { id: string; title: string; seconds: number; rate: number; stems: string[] };
-  heard: Heard;
-  fit: Fit | null;
-  follow: Omit<Follow, 'beats'> | null;
-  beats: Beats | null;
-  trace: Trace;
-  /** The drums stem, downsampled for the overview; the page decodes the wav itself for anything closer. */
-  peaks: { drums: Peak[]; per: number };
-  truth: Truth | null;
-}
-
 const LIBRARY = arg('library') || appLibrary();
 const ONLY = arg('only');
 const REPORT = process.argv.includes('--report') ? path.resolve(here, '..', 'mix', 'harness', 'reports') : arg('report');
-const truths = JSON.parse(fs.readFileSync(path.join(here, 'mix-warp-truth.json'), 'utf8')) as Truth[];
+const knownTempos = JSON.parse(fs.readFileSync(path.join(here, 'mix-warp-truth.json'), 'utf8')) as KnownTempo[];
 const manifest = JSON.parse(fs.readFileSync(path.join(LIBRARY, 'library.json'), 'utf8')) as { tracks: Track[] };
 
 /** The tempo the truth says the song runs at a moment. */
-const trueTempo = (truth: Truth, at: number): number => {
+const trueTempo = (truth: KnownTempo, at: number): number => {
   let bpm = truth.bpm;
   for (const section of truth.sections ?? []) if (at >= section.from) bpm = section.bpm;
   return bpm;
@@ -123,13 +101,13 @@ function stemsBeside(track: Track, into: string): string[] {
 const pad = (s: string | number, n: number) => String(s).padEnd(n);
 console.log(`library: ${LIBRARY}\n`);
 if (REPORT) fs.mkdirSync(REPORT, { recursive: true });
-const index: { id: string; title: string; seconds: number; bpm: number | null; truth: boolean }[] = [];
+const index: IndexEntry[] = [];
 console.log(pad('track', 34) + pad('truth', 10) + pad('seed', 12) + pad('beats', 7) + pad('on hit', 8) + pad('agree', 7) + pad('worst 8 bars', 16) + 'ms');
 let failures = 0;
 for (const track of manifest.tracks) {
   if (!track.stems) continue;
   if (ONLY && !track.title.includes(ONLY)) continue;
-  const truth = truths.find((t) => track.title.includes(t.title));
+  const truth = knownTempos.find((t) => track.title.includes(t.title));
   const file = path.join(LIBRARY, track.stems, 'drums.wav');
   if (!fs.existsSync(file)) continue;
   const bytes = fs.readFileSync(file);
@@ -156,7 +134,7 @@ for (const track of manifest.tracks) {
       beats,
       trace,
       peaks: { drums: peaksOf(buffer as unknown as AudioBuffer, columns), per: wav.channels[0].length / columns },
-      truth: truth ?? null,
+      known: truth ?? null,
     };
     fs.writeFileSync(path.join(REPORT, `${track.id}.json`), JSON.stringify(report));
     index.push({ id: track.id, title: track.title, seconds: heard.seconds, bpm: seed?.bpm ?? null, truth: Boolean(truth) || fs.existsSync(path.join(REPORT, 'truth', `${track.id}.json`)) });
