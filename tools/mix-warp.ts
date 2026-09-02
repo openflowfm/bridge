@@ -4,6 +4,10 @@
 //   npm run warp:mix                      the library the app is pointed at
 //   npm run warp:mix -- --library=/path   another one
 //   npm run warp:mix -- --only=Sandstorm  one track, by a word of its title
+//   npm run warp:mix -- --report          also write what the pipeline saw,
+//                                         one JSON per track, for the harness
+//                                         page under mix/harness to draw;
+//                                         --report=/path to put it elsewhere
 //
 // The synthetic fixtures under mix/src pass while real records fail, which is
 // how two of five tracks came to be refused by a fit whose tests were green.
@@ -16,10 +20,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readWav } from '../mix/src/audio.ts';
-import { followOf } from '../mix/src/follow.ts';
-import { fitOf } from '../mix/src/tempo.ts';
-import { heardIn } from '../mix/src/transients.ts';
+import { peaksOf, readWav, type Peak } from '../mix/src/audio.ts';
+import { followOf, type Follow } from '../mix/src/follow.ts';
+import { fitOf, type Fit } from '../mix/src/tempo.ts';
+import type { Trace } from '../mix/src/trace.ts';
+import { heardIn, type Heard } from '../mix/src/transients.ts';
 import { tempoOf, type Beats } from '../mix/src/warp.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -48,12 +53,28 @@ interface Truth {
 }
 
 interface Track {
+  id: string;
   title: string;
   stems: string | null;
+  sources: string[];
+}
+
+/** What one run of the pipeline saw on one track, as the harness page reads it. */
+export interface Report {
+  track: { id: string; title: string; seconds: number; rate: number; stems: string[] };
+  heard: Heard;
+  fit: Fit | null;
+  follow: Omit<Follow, 'beats'> | null;
+  beats: Beats | null;
+  trace: Trace;
+  /** The drums stem, downsampled for the overview; the page decodes the wav itself for anything closer. */
+  peaks: { drums: Peak[]; per: number };
+  truth: Truth | null;
 }
 
 const LIBRARY = arg('library') || appLibrary();
 const ONLY = arg('only');
+const REPORT = process.argv.includes('--report') ? path.resolve(here, '..', 'mix', 'harness', 'reports') : arg('report');
 const truths = JSON.parse(fs.readFileSync(path.join(here, 'mix-warp-truth.json'), 'utf8')) as Truth[];
 const manifest = JSON.parse(fs.readFileSync(path.join(LIBRARY, 'library.json'), 'utf8')) as { tracks: Track[] };
 
@@ -74,8 +95,35 @@ function mapTempo(beats: Beats, at: number): number {
   return (60 * beats.rate * (hi - lo)) / (beats.samples[hi] - beats.samples[lo]);
 }
 
+/**
+ * The stems beside the report, as hard links, so the harness page — served
+ * from mix/ by the app's own dev server — can fetch them without the server
+ * being told about a folder outside its root. A copy where a link is refused.
+ */
+function stemsBeside(track: Track, into: string): string[] {
+  const dir = path.join(into, track.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const out: string[] = [];
+  for (const source of track.sources) {
+    const from = path.join(LIBRARY, track.stems!, `${source}.wav`);
+    if (!fs.existsSync(from)) continue;
+    const to = path.join(dir, `${source}.wav`);
+    if (!fs.existsSync(to)) {
+      try {
+        fs.linkSync(from, to);
+      } catch {
+        fs.copyFileSync(from, to);
+      }
+    }
+    out.push(`${track.id}/${source}.wav`);
+  }
+  return out;
+}
+
 const pad = (s: string | number, n: number) => String(s).padEnd(n);
 console.log(`library: ${LIBRARY}\n`);
+if (REPORT) fs.mkdirSync(REPORT, { recursive: true });
+const index: { id: string; title: string; seconds: number; bpm: number | null; truth: boolean }[] = [];
 console.log(pad('track', 34) + pad('truth', 10) + pad('seed', 12) + pad('beats', 7) + pad('on hit', 8) + pad('agree', 7) + pad('worst 8 bars', 16) + 'ms');
 let failures = 0;
 for (const track of manifest.tracks) {
@@ -91,10 +139,28 @@ for (const track of manifest.tracks) {
     continue;
   }
   const started = performance.now();
+  const trace: Trace = { tempo: { frame: 0.004 }, follow: { frame: 0.004 } };
   const heard = heardIn(wav.channels, wav.rate)!;
-  const seed = fitOf(heard);
-  const follow = seed ? followOf(heard, seed) : null;
+  const seed = fitOf(heard, trace.tempo);
+  const follow = seed ? followOf(heard, seed, trace.follow) : null;
   const ms = Math.round(performance.now() - started);
+  if (REPORT) {
+    const columns = Math.round((heard.seconds / 60) * 1000);
+    const buffer = { numberOfChannels: wav.channels.length, length: wav.channels[0].length, getChannelData: (c: number) => wav.channels[c] };
+    const { beats, ...rest } = follow ?? { beats: null };
+    const report: Report = {
+      track: { id: track.id, title: track.title, seconds: heard.seconds, rate: wav.rate, stems: stemsBeside(track, REPORT) },
+      heard,
+      fit: seed,
+      follow: follow ? (rest as Omit<Follow, 'beats'>) : null,
+      beats,
+      trace,
+      peaks: { drums: peaksOf(buffer as unknown as AudioBuffer, columns), per: wav.channels[0].length / columns },
+      truth: truth ?? null,
+    };
+    fs.writeFileSync(path.join(REPORT, `${track.id}.json`), JSON.stringify(report));
+    index.push({ id: track.id, title: track.title, seconds: heard.seconds, bpm: seed?.bpm ?? null, truth: Boolean(truth) || fs.existsSync(path.join(REPORT, 'truth', `${track.id}.json`)) });
+  }
   const name = pad(track.title.slice(0, 32), 34);
   const known = truth ? (truth.sections ? `${truth.bpm}→${truth.sections.map((s) => s.bpm).join('→')}` : String(truth.bpm)) : '?';
   if (!seed || !follow) {
@@ -129,6 +195,10 @@ for (const track of manifest.tracks) {
       pad(truth ? `${(worst * 100).toFixed(1)}% @ ${Math.round(worstAt)}s${worst > 0.05 ? ' ✗' : ''}` : `${tempoOf(follow.beats).toFixed(2)} mean`, 16) +
       ms,
   );
+}
+if (REPORT) {
+  fs.writeFileSync(path.join(REPORT, 'index.json'), JSON.stringify(index, null, 2));
+  console.log(`\nreports: ${REPORT}`);
 }
 console.log(failures ? `\n${failures} not right` : '\nall right');
 process.exitCode = failures ? 1 : 0;
