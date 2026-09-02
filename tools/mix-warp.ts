@@ -6,8 +6,14 @@
 //   npm run warp:mix -- --only=Sandstorm  one track, by a word of its title
 //   npm run warp:mix -- --report          also write what the pipeline saw,
 //                                         one JSON per track, for the harness
-//                                         page under mix/harness to draw;
+//                                         page under mix/harness to draw, and
+//                                         score each track whose beats were
+//                                         corrected by hand in the page, into
+//                                         reports/errors/;
 //                                         --report=/path to put it elsewhere
+//   npm run warp:mix -- --file=/a.wav     bring a file into the harness's own
+//   npm run warp:mix -- --youtube=URL     library, separate it, and run on that
+//                                         library instead (--model= to choose)
 //
 // The synthetic fixtures under mix/src pass while real records fail, which is
 // how two of five tracks came to be refused by a fit whose tests were green.
@@ -16,11 +22,16 @@
 // be true, from tools/mix-warp-truth.json. A truth entry is a tempo, and for
 // a song that changes tempo, the sections it changes at.
 
+import './cjs-dirname.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IndexEntry, KnownTempo, Report } from '../mix/harness/types.ts';
+import { addFiles, read as readManifest, recordStems } from '../mix/electron/manifest.ts';
+import { separate } from '../mix/electron/separate.ts';
+import { addYoutube } from '../mix/electron/youtube.ts';
+import { score, toMarkdown } from '../mix/harness/score.ts';
+import type { IndexEntry, KnownTempo, Report, Truth } from '../mix/harness/types.ts';
 import { peaksOf, readWav } from '../mix/src/audio.ts';
 import { followOf, type Follow } from '../mix/src/follow.ts';
 import { fitOf } from '../mix/src/tempo.ts';
@@ -50,11 +61,49 @@ interface Track {
   sources: string[];
 }
 
-const LIBRARY = arg('library') || appLibrary();
 const ONLY = arg('only');
-const REPORT = process.argv.includes('--report') ? path.resolve(here, '..', 'mix', 'harness', 'reports') : arg('report');
+const FILE = arg('file');
+const YOUTUBE = arg('youtube');
+const INTAKE = Boolean(FILE || YOUTUBE);
+const REPORT = process.argv.includes('--report') || INTAKE ? path.resolve(here, '..', 'mix', 'harness', 'reports') : arg('report');
+
+/**
+ * A file or a video brought into the harness's own library and separated
+ * there, the way the app does it — the same manifest, the same worker, the
+ * same Python environment the app built under Application Support — so the
+ * real library is never written by a tool.
+ */
+async function intake(): Promise<string> {
+  const root = path.join(REPORT, 'library');
+  fs.mkdirSync(root, { recursive: true });
+  const runtime = path.join(os.homedir(), 'Library', 'Application Support', '@openflow', 'mix', 'runtime');
+  const added = FILE ? await addFiles(root, [path.resolve(FILE)]) : await addYoutube(root, YOUTUBE);
+  if (!added.ids.length) throw new Error('nothing was added');
+  const model = arg('model', 'htdemucs_ft');
+  for (const id of added.ids) {
+    const track = added.manifest.tracks.find((t) => t.id === id)!;
+    console.log(`separating ${track.title} with ${model}`);
+    let stage = '';
+    const outcome = await separate(
+      { root, runtime, trackId: id, file: track.file, model },
+      {
+        progress: (_id, progress) => {
+          const now = `${progress.stage} ${Math.round(progress.done * 100)}%`;
+          if (now !== stage) process.stdout.write(`\r  ${now.padEnd(40)}`);
+          stage = now;
+        },
+      },
+    );
+    process.stdout.write('\n');
+    if (!outcome.ok) throw new Error(outcome.says);
+    await recordStems(root, id, { model: outcome.model, sources: outcome.sources, stems: outcome.stems, seconds: outcome.sidecar.seconds });
+  }
+  return root;
+}
+
+const LIBRARY = INTAKE ? await intake() : arg('library') || appLibrary();
 const knownTempos = JSON.parse(fs.readFileSync(path.join(here, 'mix-warp-truth.json'), 'utf8')) as KnownTempo[];
-const manifest = JSON.parse(fs.readFileSync(path.join(LIBRARY, 'library.json'), 'utf8')) as { tracks: Track[] };
+const manifest = (await readManifest(LIBRARY)) as unknown as { tracks: Track[] };
 
 /** The tempo the truth says the song runs at a moment. */
 const trueTempo = (truth: KnownTempo, at: number): number => {
@@ -137,7 +186,18 @@ for (const track of manifest.tracks) {
       known: truth ?? null,
     };
     fs.writeFileSync(path.join(REPORT, `${track.id}.json`), JSON.stringify(report));
-    index.push({ id: track.id, title: track.title, seconds: heard.seconds, bpm: seed?.bpm ?? null, truth: Boolean(truth) || fs.existsSync(path.join(REPORT, 'truth', `${track.id}.json`)) });
+    // Judged against the beats corrected by hand, where there are any. A
+    // known tempo is not laid out as beats: a rip running 0.08% off its label
+    // is 190 ms adrift after four minutes, and every beat would score missed.
+    const corrected = path.join(REPORT, 'truth', `${track.id}.json`);
+    const judge: Truth | null = fs.existsSync(corrected) ? (JSON.parse(fs.readFileSync(corrected, 'utf8')) as Truth) : null;
+    if (judge) {
+      const scored = score(report, judge);
+      fs.mkdirSync(path.join(REPORT, 'errors'), { recursive: true });
+      fs.writeFileSync(path.join(REPORT, 'errors', `${track.id}.md`), toMarkdown(report, judge, scored));
+      fs.writeFileSync(path.join(REPORT, 'errors', `${track.id}.json`), JSON.stringify({ ...scored, rows: scored.rows.map(({ under, ...r }) => ({ ...r, under: under ? { band: under.band, strength: under.strength, level: under.level } : null })) }));
+    }
+    index.push({ id: track.id, title: track.title, seconds: heard.seconds, bpm: seed?.bpm ?? null, truth: judge !== null });
   }
   const name = pad(track.title.slice(0, 32), 34);
   const known = truth ? (truth.sections ? `${truth.bpm}→${truth.sections.map((s) => s.bpm).join('→')}` : String(truth.bpm)) : '?';
@@ -175,7 +235,12 @@ for (const track of manifest.tracks) {
   );
 }
 if (REPORT) {
-  fs.writeFileSync(path.join(REPORT, 'index.json'), JSON.stringify(index, null, 2));
+  // Merged into what is there, so a run over one library — or one file — does
+  // not lose the entries a run over another wrote.
+  const at = path.join(REPORT, 'index.json');
+  const had: IndexEntry[] = fs.existsSync(at) ? (JSON.parse(fs.readFileSync(at, 'utf8')) as IndexEntry[]) : [];
+  const merged = [...had.filter((h) => !index.some((i) => i.id === h.id)), ...index];
+  fs.writeFileSync(at, JSON.stringify(merged, null, 2));
   console.log(`\nreports: ${REPORT}`);
 }
 console.log(failures ? `\n${failures} not right` : '\nall right');
