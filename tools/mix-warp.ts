@@ -4,11 +4,11 @@
 //   npm run warp:mix                      the library the app is pointed at
 //   npm run warp:mix -- --library=/path   another one
 //   npm run warp:mix -- --only=Sandstorm  one track, by a word of its title
-//   npm run warp:mix -- --ab              every arm of the beat finding — ours,
+//   npm run warp:mix -- --ab              every algorithm of the beat finding — ours,
 //                                         and the library's stages swapped in
-//                                         one at a time, see harness/arms.ts —
+//                                         one at a time, see harness/algorithms.ts —
 //                                         on the drums and on the whole,
-//                                         scored side by side; --arms=ours,ellis
+//                                         scored side by side; --algorithms=ours,ellis
 //                                         for some of them
 //   npm run warp:mix -- --report          also write what the pipeline saw,
 //                                         one JSON per track, for the harness
@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { addFiles, read as readManifest, recordStems } from '../mix/electron/manifest.ts';
 import { separate } from '../mix/electron/separate.ts';
 import { addYoutube } from '../mix/electron/youtube.ts';
-import { ARMS, INPUTS, run, SAYS, variantOf, type Arm, type Input } from '../mix/src/debug/arms.ts';
+import { ALGORITHMS, IDS, INPUTS, run, variantOf, type Algorithm, type Input } from '../mix/src/debug/algorithms.ts';
 import { score, toMarkdown, type Score } from '../mix/harness/score.ts';
 import type { IndexEntry, KnownTempo, Report, Truth } from '../mix/harness/types.ts';
 import { peaksOf, readWav } from '../mix/src/audio.ts';
@@ -67,9 +67,9 @@ interface Track {
 }
 
 const ONLY = arg('only');
-/** Every arm on every input, against ours on the drums alone. */
+/** Every algorithm on every input, against ours on the drums alone. */
 const AB = process.argv.includes('--ab');
-const ARMS_ASKED = arg('arms').split(',').filter(Boolean) as Arm[];
+const ALGORITHMS_ASKED = arg('algorithms').split(',').filter(Boolean) as Algorithm[];
 const FILE = arg('file');
 const YOUTUBE = arg('youtube');
 const INTAKE = Boolean(FILE || YOUTUBE);
@@ -156,12 +156,12 @@ function stemsBeside(track: Track, into: string): string[] {
 }
 
 
-/** The arms side by side, per track: the seed, and the score where the beats were corrected by hand. */
+/** The algorithms side by side, per track: the seed, and the score where the beats were corrected by hand. */
 function abTable(rows: readonly Trial[]): string {
-  const out: string[] = ['# The arms, side by side', ''];
-  for (const arm of ARMS) out.push(`- **${arm}**: ${SAYS[arm]}`);
+  const out: string[] = ['# The algorithms, side by side', ''];
+  for (const it of ALGORITHMS) out.push(`- **${it.id}** (${it.name}): ${it.does}`);
   out.push('', 'Score is against the beats corrected by hand in the harness page, over the region corrected. Seed ✓ is within a third of a per cent of the known tempo.', '');
-  out.push('| track | input | arm | seed | F | on | shifted | missed | spurious | continuity | offset ms | shape | ms |');
+  out.push('| track | input | algorithm | seed | F | on | shifted | missed | spurious | continuity | offset ms | shape | ms |');
   out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const t of rows) {
     const seed = t.bpm === null ? 'refused' : `${t.bpm}${t.seedOk === null ? '' : t.seedOk ? ' ✓' : ' ✗'}`;
@@ -169,7 +169,7 @@ function abTable(rows: readonly Trial[]): string {
     const shape = s ? [s.octave ? `octave ${s.octave}` : '', s.offBeat ? 'off-beat' : '', s.phase ? `phase +${s.phase}` : ''].filter(Boolean).join(', ') || '—' : '—';
     const cell = (n: number | null | undefined, f = (x: number) => x.toFixed(2)): string => (n == null ? '—' : f(n));
     out.push(
-      `| ${t.track.slice(0, 32)} | ${t.input} | ${t.arm} | ${seed} | ${cell(s?.fMeasure)} | ${cell(s?.counts.on, String)} | ${cell(s?.counts.shifted, String)} | ${cell(s?.counts.missed, String)} | ${cell(s?.counts.spurious, String)} | ${cell(s?.continuity)} | ${cell(s?.offsetMs.mean, (x) => x.toFixed(1))} | ${shape} | ${t.ms} |`,
+      `| ${t.track.slice(0, 32)} | ${t.input} | ${t.algorithm} | ${seed} | ${cell(s?.fMeasure)} | ${cell(s?.counts.on, String)} | ${cell(s?.counts.shifted, String)} | ${cell(s?.counts.missed, String)} | ${cell(s?.counts.spurious, String)} | ${cell(s?.continuity)} | ${cell(s?.offsetMs.mean, (x) => x.toFixed(1))} | ${shape} | ${t.ms} |`,
     );
   }
   return out.join('\n');
@@ -209,11 +209,11 @@ function summed(stems: Record<string, { rate: number; channels: Float32Array[] }
   });
 }
 
-/** One row of the comparison: an arm on an input on a track, and how it scored. */
+/** One row of the comparison: an algorithm on an input on a track, and how it scored. */
 interface Trial {
   track: string;
   input: Input;
-  arm: Arm;
+  algorithm: Algorithm;
   bpm: number | null;
   /** The seed within a third of a per cent of a known tempo, or null where none is known. */
   seedOk: boolean | null;
@@ -239,13 +239,13 @@ for (const track of manifest.tracks) {
 
   for (const input of INPUTS) {
     if (input !== 'drums' && !AB) continue;
-    for (const arm of ARMS) {
-      if (!AB && arm !== 'ours') continue;
-      if (ARMS_ASKED.length && !ARMS_ASKED.includes(arm)) continue;
-      const variant = variantOf(input, arm);
+    for (const algorithm of IDS) {
+      if (!AB && algorithm !== 'ours') continue;
+      if (ALGORITHMS_ASKED.length && !ALGORITHMS_ASKED.includes(algorithm)) continue;
+      const variant = variantOf(input, algorithm);
       const started = performance.now();
       const trace: Trace = { tempo: { frame: 0.004 }, follow: { frame: 0.004 } };
-      const ran = run(arm, heardBy[input], rate, trace);
+      const ran = run(algorithm, heardBy[input], rate, trace);
       const ms = Math.round(performance.now() - started);
       const seed = ran?.fit ?? null;
       const follow = ran?.follow ?? null;
@@ -281,10 +281,10 @@ for (const track of manifest.tracks) {
         }
       }
       const seedOk = truth && seed ? Math.abs(seed.bpm - truth.bpm) / truth.bpm < 0.003 || (truth.sections ?? []).some((s) => Math.abs(seed.bpm - s.bpm) / s.bpm < 0.003) : truth ? false : null;
-      trials.push({ track: track.title, input, arm, bpm: seed?.bpm ?? null, seedOk, score: scored, ms });
+      trials.push({ track: track.title, input, algorithm, bpm: seed?.bpm ?? null, seedOk, score: scored, ms });
       if (variant) continue;
 
-      if (REPORT) index.push({ id: track.id, title: track.title, seconds, bpm: seed?.bpm ?? null, truth: judge !== null, arms: variants });
+      if (REPORT) index.push({ id: track.id, title: track.title, seconds, bpm: seed?.bpm ?? null, truth: judge !== null, algorithms: variants });
       const name = pad(track.title.slice(0, 32), 34);
       const known = truth ? (truth.sections ? `${truth.bpm}→${truth.sections.map((s) => s.bpm).join('→')}` : String(truth.bpm)) : '?';
       if (!seed || !follow) {
