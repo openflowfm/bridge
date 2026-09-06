@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { addFiles, read as readManifest, recordStems } from '../mix/electron/manifest.ts';
 import { separate } from '../mix/electron/separate.ts';
 import { addYoutube } from '../mix/electron/youtube.ts';
-import { ALGORITHMS, IDS, INPUTS, run, variantOf, type Algorithm, type Input } from '../mix/src/algorithms.ts';
+import { agreementOf, ALGORITHMS, IDS, INPUTS, run, variantOf, type Agreement, type Algorithm, type Input } from '../mix/src/algorithms.ts';
 import { score, toMarkdown, type Score } from '../mix/harness/score.ts';
 import type { IndexEntry, KnownTempo, Report, Truth } from '../mix/harness/types.ts';
 import { peaksOf, readWav } from '../mix/src/audio.ts';
@@ -158,18 +158,29 @@ function stemsBeside(track: Track, into: string): string[] {
 
 /** The algorithms side by side, per track: the seed, and the score where the beats were corrected by hand. */
 function abTable(rows: readonly Trial[]): string {
+  // Read every trial against the reference on its own input, now that all of
+  // them have run. Same input, because drums and full are different questions.
+  for (const t of trials) {
+    if (t.algorithm === REFERENCE) continue;
+    const mine = maps.get(`${t.track}|${t.input}|${t.algorithm}`);
+    const theirs = maps.get(`${t.track}|${t.input}|${REFERENCE}`);
+    if (mine && theirs) t.agrees = agreementOf(theirs, mine);
+  }
   const out: string[] = ['# The algorithms, side by side', ''];
   for (const it of ALGORITHMS) out.push(`- **${it.id}** (${it.name}): ${it.does}`);
   out.push('', 'Score is against the beats corrected by hand in the harness page, over the region corrected. Seed ✓ is within a third of a per cent of the known tempo.', '');
-  out.push('| track | input | algorithm | seed | F | on | shifted | missed | spurious | continuity | offset ms | shape | ms |');
-  out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  out.push('');
+  out.push(`Together / vs is each algorithm read against **${REFERENCE}** on the same input: how much of its grid this one lands on within 25 ms, and the median distance when it does. No truth needed for those two.`);
+  out.push('');
+  out.push('| track | input | algorithm | seed | beats | together | vs ' + REFERENCE + ' | octave | F | on | shifted | missed | spurious | continuity | offset ms | shape | ms |');
+  out.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const t of rows) {
     const seed = t.bpm === null ? 'refused' : `${t.bpm}${t.seedOk === null ? '' : t.seedOk ? ' ✓' : ' ✗'}`;
     const s = t.score;
     const shape = s ? [s.octave ? `octave ${s.octave}` : '', s.offBeat ? 'off-beat' : '', s.phase ? `phase +${s.phase}` : ''].filter(Boolean).join(', ') || '—' : '—';
     const cell = (n: number | null | undefined, f = (x: number) => x.toFixed(2)): string => (n == null ? '—' : f(n));
     out.push(
-      `| ${t.track.slice(0, 32)} | ${t.input} | ${t.algorithm} | ${seed} | ${cell(s?.fMeasure)} | ${cell(s?.counts.on, String)} | ${cell(s?.counts.shifted, String)} | ${cell(s?.counts.missed, String)} | ${cell(s?.counts.spurious, String)} | ${cell(s?.continuity)} | ${cell(s?.offsetMs.mean, (x) => x.toFixed(1))} | ${shape} | ${t.ms} |`,
+      `| ${t.track.slice(0, 32)} | ${t.input} | ${t.algorithm} | ${seed} | ${t.beats ?? '—'} | ${t.agrees ? `${Math.round(t.agrees.together * 100)}%` : t.algorithm === REFERENCE ? 'ref' : '—'} | ${t.agrees && t.agrees.together > 0 ? `${t.agrees.medianMs > 0 ? '+' : ''}${t.agrees.medianMs.toFixed(1)}` : '—'} | ${t.agrees?.octave ?? ''} | ${cell(s?.fMeasure)} | ${cell(s?.counts.on, String)} | ${cell(s?.counts.shifted, String)} | ${cell(s?.counts.missed, String)} | ${cell(s?.counts.spurious, String)} | ${cell(s?.continuity)} | ${cell(s?.offsetMs.mean, (x) => x.toFixed(1))} | ${shape} | ${t.ms} |`,
     );
   }
   return out.join('\n');
@@ -219,8 +230,22 @@ interface Trial {
   seedOk: boolean | null;
   score: Score | null;
   ms: number;
+  /** Beats, and how this one sits against the reference algorithm on the same input. */
+  beats: number | null;
+  agrees: Agreement | null;
 }
 const trials: Trial[] = [];
+/**
+ * Every map, so each can be read against the reference on its own input.
+ *
+ * There is no truth for most of the library, and hand-correcting a song to
+ * make some is more work than listening to the answer — but *does this agree
+ * with the one we ship* is a number, and it is the number an experiment on any
+ * one algorithm actually moves.
+ */
+const maps = new Map<string, Beats>();
+/** What the others are read against: what the app runs. See `mix/src/algorithms.ts`. */
+const REFERENCE: Algorithm = 'ellis';
 
 for (const track of manifest.tracks) {
   if (!track.stems) continue;
@@ -281,7 +306,8 @@ for (const track of manifest.tracks) {
         }
       }
       const seedOk = truth && seed ? Math.abs(seed.bpm - truth.bpm) / truth.bpm < 0.003 || (truth.sections ?? []).some((s) => Math.abs(seed.bpm - s.bpm) / s.bpm < 0.003) : truth ? false : null;
-      trials.push({ track: track.title, input, algorithm, bpm: seed?.bpm ?? null, seedOk, score: scored, ms });
+      if (beats) maps.set(`${track.title}|${input}|${algorithm}`, beats);
+      trials.push({ track: track.title, input, algorithm, bpm: seed?.bpm ?? null, seedOk, score: scored, ms, beats: beats?.samples.length ?? null, agrees: null });
       if (variant) continue;
 
       if (REPORT) index.push({ id: track.id, title: track.title, seconds, bpm: seed?.bpm ?? null, truth: judge !== null, algorithms: variants });
