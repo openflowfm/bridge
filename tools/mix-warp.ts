@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { addFiles, read as readManifest, recordStems } from '../mix/electron/manifest.ts';
 import { separate } from '../mix/electron/separate.ts';
 import { addYoutube } from '../mix/electron/youtube.ts';
-import { ALGORITHMS, IDS, INPUTS, run, variantOf, type Algorithm, type Input } from '../mix/src/debug/algorithms.ts';
+import { ALGORITHMS, IDS, INPUTS, run, variantOf, type Algorithm, type Input } from '../mix/src/algorithms.ts';
 import { score, toMarkdown, type Score } from '../mix/harness/score.ts';
 import type { IndexEntry, KnownTempo, Report, Truth } from '../mix/harness/types.ts';
 import { peaksOf, readWav } from '../mix/src/audio.ts';
