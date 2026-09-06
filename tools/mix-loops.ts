@@ -29,7 +29,6 @@ import { fileURLToPath } from 'node:url';
 import { readAnalysis } from '../mix/electron/analysis.ts';
 import { read as readManifest } from '../mix/electron/manifest.ts';
 import { readWav } from '../mix/src/audio.ts';
-import { LOOPS } from '../mix/src/pinned.ts';
 import { straightened } from '../mix/src/straighten.ts';
 import { heardIn } from '../mix/src/transients.ts';
 import { BEATS_PER_BAR, type Beats } from '../mix/src/warp.ts';
@@ -48,6 +47,9 @@ function appLibrary(): string {
   if (!read.library) throw new Error(`no library in ${settings}; pass --library=`);
   return read.library;
 }
+
+/** The loop lengths the dialog offers. Sections have no lattice to measure. */
+const LOOP_LENGTHS = [4, 8, 16] as const;
 
 const ONLY = arg('only').toLowerCase();
 const LIBRARY = arg('library') || appLibrary();
@@ -160,7 +162,7 @@ for (const track of manifest.tracks) {
   }
   const to = Math.round(grid.bpm);
   process.stdout.write(`${track.title} at ${to}`);
-  for (const every of LOOPS) {
+  for (const every of LOOP_LENGTHS) {
     const row = measure(wav.channels, wav.rate, grid.beats, grid.bpm, grid.offset, to, every);
     process.stdout.write(` · ${every}: ${row.on}/${row.lines - row.silent} on, ${ms(row.median)} / ${ms(row.p90)} / ${ms(row.worst)}`);
     out.push(
