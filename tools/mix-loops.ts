@@ -71,6 +71,8 @@ interface Row {
   /** Lines with a kick within ten milliseconds. */
   on: number;
   median: number;
+  /** The median of the signed distance, kick minus line: under zero the kicks come early. */
+  lean: number;
   /** Nine lines in ten are at least this close. */
   p90: number;
   worst: number;
@@ -100,7 +102,7 @@ function measure(channels: readonly Float32Array[], rate: number, beats: Beats, 
   const kicks = (heard?.transients ?? []).filter((hit) => hit.band === 'low').map((hit) => hit.sample);
   const spacing = (60 * laid.rate) / to;
   const bar = spacing * BEATS_PER_BAR;
-  const distances: { at: number; bar: number }[] = [];
+  const distances: { at: number; bar: number; signed: number }[] = [];
   let lines = 0;
   let silent = 0;
   for (let n = 0; n * every < laid.bars; n++) {
@@ -110,19 +112,22 @@ function measure(channels: readonly Float32Array[], rate: number, beats: Beats, 
       silent++;
       continue;
     }
-    const off = Math.abs(nearest(kicks, line) - line);
+    const signed = nearest(kicks, line) - line;
+    const off = Math.abs(signed);
     if (off > spacing / 2) {
       silent++;
       continue;
     }
-    distances.push({ at: (off / laid.rate) * 1000, bar: n * every + 1 });
+    distances.push({ at: (off / laid.rate) * 1000, bar: n * every + 1, signed: (signed / laid.rate) * 1000 });
   }
   const sorted = distances.map((d) => d.at).sort((a, b) => a - b);
   const median = sorted.length ? sorted[sorted.length >> 1] : 0;
+  const leans = distances.map((d) => d.signed).sort((a, b) => a - b);
+  const lean = leans.length ? leans[leans.length >> 1] : 0;
   const p90 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))] : 0;
   const on = sorted.filter((at) => at <= 10).length;
   const worstOf = distances.reduce((a, b) => (b.at > a.at ? b : a), { at: 0, bar: 1 });
-  return { every, lines, silent, on, median, p90, worst: worstOf.at, worstBar: worstOf.bar };
+  return { every, lines, silent, on, median, lean, p90, worst: worstOf.at, worstBar: worstOf.bar };
 }
 
 const manifest = (await readManifest(LIBRARY)) as unknown as { tracks: Track[] };
@@ -132,13 +137,14 @@ const out: string[] = [
   'The drums stem of every track, laid straight as Export lays it — pinned at every line a',
   'loop of this length starts on, from 1.1.1 — and heard again. Each line is measured against',
   'the kick nearest it in the *output*. Lines with no kick within half a beat are counted as',
-  'silent and left out of the numbers. *On* is lines with a kick within ten milliseconds, the',
+  'silent and left out of the numbers. *Lean* is the median signed distance, kick minus line:',
+  'under zero the kicks come in early. *On* is lines with a kick within ten milliseconds, the',
   'tolerance the measured default is chosen to. No threshold is asserted: the number is the point.',
   '',
   `Library: \`${LIBRARY}\`. ${new Date().toISOString().slice(0, 16).replace('T', ' ')}.`,
   '',
-  '| track | laid at | loops of | lines | silent | on | median ms | p90 ms | worst ms | worst at bar |',
-  '|---|---|---|---|---|---|---|---|---|---|',
+  '| track | laid at | loops of | lines | silent | on | median ms | lean ms | p90 ms | worst ms | worst at bar |',
+  '|---|---|---|---|---|---|---|---|---|---|---|',
 ];
 const skipped: string[] = [];
 for (const track of manifest.tracks) {
@@ -164,9 +170,9 @@ for (const track of manifest.tracks) {
   process.stdout.write(`${track.title} at ${to}`);
   for (const every of LOOP_LENGTHS) {
     const row = measure(wav.channels, wav.rate, grid.beats, grid.bpm, grid.offset, to, every);
-    process.stdout.write(` · ${every}: ${row.on}/${row.lines - row.silent} on, ${ms(row.median)} / ${ms(row.p90)} / ${ms(row.worst)}`);
+    process.stdout.write(` · ${every}: ${row.on}/${row.lines - row.silent} on, ${ms(row.median)} lean ${ms(row.lean)} / ${ms(row.p90)} / ${ms(row.worst)}`);
     out.push(
-      `| ${track.title} | ${to} | ${every} | ${row.lines} | ${row.silent} | ${row.on} | ${ms(row.median)} | ${ms(row.p90)} | ${ms(row.worst)} | ${row.worstBar} |`,
+      `| ${track.title} | ${to} | ${every} | ${row.lines} | ${row.silent} | ${row.on} | ${ms(row.median)} | ${ms(row.lean)} | ${ms(row.p90)} | ${ms(row.worst)} | ${row.worstBar} |`,
     );
   }
   process.stdout.write('\n');
