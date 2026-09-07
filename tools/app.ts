@@ -30,6 +30,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NAMES } from '@openflow/desktop/apps.ts';
+import { repairBuilder } from '@openflow/desktop/builderPatch.ts';
+import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bin = (name: string) => path.join(root, 'node_modules', '.bin', name);
@@ -85,6 +87,12 @@ const icons = (name: string) => node('tools/build-icons.ts', [name]);
  * so an upgrade is one `npm install`.
  */
 function pack(name: string): void {
+  // v26's published package still lacks upstream #10101. Apply the exact
+  // three-line backport before any signing; reject unfamiliar package code.
+  const signing = createRequire(import.meta.url).resolve('app-builder-lib/out/codeSign/macCodeSign.js');
+  const original = fs.readFileSync(signing, 'utf8');
+  const repaired = repairBuilder(original);
+  if (repaired !== original) fs.writeFileSync(signing, repaired);
   build(name);
   electron(name);
   icons(name);
