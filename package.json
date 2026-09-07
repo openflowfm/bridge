@@ -1,6 +1,6 @@
 {
   "name": "@openflow/bridge",
-  "version": "0.1.0-dev",
+  "version": "0.1.0-rc.1",
   "private": true,
   "description": "Node for Max script: serves the Session Manager UI and bridges the Live Object Model over WebSocket.",
   "main": "bridge.js",
