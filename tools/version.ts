@@ -7,7 +7,7 @@
 //   root package.json      the line on the device face (build-device.ts)
 //   set/package.json       set-flow-<version>-arm64.dmg, and CFBundleShortVersionString
 //   visuals/package.json   visual-flow-<version>-arm64.dmg, likewise
-//   core/ protocol/ widgets/   the npm tarballs attached to a release
+//   core/ protocol/   the npm tarballs attached to a release
 //
 // Left to drift, a `v0.2.0` tag produces a release containing
 // `set-flow-0.1.0-arm64.dmg`. The guard in `release.yml` refuses that tag; this
