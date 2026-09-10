@@ -50,7 +50,7 @@ if (!fs.existsSync(path.join(here, 'main.ts'))) {
  * repair. It stays external and ships unpacked, because a `.node` binary cannot
  * be inlined into a bundle or read out of an asar.
  *
- * Which apps have one is `desktop/src/apps.ts`, so adding a third is an entry in
+ * Which apps have one is `@openflow/desktop/apps.ts`, so adding a third is an entry in
  * the registry rather than an edit here.
  */
 const entries = [path.join(here, 'main.ts'), path.join(here, 'preload.ts')];

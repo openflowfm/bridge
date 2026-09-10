@@ -53,7 +53,7 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
  *
  * Three sources, and none of them is a list kept here. The workspaces come from
  * the root manifest, so adding one is not also a silent way to leave it behind.
- * The apps come from `desktop/src/apps.ts`, because an app names a `.dmg` and
+ * The apps come from `@openflow/desktop/apps.ts`, because an app names a `.dmg` and
  * not every app is a workspace — `visuals` is not, deliberately. `bridge` is
  * appended by name, being neither: nothing else in the repo mentions it, and
  * that separateness is exactly the bug this file exists to prevent.
