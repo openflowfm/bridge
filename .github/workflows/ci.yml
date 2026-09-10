@@ -68,7 +68,7 @@ jobs:
       - run: npm run build
 
       # Widgets validates its declarations and package in openflowfm/widgets.
-      # Every app, from the registry in `desktop/src/apps.ts` — renderer first,
+      # Every app, from the registry in `@openflow/desktop/apps.ts` — renderer first,
       # then the Electron main and preload. A new app is covered here the day it
       # is added rather than the day somebody remembers this file.
       - run: npm run app -- build
