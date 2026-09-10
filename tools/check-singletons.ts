@@ -19,6 +19,7 @@
 // This says so at the moment somebody gets it wrong, which is `postinstall`.
 
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -45,6 +46,16 @@ for (const name of SINGLETONS) {
     problems.push(
       `${nested}/node_modules/${name}@${theirs} duplicates ${name}@${mine ?? 'none'} at the root`,
     );
+  }
+}
+
+// A Git-installed UI package must resolve the same peers as its host. Resolve
+// from its actual entry so nested dependencies and accidental npm links count.
+const host = createRequire(import.meta.url);
+const widgets = createRequire(host.resolve('@openflow/widgets'));
+for (const name of SINGLETONS) {
+  if (fs.realpathSync(host.resolve(name)) !== fs.realpathSync(widgets.resolve(name))) {
+    problems.push(`@openflow/widgets resolves a different ${name} from the host`);
   }
 }
 

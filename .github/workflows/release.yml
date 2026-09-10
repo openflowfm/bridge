@@ -49,7 +49,7 @@ jobs:
           done
           echo "tag and manifests agree on $tag"
 
-  # Everything that builds the same on any machine: the device, and the three
+  # Everything that builds the same on any machine: the device, and the two
   # modules another project could consume. Behind the checks a tag can otherwise
   # walk straight past — a tag can point at any commit, including one that
   # nothing ever ran.
@@ -97,13 +97,10 @@ jobs:
       # build — but a tarball on the release is a thing a reader can open, and
       # it pins what `@openflow/core` meant at this version.
       #
-      # widgets' types are built first: its `types` field points into `dist/`,
-      # and nothing else in this workflow makes that.
       - name: Pack the libraries
         run: |
           set -eux
-          npm run build:widgets
-          for module in core protocol widgets; do
+          for module in core protocol; do
             npm pack --workspace "@openflow/$module" --pack-destination dist
           done
 

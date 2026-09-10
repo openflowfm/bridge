@@ -474,3 +474,6 @@ The script invokes the developer-only LOM sweep, compares every returned RGB val
 `core/src/livePalette.ts`, and prints the current table if it differs. It creates and
 removes one scratch MIDI track, so this is an explicit release-maintenance check rather
 than app startup behavior.
+
+`dev:check-singletons` checks the separate bridge/visuals installations and verifies
+that the Git-installed Widgets package resolves the host’s React and ReactDOM.
