@@ -14,7 +14,7 @@ try {
   run('cmake',['-S',source,'-B',build,`-DCMAKE_INSTALL_PREFIX=${prefix}`,'-DBUILD_TESTING=OFF','-DBUILD_SHARED_LIBS=OFF','-DCMAKE_BUILD_TYPE=Release']);
   run('cmake',['--build',build,'--parallel','2']); run('cmake',['--install',build]);
   const fftw = execFileSync('pkg-config',['--cflags','--libs','fftw3'],{encoding:'utf8'}).trim().split(/\s+/);
-  run('clang++',['-std=c++11','-O2',path.join(root,'mix/experiments/key/libkeyfinder.cpp'),`-I${prefix}/include`,path.join(prefix,'lib/libkeyfinder.a'),...fftw,'-o',path.join(home,'keyfinder')]);
+  run('clang++',['-std=c++11','-O2',path.join(root,'mix/native/keyfinder.cpp'),`-I${prefix}/include`,path.join(prefix,'lib/libkeyfinder.a'),...fftw,'-o',path.join(home,'keyfinder')]);
 } catch (error) { failures++; console.error('libkeyfinder unavailable: install cmake, pkg-config, FFTW3 and a C++ compiler, then retry.', String(error)); }
 try {
   const python = path.join(home,'venv/bin/python');
