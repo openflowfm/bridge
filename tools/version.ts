@@ -6,7 +6,6 @@
 //
 //   root package.json      the line on the device face (build-device.ts)
 //   set/package.json       set-flow-<version>-arm64.dmg, and CFBundleShortVersionString
-//   visuals/package.json   visual-flow-<version>-arm64.dmg, likewise
 //   core/ protocol/   the npm tarballs attached to a release
 //
 // Left to drift, a `v0.2.0` tag produces a release containing
@@ -14,9 +13,8 @@
 // is the thing that stops you hitting the guard in the first place.
 //
 // `npm version --workspaces --include-workspace-root` does most of it and
-// silently misses the two that matter most: `visuals/` and `bridge/` are not
-// workspaces — they carry their own package-lock.json and their own node_modules
-// — and `visuals/` is the one that names a .dmg.
+// silently misses the one that matters most: `bridge/` is not a workspace —
+// it carries its own package-lock.json and its own node_modules.
 
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -57,12 +55,12 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
  * Three sources, and none of them is a list kept here. The workspaces come from
  * the root manifest, so adding one is not also a silent way to leave it behind.
  * The apps come from `@openflow/desktop/apps.ts`'s `present(root)`, not `NAMES` —
- * an app names a `.dmg` and not every app is a workspace (`visuals` is not,
- * deliberately), but an app the registry knows about that is not checked out
- * here has no manifest to bump either, and the `existsSync` filter below would
- * only be catching that same case a second time. `bridge` is appended by name,
- * being neither: nothing else in the repo mentions it, and that separateness is
- * exactly the bug this file exists to prevent.
+ * an app names a `.dmg` and not every app is a workspace, but an app the
+ * registry knows about that is not checked out here has no manifest to bump
+ * either, and the `existsSync` filter below would only be catching that same
+ * case a second time. `bridge` is appended by name, being neither: nothing
+ * else in the repo mentions it, and that separateness is exactly the bug this
+ * file exists to prevent.
  */
 function manifests(): string[] {
   const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));

@@ -24,15 +24,13 @@ walk. `typescript-syntax` is an npm alias pinned to `typescript@5.9.3` — the p
 this tool's mutant set was tuned against — and Dependabot is told to leave it alone.
 
 ```sh
-npm run visuals             # a show night: the visual[flow] app
 npm run set                 # the set[flow] app
 npm run qa                  # build + pack + install:apps — everything, onto this machine
 npm run pack                # every app as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications/open[flow] — or one: install:apps set
 npm run install:device      # the device into the User Library as SessionBridge-qa
-npm run dev:set             # just set[flow]: its dev server and its window — dev:visuals, dev:mix too
+npm run dev:set             # just set[flow]: its dev server and its window — dev:mix too
 npm run dev:set-app         # the set[flow] shell alone, on a dev server already up
-npm run dev:visuals-app     # visual[flow]'s HMR shell + backend; npm run dev launches it
 npm run app -- <cmd> [app…] # build | electron | icons | pack | run | dev — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
@@ -81,15 +79,15 @@ is the other arrangement — every server in the repo at once, and `dev:<app>-ap
 a window to one of them.
 
 There used to be five npm scripts per app, and `pack:set` was a two-hundred-character line
-that differed from `pack:visuals` in one word. That is the thing this replaced: a third app
+that differed from `pack:mix` in one word. That is the thing this replaced: a third app
 meant five more, written by copying, which is how the QA overrides in one of them stop
 matching the other. Anything that looks like a flag is still forwarded to electron-builder,
 so `npm run pack:set -- -c.mac.identity="…"` works as it did.
 
 Where the reasoning lives: [`desktop/README.md`](../desktop/README.md) for everything the
 apps share, [`set/docs/desktop.md`](../set/docs/desktop.md) for the custom scheme and where
-state goes, [`visuals/docs/desktop.md`](../visuals/docs/desktop.md) for the supervised
-server, the wall window and the display list.
+state goes; visual[flow]'s own supervised server, wall window and display list are
+documented in its own repo, [openflowfm/visuals](https://github.com/openflowfm/visuals#readme).
 
 `build-electron.ts` esbuilds `<module>/electron/{main,preload}.ts` to **CommonJS**. Both
 halves are forced: Electron's bundled Node does not strip types the way Node 26 on your PATH
@@ -129,9 +127,9 @@ freezing is Live's own operation. A frozen device also has nothing for `@watch 1
 
 ## The visuals rig in a dedicated Chrome
 
-`npm run visuals:browser` moved with the rest of the visuals tooling — see
-[`npm run show`](../visuals/README.md) in `visuals/README.md` for the show-browser
-alternative to the app and the Chrome flags it depends on.
+The visuals tooling, including `npm run show` and the show-browser alternative to the app
+and the Chrome flags it depends on, now lives in its own repo — see
+[openflowfm/visuals](https://github.com/openflowfm/visuals#readme).
 
 ## The LOM reference
 
@@ -414,5 +412,5 @@ The script invokes the developer-only LOM sweep, compares every returned RGB val
 removes one scratch MIDI track, so this is an explicit release-maintenance check rather
 than app startup behavior.
 
-`dev:check-singletons` checks the separate bridge/visuals installations and verifies
+`dev:check-singletons` checks the separate bridge installation and verifies
 that the Git-installed Widgets package resolves the host’s React and ReactDOM.

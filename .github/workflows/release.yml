@@ -71,7 +71,6 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             bridge/package-lock.json
-            visuals/package-lock.json
 
       # `npm ci` runs the root postinstall, which installs `ws` into
       # bridge/node_modules. That's load-bearing: build:bridge esbuilds
@@ -128,12 +127,10 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             bridge/package-lock.json
-            visuals/package-lock.json
 
       # No ELECTRON_SKIP_BINARY_DOWNLOAD here — this is the job that needs the
-      # actual binary. postinstall also compiles the Ableton Link addon against
-      # this machine's toolchain, which is the other reason the apps cannot be
-      # built from the Linux job.
+      # actual binary, to sign and notarize the apps, which is why the apps
+      # cannot be built from the Linux job.
       - run: npm ci
 
       # notarytool wants the App Store Connect key as a file on disk and a
@@ -242,7 +239,7 @@ jobs:
           # Every asset, found rather than globbed. An upload keeps whatever
           # directory structure its files had — the device's are flat because
           # they all sat in `dist/`, the disk images arrive under `set/` and
-          # `visuals/` because they did not — so `assets/*` matches two
+          # `mix/` because they did not — so `assets/*` matches two
           # directories as well as the files. gh takes files only, and it fails
           # on a directory *after* creating the release, which leaves a draft
           # holding whatever it managed to upload first.

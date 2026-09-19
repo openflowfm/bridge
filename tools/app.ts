@@ -4,7 +4,7 @@
 // It exists because the per-app npm scripts were the other half of the cost of
 // adding an app. There were five of them each — `build:set`, `set`,
 // `dev:set-app`, `pack:set` and a lane in `dev` — and `pack:set` was a
-// two-hundred-character line that differed from `pack:visuals` in one word. A
+// two-hundred-character line that differed from `pack:mix` in one word. A
 // third app meant five more, written by copying, which is how the QA overrides
 // in one of them stop matching the other.
 //

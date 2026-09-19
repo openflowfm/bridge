@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Refuses a second copy of a package that only works as one.
 //
-// `bridge/` and `visuals/` keep their own `node_modules` — the first because
-// `bridge.js` ships beside Live with no dependency tree, the second because of
-// the native Ableton Link addon and electron-builder's `!node_modules/**`. Both
-// are right, and both are a place npm will happily install a *second* React
-// while satisfying a peer dependency.
+// `bridge/` keeps its own `node_modules` because `bridge.js` ships beside Live
+// with no dependency tree. `visuals/` used to have the same arrangement, for
+// the native Ableton Link addon and electron-builder's `!node_modules/**`, but
+// it is now its own repo (https://github.com/openflowfm/visuals) and no longer
+// checked out here. Either way, a nested `node_modules` is a place npm will
+// happily install a *second* React while satisfying a peer dependency.
 //
 // That failure is bad out of proportion to its cause. Two Reacts means two
 // module registries, so every `useContext` in a component rendered by the other
@@ -14,9 +15,9 @@
 // it. It took a full test suite to notice and a `find` to explain.
 //
 // The rule is one line long: the UI is bundled by the root toolchain, so
-// anything React-peered belongs in the root `package.json`. `visuals/` and
-// `bridge/` are the server and device sides — Link, `ws`, `zod`, the MCP SDK.
-// This says so at the moment somebody gets it wrong, which is `postinstall`.
+// anything React-peered belongs in the root `package.json`. `bridge/` is the
+// device side — Link, `ws`, `zod`, the MCP SDK. This says so at the moment
+// somebody gets it wrong, which is `postinstall`.
 
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -28,13 +29,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** Packages that break silently and confusingly when duplicated. */
 const SINGLETONS = ['react', 'react-dom'];
 
-/**
- * Sub-packages with a dependency tree of their own, filtered to the ones
- * actually checked out here — `visuals` can live in its own repo now, and a
- * duplicate check against a `node_modules` that does not exist is not a check,
- * it is a false negative wearing a green checkmark.
- */
-const NESTED = ['bridge', 'visuals'].filter((dir) => fs.existsSync(path.join(root, dir)));
+/** Sub-packages with a dependency tree of their own. */
+const NESTED = ['bridge'];
 
 const versionAt = (dir: string, name: string): string | null => {
   const manifest = path.join(dir, 'node_modules', name, 'package.json');
