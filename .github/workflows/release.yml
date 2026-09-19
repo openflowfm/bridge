@@ -238,9 +238,9 @@ jobs:
 
           # Every asset, found rather than globbed. An upload keeps whatever
           # directory structure its files had — the device's are flat because
-          # they all sat in `dist/`, the disk images arrive under `set/` and
-          # `mix/` because they did not — so `assets/*` matches two
-          # directories as well as the files. gh takes files only, and it fails
+          # they all sat in `dist/`, the disk images arrive under `set/`
+          # because they did not — so `assets/*` matches a directory as well
+          # as the files. gh takes files only, and it fails
           # on a directory *after* creating the release, which leaves a draft
           # holding whatever it managed to upload first.
           files=()

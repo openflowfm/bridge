@@ -29,7 +29,7 @@ npm run qa                  # build + pack + install:apps — everything, onto t
 npm run pack                # every app as .app and .dmg under release/
 npm run install:apps        # copies those into /Applications/open[flow] — or one: install:apps set
 npm run install:device      # the device into the User Library as SessionBridge-qa
-npm run dev:set             # just set[flow]: its dev server and its window — dev:mix too
+npm run dev:set             # just set[flow]: its dev server and its window
 npm run dev:set-app         # the set[flow] shell alone, on a dev server already up
 npm run app -- <cmd> [app…] # build | electron | icons | pack | run | dev — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
@@ -79,7 +79,7 @@ is the other arrangement — every server in the repo at once, and `dev:<app>-ap
 a window to one of them.
 
 There used to be five npm scripts per app, and `pack:set` was a two-hundred-character line
-that differed from `pack:mix` in one word. That is the thing this replaced: a third app
+that differed from `pack:mix` (mix[flow] lived here then) in one word. That is the thing this replaced: a third app
 meant five more, written by copying, which is how the QA overrides in one of them stop
 matching the other. Anything that looks like a flag is still forwarded to electron-builder,
 so `npm run pack:set -- -c.mac.identity="…"` works as it did.
