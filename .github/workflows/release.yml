@@ -114,100 +114,8 @@ jobs:
   # The apps, on the only OS that can sign them. A separate job rather than more
   # steps above: everything on Linux finishes in a couple of minutes, and none
   # of it should wait behind two notarisations.
-  apps:
-    needs: guard
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            bridge/package-lock.json
-
-      # No ELECTRON_SKIP_BINARY_DOWNLOAD here — this is the job that needs the
-      # actual binary, to sign and notarize the apps, which is why the apps
-      # cannot be built from the Linux job.
-      - run: npm ci
-
-      # notarytool wants the App Store Connect key as a file on disk and a
-      # secret is a string, so it lands under RUNNER_TEMP, which goes away with
-      # the runner.
-      - name: Write the notary key
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          set -eu
-          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          echo "APPLE_API_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
-
-      # electron-builder reads every one of these itself: CSC_* to import the
-      # certificate into a keychain it creates and throws away, APPLE_API_* to
-      # notarise once the bundle is signed. Nothing in either
-      # `electron-builder.yml` switches them on — their presence is the switch.
-      - name: Pack the apps
-        env:
-          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: npm run pack
-
-      # electron-builder notarises the `.app` and stops there, then wraps it in
-      # a disk image it has only signed. The image is the file that travels, and
-      # Gatekeeper assesses it on open — an un-notarised one is refused with
-      # "Apple cannot check it for malicious software" no matter how good the
-      # bundle inside is. So the images are submitted here, and stapled, which
-      # is what makes them open without a network round trip.
-      - name: Notarise the disk images
-        env:
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          set -eux
-          for dmg in release/*/*.dmg; do
-            xcrun notarytool submit "$dmg" \
-              --key "$APPLE_API_KEY" \
-              --key-id "$APPLE_API_KEY_ID" \
-              --issuer "$APPLE_API_ISSUER" \
-              --wait
-            xcrun stapler staple "$dmg"
-          done
-
-      # electron-builder warns and carries on when it cannot sign or cannot
-      # notarise, so a green pack step proves nothing. This asks what the
-      # receiving Mac asks, of both artifacts. `spctl` is the one that counts:
-      # it is Gatekeeper itself, and it rejects anything signed but never
-      # notarised — which is the exact failure this release exists to avoid.
-      #
-      # The two `spctl` types are not interchangeable. `execute` is the question
-      # asked of an app being launched; `open` with the primary-signature
-      # context is the question asked of a disk image being mounted.
-      - name: Verify what a stranger's Mac will see
-        run: |
-          set -eux
-          for app in release/*/mac-*/*.app; do
-            codesign --verify --deep --strict --verbose=2 "$app"
-            spctl --assess --type execute --verbose=4 "$app"
-            xcrun stapler validate "$app"
-          done
-          for dmg in release/*/*.dmg; do
-            codesign --verify --strict --verbose=2 "$dmg"
-            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
-            xcrun stapler validate "$dmg"
-          done
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: apps
-          path: release/*/*.dmg
-          if-no-files-found: error
-
   publish:
-    needs: [device, apps]
+    needs: device
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -236,13 +144,9 @@ jobs:
             notes_args=(--generate-notes)
           fi
 
-          # Every asset, found rather than globbed. An upload keeps whatever
-          # directory structure its files had — the device's are flat because
-          # they all sat in `dist/`, the disk images arrive under `set/`
-          # because they did not — so `assets/*` matches a directory as well
-          # as the files. gh takes files only, and it fails
-          # on a directory *after* creating the release, which leaves a draft
-          # holding whatever it managed to upload first.
+          # Every asset, found rather than globbed. gh takes files only, and it
+          # fails on a directory *after* creating the release, which leaves a
+          # draft holding whatever it managed to upload first.
           files=()
           while IFS= read -r file; do files+=("$file"); done < <(find assets -type f | sort)
           test "${#files[@]}" -gt 0

@@ -282,7 +282,7 @@ function migrateLegacyDeviceState(): void {
  * *counts* — it never says which ops it skipped — so the only way to patch the
  * held snapshot is to have the request that produced them still in hand. This
  * is the same batch or plan the client patches its own copy with; see
- * `set/docs/snapshot-lifecycle.md` under *A write patches the snapshot*.
+ * set[flow]'s `docs/snapshot-lifecycle.md` under *A write patches the snapshot*.
  */
 type Written =
   | { kind: 'apply'; ops: OpenFlow.ApplyOp[]; sceneOps: OpenFlow.SceneOp[] }
@@ -402,7 +402,7 @@ function describe(e: unknown): string {
  *
  * It used to serve the session manager, which is why `bridge.js` carried 595 kB
  * of base64 web app into Live's process. That app is a window of its own now —
- * see `set/docs/desktop.md` — so what is left is the four lines it takes to
+ * see set[flow]'s `docs/desktop.md` — so what is left is the four lines it takes to
  * answer somebody who typed the address into a browser out of habit, and the
  * `http.Server` that `ws` attaches to.
  *

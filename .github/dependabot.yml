@@ -6,10 +6,3 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-    ignore:
-      # typescript-syntax is an alias for typescript@5.9.3, kept only so
-      # tools/mutate.ts has a JavaScript parser to walk — TypeScript 7 ships a
-      # Go binary and no AST. Pinned on purpose: a different parser would
-      # quietly change which mutants the gate produces. Bumping it toward 7
-      # would just remove the parser again.
-      - dependency-name: "typescript-syntax"

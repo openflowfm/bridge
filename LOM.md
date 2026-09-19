@@ -32,7 +32,7 @@ two sources states at all — so there is nothing to cross-check it against.
 
 **What has actually been watched lives beside the feature that watches it**, not here: a
 topic doc's *What's confirmed and what isn't*, the way
-[`set/docs/device-chain.md`](../set/docs/device-chain.md) does it. `tools/diag.ts` is the
+[set[flow]'s `docs/device-chain.md`](https://github.com/openflowfm/set/blob/main/docs/device-chain.md) does it. `tools/diag.ts` is the
 only thing that can move a claim from documented to confirmed, because it is the only
 thing that runs with Live open. Reaching for a member this project hasn't used yet means
 treating its row as a starting point and writing a probe.

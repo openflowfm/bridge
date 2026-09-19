@@ -5,7 +5,6 @@
 // read it, and only one of them is the root:
 //
 //   root package.json      the line on the device face (build-device.ts)
-//   set/package.json       set-flow-<version>-arm64.dmg, and CFBundleShortVersionString
 //   core/ protocol/   the npm tarballs attached to a release
 //
 // Left to drift, a `v0.2.0` tag produces a release containing

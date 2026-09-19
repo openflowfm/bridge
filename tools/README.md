@@ -8,9 +8,6 @@ amxd.ts                      pack / unpack / inspect .amxd containers  (library 
 build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
-build-electron.ts            bundles a module's Electron main, preload and server
-build-icons.ts               makes an app's .icns from its own public/mark.svg
-install-apps.ts              copies the packed apps into /Applications/open[flow]
 install-device.ts            copies the device into the Ableton User Library, as -qa
 coverage-summary.ts          coverage-summary.json as a build-page table and a shields badge
 record-session.ts            records a real session off the bridge, as test corpus
@@ -18,25 +15,12 @@ mutate.ts                    breaks a file one edit at a time — would its spec
 version.ts                   sets one version across every package.json and lock
 ```
 
-**`mutate.ts` imports `typescript-syntax`, not `typescript`.** TypeScript 7's package
-is a launcher for a Go compiler and ships no JavaScript parser, so there is no AST to
-walk. `typescript-syntax` is an npm alias pinned to `typescript@5.9.3` — the parser
-this tool's mutant set was tuned against — and Dependabot is told to leave it alone.
-
 ```sh
-npm run set                 # the set[flow] app
-npm run qa                  # build + pack + install:apps — everything, onto this machine
-npm run pack                # every app as .app and .dmg under release/
-npm run install:apps        # copies those into /Applications/open[flow] — or one: install:apps set
+npm run qa                  # build + install:device — the device, onto this machine
 npm run install:device      # the device into the User Library as SessionBridge-qa
-npm run dev:set             # just set[flow]: its dev server and its window
-npm run dev:set-app         # the set[flow] shell alone, on a dev server already up
-npm run app -- <cmd> [app…] # build | electron | icons | pack | run | dev — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
-npm run dev:record -- <name> [seconds]   # a real session into set/test/corpus/<name>/
-npm run dev:mutate -- <source file>      # mutation score for its colocated spec
 npm run dev:version -- <version>         # 0.2.0-dev, 0.2.0-rc.1, 0.2.0 — then commit
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
@@ -54,76 +38,10 @@ no enums, no runtime `namespace`, no decorators.
 
 ## The desktop apps
 
-`app.ts` is the driver, and every per-app script is a one-line alias onto it:
-
-```sh
-npm run app -- build [app…]      # the renderer, with vite
-npm run app -- electron [app…]   # main, preload, and a server if it has one
-npm run app -- icons [app…]      # the .icns, from that app's own mark
-npm run app -- pack [app…]       # all three, then electron-builder
-npm run app -- run <app>         # build, electron, and open it
-npm run app -- watch <app>       # its dev server and its window, together
-npm run app -- dev <app>         # electron, and open it against a running dev server
-```
-
-With no app named, everything but `run` and `dev` does all of them — which is why
-`npm run pack` and the CI build step need no editing when an app is added. Which apps
-there *are* is `desktop/src/apps.ts`, and so are their names, their dev-server offsets
-and their backend ports;
-[`desktop/docs/registry.md`](../desktop/docs/registry.md) is the doc for adding one.
-
-`watch` is the one to type while working. `-k` is what makes it one command rather than
-two in a trench coat: closing the window takes vite with it, and a vite that cannot bind
-takes the window's retry loop with it rather than leaving it asking forever. `npm run dev`
-is the other arrangement — every server in the repo at once, and `dev:<app>-app` to attach
-a window to one of them.
-
-There used to be five npm scripts per app, and `pack:set` was a two-hundred-character line
-that differed from `pack:mix` (mix[flow] lived here then) in one word. That is the thing this replaced: a third app
-meant five more, written by copying, which is how the QA overrides in one of them stop
-matching the other. Anything that looks like a flag is still forwarded to electron-builder,
-so `npm run pack:set -- -c.mac.identity="…"` works as it did.
-
-Where the reasoning lives: [`desktop/README.md`](../desktop/README.md) for everything the
-apps share, [`set/docs/desktop.md`](../set/docs/desktop.md) for the custom scheme and where
-state goes; visual[flow]'s own supervised server, wall window and display list are
-documented in its own repo, [openflowfm/visuals](https://github.com/openflowfm/visuals#readme).
-
-`build-electron.ts` esbuilds `<module>/electron/{main,preload}.ts` to **CommonJS**. Both
-halves are forced: Electron's bundled Node does not strip types the way Node 26 on your PATH
-does, and a `sandbox: true` preload must be CJS. It also bundles a module's own server — if
-the registry says it has one — and that to **ESM**, because the server reads
-`import.meta.url` to find its renderer and its Link addon, both empty in a CJS bundle.
-
-`npm run pack` makes real `.app` bundles with `electron-builder` from a config shared by
-every app, and `npm run install:apps` copies them into `/Applications/open[flow]` — a
-separate step because packing writes a build artifact and installing is a decision about the
-machine. They go in a folder of their own so the suite arrives as one thing rather than as
-three unrelated icons, and an install sweeps away the loose copy an earlier one left in
-`/Applications` itself. It replaces rather than merges, refuses to overwrite an app that is
-open, and takes `OPENFLOW_APPS` if `/Applications` is not yours to write. Neither building nor packing is
-part of `npm run build` — that script is what CI enforces and what produces the `.amxd`, and
-it has no business needing an Electron binary.
-
-**`npm run qa` is those four in order** — the device, every app, and all three installed
-where the machine looks for them — for when the next thing you do is drive the real thing
-rather than a dev server. It stops at the first failure, so a bad build never reaches
-`/Applications/open[flow]`. It is also the only thing that sets `OPENFLOW_QA=1`, which is what makes
-the device stamp itself with the commit it came from — see *QA builds say so* below. It runs neither `typecheck` nor `test`: those are fast and belong in the
-loop before this one, and a script that quietly reruns them makes the slow path look like
-the cheap one. The chart is not in it either — it is a page, not an app, and
-`npm run build:chart` stands alone.
-
-`install-device.ts` writes a **folder**, `SessionBridge-qa/`, not three loose files. The
-device is `[node.script bridge.js]` and `[v8 lom.js]`, which Max resolves by name from the
-patcher's own folder, so two devices sharing a folder share one pair of scripts — a `-qa`
-suffix on the `.amxd` alone would overwrite the scripts an installed device runs. The suffix
-names it in Live; the folder is what keeps the two apart. `OPENFLOW_USER_LIBRARY` points at
-the `Max for Live` folder when the User Library has been moved.
-
-Freezing would make this one file instead of three, and is deliberately not done here:
-`amxd.ts` reads the `mx@c` archive a frozen device carries but never writes it, because
-freezing is Live's own operation. A frozen device also has nothing for `@watch 1` to watch.
+Each app is its own repo now — [set](https://github.com/openflowfm/set#readme),
+[mix](https://github.com/openflowfm/mix#readme), [visuals](https://github.com/openflowfm/visuals#readme)
+— with its own copy of the app driver this repo used to hold. The main process they
+share is [`@openflow/desktop`](https://github.com/openflowfm/desktop#readme).
 
 ## The visuals rig in a dedicated Chrome
 

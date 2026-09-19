@@ -40,8 +40,8 @@ scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a fr
 1. Drop `SessionBridge.amxd` onto any track. It's an audio effect with a
    `plugin~ → plugout~` passthrough, so it's inert on the signal path — the Master
    track is a fine home.
-2. Wait for the status to read `Connected to Live`, then run `npm run set` — the
-   `set[flow]` dot should light as the app attaches.
+2. Wait for the status to read `Connected to Live`, then open set[flow]
+   ([openflowfm/set](https://github.com/openflowfm/set)) — its dot should light as the app attaches.
 
 | status | means |
 |---|---|

@@ -66,28 +66,6 @@ jobs:
       # a file that's untracked but imported passes locally and fails here.
       - run: npm run build
 
-      # Widgets validates its declarations and package in openflowfm/widgets.
-      # Every app, from the registry in `@openflow/desktop/apps.ts` — renderer first,
-      # then the Electron main and preload. A new app is covered here the day it
-      # is added rather than the day somebody remembers this file.
-      - run: npm run app -- build
-      # Compile every Electron bundle on Linux. The app driver also prepares
-      # native macOS helpers; those remain mandatory in the macOS release pack.
-      - name: Build Electron bundles
-        run: |
-          node --disable-warning=ExperimentalWarning --input-type=module <<'JS'
-          import { spawnSync } from 'node:child_process';
-          import { present } from '@openflow/desktop/apps.ts';
-          // present(cwd), not NAMES: an app the registry knows about but whose
-          // repo is not checked out beside this one has no vite.config.ts to
-          // build here, and NAMES would fail on it rather than skip it.
-          for (const name of present(process.cwd())) {
-            const result = spawnSync(process.execPath,
-              ['--disable-warning=ExperimentalWarning', 'tools/build-electron.ts', name],
-              { stdio: 'inherit' });
-            if (result.status !== 0) process.exit(result.status ?? 1);
-          }
-          JS
       - run: npm run build:chart
 
       # lom.ts has no automated coverage: it needs Live open with the device
