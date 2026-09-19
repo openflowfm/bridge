@@ -12,5 +12,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "types/**/*.d.ts", "../protocol/global.d.ts"]
+  "include": ["src/**/*.ts", "types/**/*.d.ts", "../node_modules/@openflow/protocol/global.d.ts"]
 }
