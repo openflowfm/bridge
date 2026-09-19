@@ -8,7 +8,6 @@ amxd.ts                      pack / unpack / inspect .amxd containers  (library 
 build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
-visuals.ts                   the visuals rig in a dedicated Chrome — npm run visuals:browser
 build-electron.ts            bundles a module's Electron main, preload and server
 build-icons.ts               makes an app's .icns from its own public/mark.svg
 install-apps.ts              copies the packed apps into /Applications/open[flow]
@@ -35,7 +34,6 @@ npm run dev:set             # just set[flow]: its dev server and its window — 
 npm run dev:set-app         # the set[flow] shell alone, on a dev server already up
 npm run dev:visuals-app     # visual[flow]'s HMR shell + backend; npm run dev launches it
 npm run app -- <cmd> [app…] # build | electron | icons | pack | run | dev — see below
-npm run visuals:browser     # the visuals rig in a dedicated Chrome — see below
 npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
 npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
 npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
@@ -129,70 +127,11 @@ Freezing would make this one file instead of three, and is deliberately not done
 `amxd.ts` reads the `mx@c` archive a frozen device carries but never writes it, because
 freezing is Live's own operation. A frozen device also has nothing for `@watch 1` to watch.
 
-## `npm run visuals:browser`
+## The visuals rig in a dedicated Chrome
 
-The visuals rig in a dedicated Chrome instead of the app. Kept because a second machine runs
-a browser anyway — which is the arrangement the rig was always meant for — and because it is
-the rollback if the app misbehaves on a show night.
-
-`npm run dev` is `concurrently -k` over ten dev processes, including the visual[flow]
-Electron app on vite's HMR page, and `-k` means **any one of them exiting kills all the
-others** — right for a dev loop, and wrong for a gig, where a chart server or a
-`tsc --watch` falling over would take the wall down with it. In that stack the app owns and
-supervises its backend. `visuals.ts`, the show-browser alternative, builds `visuals/dist`
-and runs `visuals/server/index.ts` itself, restarting it after a second if it stops.
-
-Two exits it does **not** restart, because neither is fixed by trying again: a clean one,
-which is the server's own Ctrl-C path, and status **2**, which is the port already being
-taken. That code exists for this — the server has already printed which port and how to
-find what is on it, and a supervisor relaunching into the same message once a second is
-noise on top of a problem.
-
-### It opens a browser that belongs to the show
-
-Once the port answers, it opens the rig in **its own Chrome** — macOS only, `--no-browse`
-to skip it, and skipped anyway if one is already up on that profile.
-
-The lever is `--user-data-dir=~/.openflow/visuals/chrome`, which makes it a separate
-*instance* rather than a flag on the browser you read your mail in: no extensions, no forty
-other tabs on the same GPU, its own share of the ~16 WebGL contexts a browser keeps per
-origin, and its own permissions — so the window-management grant the wall needs is given
-once and stays given, rather than being asked for on a stage. `--app=` drops the tab strip
-and the address bar.
-
-It is the lightest Chromium available on a Mac, because it is the Chromium already
-installed — and that argument is why this path existed before there was an app, and why it
-is still here now.
-
-**What changed is the question, not the answer.** While the device served the session
-manager there was a URL to point a browser at, so "Chrome or Electron" was a real choice and
-Chrome won it. The device serves nothing now, so the choice is "ship a window or ship a
-server", and only one of those leaves the device carrying nothing. Tauri was not an option
-either way, though the shader-portability argument this used to make was wrong — Safari and
-Chrome both reach the GPU through ANGLE onto Metal. What rules it out is that its macOS
-webview is WKWebView and `visuals/` draws its show *inside* the webview, so the switches
-below would have no equivalent. See `visuals/docs/engine.md`.
-
-Three of the flags are about a projector specifically:
-
-```
---disable-background-timer-throttling
---disable-backgrounding-occluded-windows
---disable-renderer-backgrounding
-```
-
-Chrome slows and eventually freezes a renderer it decides nobody is looking at, and a wall
-window sitting behind the console is exactly that. Without these, bringing another window to
-the front can drop the projector to a stutter.
-
-**The app needs the same three**, because Electron is the same Chromium — it passes them as
-command-line switches and sets `backgroundThrottling: false` on every window besides. This
-is the easiest thing in either path to forget, and the symptom reads as a renderer bug.
-
-**Only for a server it started.** The readiness poll waits a beat before its first look,
-because a port already in use answers *immediately* — from whatever is on it — and a window
-would open onto somebody else's server a moment before ours died of `EADDRINUSE`. The
-settle gives that failure time to land, and the child going away is what says it did.
+`npm run visuals:browser` moved with the rest of the visuals tooling — see
+[`npm run show`](../visuals/README.md) in `visuals/README.md` for the show-browser
+alternative to the app and the Chrome flags it depends on.
 
 ## The LOM reference
 
