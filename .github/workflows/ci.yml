@@ -78,8 +78,11 @@ jobs:
         run: |
           node --disable-warning=ExperimentalWarning --input-type=module <<'JS'
           import { spawnSync } from 'node:child_process';
-          import { NAMES } from '@openflow/desktop/apps.ts';
-          for (const name of NAMES) {
+          import { present } from '@openflow/desktop/apps.ts';
+          // present(cwd), not NAMES: an app the registry knows about but whose
+          // repo is not checked out beside this one has no vite.config.ts to
+          // build here, and NAMES would fail on it rather than skip it.
+          for (const name of present(process.cwd())) {
             const result = spawnSync(process.execPath,
               ['--disable-warning=ExperimentalWarning', 'tools/build-electron.ts', name],
               { stdio: 'inherit' });

@@ -22,9 +22,12 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NAMES } from '@openflow/desktop/apps.ts';
+import { present } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Only the apps actually checked out here — an app whose repo is not present
+// has no package.json to bump and no lock to refresh.
+const HERE = present(root);
 
 // `--list` prints the manifests and stops, which is how `release.yml`'s tag
 // guard asks what it has to check without keeping a copy of the list.
@@ -53,14 +56,17 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
  *
  * Three sources, and none of them is a list kept here. The workspaces come from
  * the root manifest, so adding one is not also a silent way to leave it behind.
- * The apps come from `@openflow/desktop/apps.ts`, because an app names a `.dmg` and
- * not every app is a workspace — `visuals` is not, deliberately. `bridge` is
- * appended by name, being neither: nothing else in the repo mentions it, and
- * that separateness is exactly the bug this file exists to prevent.
+ * The apps come from `@openflow/desktop/apps.ts`'s `present(root)`, not `NAMES` —
+ * an app names a `.dmg` and not every app is a workspace (`visuals` is not,
+ * deliberately), but an app the registry knows about that is not checked out
+ * here has no manifest to bump either, and the `existsSync` filter below would
+ * only be catching that same case a second time. `bridge` is appended by name,
+ * being neither: nothing else in the repo mentions it, and that separateness is
+ * exactly the bug this file exists to prevent.
  */
 function manifests(): string[] {
   const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  const dirs = new Set(['.', ...(rootPkg.workspaces ?? []), ...NAMES, 'bridge']);
+  const dirs = new Set(['.', ...(rootPkg.workspaces ?? []), ...HERE, 'bridge']);
   return [...dirs]
     .map((dir) => path.join(root, dir, 'package.json'))
     .filter((file) => fs.existsSync(file));
@@ -103,7 +109,12 @@ console.log(`version ${version}\n${changed.join('\n')}`);
 //
 // `--package-lock-only` writes the lock without touching node_modules, so this
 // stays a text edit.
-for (const dir of ['.', 'bridge', 'visuals']) {
+//
+// `bridge` is named outright — it is not an app the registry knows about —
+// and the apps come from `HERE` rather than a literal `'visuals'`, so an app
+// not checked out here is skipped above by `manifests()` and skipped here by
+// never appearing in the list, not by the `existsSync` check doing double duty.
+for (const dir of ['.', 'bridge', ...HERE]) {
   const cwd = path.join(root, dir);
   if (!fs.existsSync(path.join(cwd, 'package-lock.json'))) continue;
   const done = spawnSync(

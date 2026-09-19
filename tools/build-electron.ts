@@ -18,13 +18,16 @@ import esbuild from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, NAMES } from '@openflow/desktop/apps.ts';
+import { app, present } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Only the apps actually checked out here — not every app the registry knows
+// about — since CI builds each one by walking this same list.
+const HERE = present(root);
 
 const name = process.argv[2];
-if (!name || !NAMES.includes(name)) {
-  console.error(`build-electron: name an app — ${NAMES.join(', ')}`);
+if (!name || !HERE.includes(name)) {
+  console.error(`build-electron: name an app — ${HERE.join(', ')}`);
   process.exit(1);
 }
 const one = app(name);

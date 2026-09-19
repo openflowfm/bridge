@@ -29,11 +29,15 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NAMES } from '@openflow/desktop/apps.ts';
+import { present } from '@openflow/desktop/apps.ts';
 import { repairBuilder } from '@openflow/desktop/builderPatch.ts';
 import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Apps actually checked out here, not every app the registry knows about —
+// visuals lives in its own repo now, and a loop over NAMES would glob into a
+// vite.config.ts that is not there the moment it is not checked out beside this one.
+const HERE = present(root);
 const bin = (name: string) => path.join(root, 'node_modules', '.bin', name);
 const node = (script: string, args: string[]) =>
   run(process.execPath, [
@@ -177,22 +181,22 @@ if (flags.length && command !== 'pack') {
   process.exit(1);
 }
 
-const unknown = wanted.filter((name) => !NAMES.includes(name));
+const unknown = wanted.filter((name) => !HERE.includes(name));
 if (unknown.length) {
-  console.error(`app: no such app — ${unknown.join(', ')}. Try: ${NAMES.join(', ')}`);
+  console.error(`app: no such app — ${unknown.join(', ')}. Try: ${HERE.join(', ')}`);
   process.exit(1);
 }
 
 const one = (what: (name: string) => void): void => {
   const [name] = wanted;
   if (!name) {
-    console.error(`app: ${command} takes one app — ${NAMES.join(', ')}`);
+    console.error(`app: ${command} takes one app — ${HERE.join(', ')}`);
     process.exit(1);
   }
   what(name);
 };
 const every = (what: (name: string) => void): void => {
-  for (const name of wanted.length ? wanted : NAMES) what(name);
+  for (const name of wanted.length ? wanted : HERE) what(name);
 };
 
 switch (command) {

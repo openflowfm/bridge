@@ -28,8 +28,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** Packages that break silently and confusingly when duplicated. */
 const SINGLETONS = ['react', 'react-dom'];
 
-/** Sub-packages with a dependency tree of their own. */
-const NESTED = ['bridge', 'visuals'];
+/**
+ * Sub-packages with a dependency tree of their own, filtered to the ones
+ * actually checked out here — `visuals` can live in its own repo now, and a
+ * duplicate check against a `node_modules` that does not exist is not a check,
+ * it is a false negative wearing a green checkmark.
+ */
+const NESTED = ['bridge', 'visuals'].filter((dir) => fs.existsSync(path.join(root, dir)));
 
 const versionAt = (dir: string, name: string): string | null => {
   const manifest = path.join(dir, 'node_modules', name, 'package.json');

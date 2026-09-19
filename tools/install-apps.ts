@@ -15,9 +15,12 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NAMES } from '@openflow/desktop/apps.ts';
+import { present } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Only the apps actually checked out here — an app whose repo is not present
+// was never packed, so there is nothing under release/ to install for it.
+const HERE = present(root);
 
 /**
  * Where they land. Overridable because `/Applications` needs admin rights on a
@@ -92,11 +95,11 @@ function running(app: string): boolean {
 }
 
 const wanted = process.argv.slice(2);
-const names = wanted.length ? wanted : NAMES;
+const names = wanted.length ? wanted : HERE;
 
-const unknown = names.filter((name) => !NAMES.includes(name));
+const unknown = names.filter((name) => !HERE.includes(name));
 if (unknown.length) {
-  console.error(`install-apps: no such app — ${unknown.join(', ')}. Try: ${NAMES.join(', ')}`);
+  console.error(`install-apps: no such app — ${unknown.join(', ')}. Try: ${HERE.join(', ')}`);
   process.exit(1);
 }
 

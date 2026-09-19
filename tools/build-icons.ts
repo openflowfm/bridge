@@ -21,9 +21,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NAMES } from '@openflow/desktop/apps.ts';
+import { present } from '@openflow/desktop/apps.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Only the apps actually checked out here — a name the registry knows but
+// whose repo is not present has no mark.svg to rasterise from.
+const HERE = present(root);
 
 /** Every size macOS asks an iconset for, at 1× and 2×. */
 const SIZES = [16, 32, 128, 256, 512];
@@ -47,8 +50,8 @@ const run = (cmd: string, args: string[]): void => {
 
 // Every app has a mark of its own, at `<app>/public/mark.svg`.
 const name = process.argv[2];
-if (!name || !NAMES.includes(name)) {
-  console.error(`build-icons: name an app — ${NAMES.join(', ')}`);
+if (!name || !HERE.includes(name)) {
+  console.error(`build-icons: name an app — ${HERE.join(', ')}`);
   process.exit(1);
 }
 
