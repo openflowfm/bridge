@@ -6,6 +6,19 @@ serves it to every client — [set[flow]](https://github.com/openflowfm/set),
 [chart[flow]](https://github.com/openflowfm/chart) — over WebSocket on port 17800. It is
 the one job that has to happen inside Max; every interface is an app of its own.
 
+```
+set[flow]    ──WS/JSON──┐
+                        ├──> node.script (bridge.js) ──Max msgs──> v8 (lom.js) ──> Live
+visual[flow] ──WS/JSON──┤         :17800, WS only        the only LOM code
+   └─ its own server ───┘
+chart[flow]  ──WS/JSON──┘   (read-only, and the only one that binds the LAN)
+```
+
+The device is the WebSocket server and nothing else. It ships as an `.amxd` plus two JS
+files — no app bundle, no code signing, no updater. The logic it runs on is
+[`@openflow/core`](https://github.com/openflowfm/core), the wire types are
+[`@openflow/protocol`](https://github.com/openflowfm/protocol), and both are bundled in.
+
 Two halves in one repo, because they run in two completely different JavaScript
 environments.
 
