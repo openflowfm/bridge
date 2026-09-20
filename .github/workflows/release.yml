@@ -17,24 +17,18 @@ permissions:
 
 jobs:
   # The tag and the manifests have to agree before anything is built, because
-  # nothing downstream checks. `release.yml` names the device zip after the tag,
-  # electron-builder names each .dmg after that app's own package.json, and the
-  # npm tarballs after theirs — so a `v0.2.0` tag on a tree that still says
-  # 0.1.0 produces a `v0.2.0` release full of `0.1.0` files, signed and
-  # notarised and wrong.
+  # nothing downstream checks. The device zip is named after the tag and the
+  # device face reads package.json, so a `v0.2.0` tag on a tree that still says
+  # 0.1.0 ships a device announcing the wrong version.
   #
-  # Its own job rather than a step, so it fails in fifteen seconds instead of
-  # nine minutes into a notarisation. `npm run dev:version` is the thing that
-  # keeps you from ever seeing it.
+  # Its own job rather than a step, so it fails in fifteen seconds. `npm version
+  # <tag> --no-git-tag-version` is the thing that keeps you from ever seeing it.
   guard:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
-      # Every tracked manifest, rather than a list of the three that matter most.
-      # `npm run dev:version` sets all of them to one string, so all of them
-      # should read the tag — and asking that way means a new app or a new
-      # workspace is guarded the day it exists, with nothing to remember here.
+      # Every tracked manifest, so a second one is guarded the day it exists.
       - name: The tag is the version
         run: |
           set -eu
@@ -43,24 +37,17 @@ jobs:
             found=$(node -p "require('./$manifest').version")
             if [ "$found" != "$tag" ]; then
               echo "::error file=$manifest::tag says $tag, $manifest says $found." \
-                   "Run 'npm run dev:version $tag', commit, and re-tag."
+                   "Run 'npm version $tag --no-git-tag-version', commit, and re-tag."
               exit 1
             fi
           done
           echo "tag and manifests agree on $tag"
 
-  # Everything that builds the same on any machine: the device, and the two
-  # modules another project could consume. Behind the checks a tag can otherwise
-  # walk straight past — a tag can point at any commit, including one that
+  # The device, behind the checks a tag can otherwise walk straight past — a tag can point at any commit, including one that
   # nothing ever ran.
   device:
     needs: guard
     runs-on: ubuntu-24.04
-    # Electron ships a ~200 MB Chromium that no Linux job here can run — the
-    # typecheck needs its type declarations and nothing else, and those come
-    # with the package rather than the binary.
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v7
 
@@ -68,17 +55,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            bridge/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      # `npm ci` runs the root postinstall, which installs `ws` into
-      # bridge/node_modules. That's load-bearing: build:bridge esbuilds
-      # bridge/src/bridge.ts, and `ws` lives only there, not at the root.
       - run: npm ci
 
       - run: npm run typecheck
-      - run: npm test
       - run: npm run build
 
       - name: Stage the device
@@ -86,34 +67,17 @@ jobs:
           set -eux
           STAGE="SessionBridge-${GITHUB_REF_NAME#v}"
           mkdir -p "dist/$STAGE"
-          cp bridge/SessionBridge.amxd bridge/bridge.js bridge/lom.js "dist/$STAGE/"
+          cp SessionBridge.amxd bridge.js lom.js "dist/$STAGE/"
           cp .github/INSTALL.txt "dist/$STAGE/"
           cp LICENSE "dist/$STAGE/LICENSE.txt"
           (cd dist && zip -r "$STAGE.zip" "$STAGE")
 
-      # The modules that are libraries rather than apps. Not published to npm —
-      # they are `private`, and they ship as TypeScript source rather than as a
-      # build — but a tarball on the release is a thing a reader can open, and
-      # it pins what `@openflow/core` meant at this version.
-      #
-      - name: Pack the libraries
-        run: |
-          set -eux
-          for module in core protocol; do
-            npm pack --workspace "@openflow/$module" --pack-destination dist
-          done
-
       - uses: actions/upload-artifact@v7
         with:
           name: device
-          path: |
-            dist/*.zip
-            dist/*.tgz
+          path: dist/*.zip
           if-no-files-found: error
 
-  # The apps, on the only OS that can sign them. A separate job rather than more
-  # steps above: everything on Linux finishes in a couple of minutes, and none
-  # of it should wait behind two notarisations.
   publish:
     needs: device
     runs-on: ubuntu-24.04

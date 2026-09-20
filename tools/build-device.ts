@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { pack } from './amxd.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const outDir = path.join(root, 'bridge');
+const outDir = root;
 
 const REPO = 'https://github.com/ryangavin/better-session-view';
 const VERSION = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
@@ -856,7 +856,7 @@ fs.writeFileSync(
 );
 fs.writeFileSync(path.join(outDir, 'SessionBridge.amxd'), pack(patcher, 'audio'));
 console.log(
-  `built bridge/SessionBridge.amxd — ${boxes.length} boxes, ${lines.length} lines, ` +
+  `built SessionBridge.amxd — ${boxes.length} boxes, ${lines.length} lines, ` +
     `${boxes.filter((b) => b.box.presentation === 1).length} in presentation` +
     (QA ? ` — ${TITLE}, ${BUILD ?? 'no commit'}` : BUILD ? ` — ${BUILD}` : ''),
 );

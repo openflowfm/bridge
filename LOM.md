@@ -7,7 +7,7 @@ Regenerating over this file would delete them silently, so nothing regenerates i
 
 After a Live upgrade, `npm run dev:lom-scrape` rescrapes Cycling '74's page to
 `node_modules/.cache/lom-scraped.md` and leaves this file alone; diff the two and merge
-what the upgrade changed. `git diff --no-index bridge/LOM.md node_modules/.cache/lom-scraped.md`
+what the upgrade changed. `git diff --no-index LOM.md node_modules/.cache/lom-scraped.md`
 
 A checked-in copy of the LOM, so that *"does Live expose X, and can we **write**
 it?"* is a lookup rather than an afternoon. Every expensive surprise this project has

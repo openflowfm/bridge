@@ -1,5 +1,5 @@
 SessionBridge — open[flow]
-https://github.com/ryangavin/better-session-view
+https://github.com/openflowfm/bridge
 
 
 WHAT'S IN HERE

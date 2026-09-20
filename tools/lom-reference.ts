@@ -168,7 +168,7 @@ function render(objects: LomClass[]): string {
   w('# Scraped LOM tables');
   w();
   w('Scratch output for diffing after a Live upgrade. The reference is');
-  w('[`bridge/LOM.md`](../../bridge/LOM.md), which is hand-maintained — merge changes there.');
+  w('`LOM.md`, which is hand-maintained — merge changes there.');
   w();
 
   w('## Class index');

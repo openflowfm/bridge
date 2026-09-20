@@ -1,5 +1,5 @@
 {
-  "extends": "../tsconfig.base.json",
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
     // Not ESNext: bridge.ts imports max-api and the node builtins with
     // `import x = require()`, which TS refuses under pure ESM module targets.
@@ -12,5 +12,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "types/**/*.d.ts", "../node_modules/@openflow/protocol/global.d.ts"]
+  "include": ["src/**/*.ts", "types/**/*.d.ts", "node_modules/@openflow/protocol/global.d.ts"]
 }

@@ -602,7 +602,7 @@ function clip_notes(reqId: number, ...pairs: number[]): void {
  * bridge falls back to its machine-wide file rather than treating it as broken.
  *
  * Travels by Dict because a path contains spaces and Max atoms are space
- * separated; see the note on `gstr` in `bridge/README.md`.
+ * separated; see the note on `gstr` in `README.md`.
  */
 function set_info(): void {
   try {

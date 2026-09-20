@@ -4,7 +4,7 @@ Node ↔ v8 messaging: atoms for realtime pushes, Dicts for large payloads, and 
 
 ## Message protocol between the halves
 
-Not the WebSocket protocol — see [`../protocol/README.md`](../../protocol/README.md) for
+Not the WebSocket protocol — see [`@openflow/protocol`](https://github.com/openflowfm/protocol#readme) for
 that. This is Max messages between `bridge.js` and `lom.js`.
 
 ```

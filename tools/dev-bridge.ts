@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Dev-mode watcher that writes bridge/bridge.js — the `npm run dev` replacement
+// Dev-mode watcher that writes bridge.js — the `npm run dev` replacement
 // for plain `tsc --watch`.
 //
-// bridge.ts now imports core/src, which sits outside bridge/src. Plain tsc
+// bridge.ts now imports @openflow/core, which sits outside src/. Plain tsc
 // refuses to emit outside its rootDir, so this bundles instead — bundling
 // doesn't care where an import lives.
 //
@@ -16,8 +16,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const ctx = await esbuild.context({
-  entryPoints: [path.join(root, 'bridge', 'src', 'bridge.ts')],
-  outfile: path.join(root, 'bridge', 'bridge.js'),
+  entryPoints: [path.join(root, 'src', 'bridge.ts')],
+  outfile: path.join(root, 'bridge.js'),
   bundle: true,
   platform: 'node',
   target: 'node18',
@@ -28,4 +28,4 @@ const ctx = await esbuild.context({
 });
 
 await ctx.watch();
-console.log('dev-bridge — watching bridge/src + core/src -> bridge/bridge.js');
+console.log('dev-bridge — watching src -> bridge.js');

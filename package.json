@@ -2,9 +2,39 @@
   "name": "@openflow/bridge",
   "version": "0.1.0-rc.4",
   "private": true,
-  "description": "Node for Max script: serves the Session Manager UI and bridges the Live Object Model over WebSocket.",
+  "author": "Ryan Gavin",
+  "license": "MIT",
+  "description": "SessionBridge: the Max for Live device that holds a Live set and serves it to every open[flow] client over WebSocket.",
   "main": "bridge.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openflowfm/bridge.git"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "build": "npm run build:bridge && npm run build:device",
+    "build:bridge": "node --disable-warning=ExperimentalWarning tools/build-bridge.ts && tsc -p tsconfig.v8.json",
+    "build:device": "node --disable-warning=ExperimentalWarning tools/build-device.ts",
+    "install:device": "node --disable-warning=ExperimentalWarning tools/install-device.ts",
+    "qa": "export OPENFLOW_QA=1 && npm run build && npm run install:device",
+    "dev": "concurrently -k -n bridge,types,lom -c cyan,blue,magenta \"node --disable-warning=ExperimentalWarning tools/dev-bridge.ts\" \"tsc -p tsconfig.node.json --noEmit --watch --preserveWatchOutput\" \"tsc -p tsconfig.v8.json --watch --preserveWatchOutput\"",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.v8.json --noEmit && tsc -p tools/tsconfig.json",
+    "diag": "node --disable-warning=ExperimentalWarning tools/diag.ts",
+    "check-palette": "node --disable-warning=ExperimentalWarning tools/check-palette.ts",
+    "lom-scrape": "node --disable-warning=ExperimentalWarning tools/lom-reference.ts"
+  },
   "dependencies": {
+    "@openflow/core": "github:openflowfm/core#685db6fd1a8ba77bb8e575c66935a11fb56acce9",
+    "@openflow/protocol": "github:openflowfm/protocol#918e52b61afcc9945d433a445557a3043e532af1",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^10.0.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
   }
 }

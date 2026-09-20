@@ -1,0 +1,15 @@
+node_modules/
+# generated: what ships — run directly by Max, never committed
+bridge.js
+lom.js
+SessionBridge.amxd
+SessionBridge.maxpat
+# generated: release staging
+dist/
+# derived from Live at runtime
+palette.json
+palette.json.tmp
+# the role vocabulary — yours, not the repo's
+roles.json
+roles.json.tmp
+.DS_Store

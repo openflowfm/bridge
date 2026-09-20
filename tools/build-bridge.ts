@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bundles bridge/src/bridge.ts into a single self-contained bridge/bridge.js.
+// Bundles src/bridge.ts into a single self-contained bridge.js.
 //
 // The point is what the user ends up holding. Unbundled, a shipped device is a
 // folder — bridge.js, lom.js, node_modules/ws — and the user has to keep all of
@@ -19,10 +19,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = path.join(root, 'bridge', 'bridge.js');
+const OUT = path.join(root, 'bridge.js');
 
 await esbuild.build({
-  entryPoints: [path.join(root, 'bridge', 'src', 'bridge.ts')],
+  entryPoints: [path.join(root, 'src', 'bridge.ts')],
   outfile: OUT,
   bundle: true,
   platform: 'node',

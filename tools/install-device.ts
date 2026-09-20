@@ -39,7 +39,7 @@ if (process.platform !== 'darwin') {
   process.exit(0);
 }
 
-const from = path.join(root, 'bridge');
+const from = root;
 const missing = [`${DEVICE}.amxd`, ...SCRIPTS].filter(
   (file) => !fs.existsSync(path.join(from, file)),
 );

@@ -1,8 +1,7 @@
 name: nightly
 
-# Last night's main, built the way a release is built — signed, notarised,
-# stapled — and published to one rolling prerelease whose download URLs never
-# change.
+# Last night's main, built the way a release is built and published to one
+# rolling prerelease whose download URLs never change.
 #
 # It is `release.yml` with three differences, and they are the whole file:
 #
@@ -14,12 +13,6 @@ name: nightly
 #     rolling release exists to be a bookmark.
 #   * it skips itself when main has not moved.
 #
-# Notarised on purpose. This repo is public, so every runner minute here is
-# free, and the whole thing takes under ten. An un-notarised build published at
-# a public URL greets a stranger with "Apple cannot check it for malicious
-# software" — the three minutes it saves are the only three that were never
-# worth saving.
-
 on:
   schedule:
     # 2am Eastern, as close as this gets. GitHub's cron is UTC and has no
@@ -81,15 +74,11 @@ jobs:
             echo "nothing in $((age / 3600))h — leaving the last nightly where it is"
           fi
 
-  # Everything that builds the same on any machine. The libraries are not packed
-  # here the way `release.yml` packs them: a tarball of `@openflow/core` is a
-  # thing you read at a version, and a nightly does not have one worth citing.
   device:
     needs: moved
     if: needs.moved.outputs.build == 'true'
     runs-on: ubuntu-24.04
     env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       # The commit, on the device face. Without it every nightly for months
       # reads `open[flow] 0.1.0-dev` and there is no way to tell from inside
       # Live which one is loaded.
@@ -101,9 +90,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            bridge/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - run: npm ci
 
@@ -111,7 +98,6 @@ jobs:
       # failure here means nothing is published rather than a broken nightly
       # replacing a working one.
       - run: npm run typecheck
-      - run: npm test
       - run: npm run build
 
       - name: Stage the device
@@ -119,7 +105,7 @@ jobs:
           set -eux
           STAGE="SessionBridge-nightly"
           mkdir -p "dist/$STAGE"
-          cp bridge/SessionBridge.amxd bridge/bridge.js bridge/lom.js "dist/$STAGE/"
+          cp SessionBridge.amxd bridge.js lom.js "dist/$STAGE/"
           cp .github/INSTALL.txt "dist/$STAGE/"
           cp LICENSE "dist/$STAGE/LICENSE.txt"
           (cd dist && zip -r "$STAGE.zip" "$STAGE")
@@ -130,9 +116,6 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
-  # The apps, signed and notarised exactly as `release.yml` does it. Every
-  # comment there about why both halves are needed applies here unchanged; this
-  # job differs only in what the files end up called.
   publish:
     needs: device
     runs-on: ubuntu-24.04
@@ -153,8 +136,7 @@ jobs:
           short=$(git rev-parse --short HEAD)
 
           cat > notes.md <<EOF
-          Built from \`${GITHUB_REF_NAME}\` and notarised, so it opens with a
-          double-click. **This is not a release** — it is whatever was on the
+          Built from \`${GITHUB_REF_NAME}\`. **This is not a release** — it is whatever was on the
           branch that morning, and it can be broken in ways a release is not.
 
           | | |
@@ -167,13 +149,12 @@ jobs:
           edge, which is how you tell a running one from the copy Live cached.
 
           Installing is unchanged — see
-          [Installing](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/wiki/Installing).
+          [Installing](https://github.com/ryangavin/better-session-view/wiki/Installing).
           These filenames never change, so a bookmark always finds the newest
           nightly.
           EOF
 
-          # Same reasoning as `release.yml`: gh takes files only and fails on a
-          # directory, and the download unpacks into two of them.
+          # gh takes files only and fails on a directory.
           files=()
           while IFS= read -r file; do files+=("$file"); done < <(find assets -type f | sort)
           test "${#files[@]}" -gt 0

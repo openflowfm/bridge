@@ -12,7 +12,7 @@ bridge.js             bundled — ws inlined
 lom.js                the [v8] script
 ```
 
-`npm run build:bridge` runs [`../tools/build-bridge.ts`](../../tools/build-bridge.ts),
+`npm run build:bridge` runs [`tools/build-bridge.ts`](../tools/build-bridge.ts),
 which esbuilds `src/bridge.ts` into a single self-contained `bridge.js`. That's what
 removes `node_modules/` from the shipped folder — a Live device is something people
 download and drag, not a directory tree they're expected to keep together.
@@ -31,7 +31,7 @@ and now that nothing is inlined, that is the only difference between the two pat
 
 The end goal is **one file**: Live's Freeze button inlines a device's dependencies into
 the `.amxd` itself, which is how a 2 MB single-file device on maxforlive.com works. See
-[`../tools/README.md`](../../tools/README.md) for the container format and how to read one
+[`tools/README.md`](../tools/README.md) for the container format and how to read one
 back. Whether freeze reaches `node.script`'s file the way it reaches `[js]`/`[v8]`
 scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a frozen build.
 
@@ -87,7 +87,7 @@ trailing `*` when it was built from a tree with uncommitted changes — and titl
 
 **Live caches a loaded device**, so the stamp is also the answer to the question that
 follows from that: reload the device and read the footer, and you know whether Live picked
-up what you just built. See [`../../tools/README.md`](../../tools/README.md) for what the
+up what you just built. See [`tools/README.md`](../tools/README.md) for what the
 flag does and does not touch — the device's *name* is never one of them.
 
 **Keep the three files together.** The device resolves `bridge.js` and `lom.js`
@@ -125,18 +125,18 @@ This is the part that surprises people, and it's all forced by Max.
   which is a legal write to a global however Max provides it.
 - Consequence: **`lom.ts` cannot `import` anything.** That's why the protocol lives in
   a global `OpenFlow` namespace rather than a module, and why atom-parsing logic is
-  duplicated into `core/src/lomAtoms.ts` so it can be unit-tested.
+  duplicated into `@openflow/core`'s `lomAtoms.ts` so it can be unit-tested.
 
 **`bridge.ts` compiles to CommonJS**, because Node for Max injects `max-api` as a CJS
 module and runs the emitted file directly.
 
-`lom.ts` still emits into `bridge/` with `rootDir: "src"` — Max's `[v8]` loads
-`bridge/lom.js` directly, and it can never import anything regardless (see above).
+`lom.ts` still emits into the repo root with `rootDir: "src"` — Max's `[v8]` loads
+`lom.js` directly, and it can never import anything regardless (see above).
 `bridge.ts` does not: it's bundled by esbuild instead — `tools/build-bridge.ts` for the
 shipped build, `tools/dev-bridge.ts` for the dev watch loop — specifically so it can
-import across the `core/` package boundary (the song list Push shows needs `derive()`).
+import across the `@openflow/core` package boundary (the song list Push shows needs `derive()`).
 Bundling doesn't care where an import lives, which is what made that possible;
-`bridge/tsconfig.node.json` is typecheck-only now, and nothing asks `tsc` to emit
+`tsconfig.node.json` is typecheck-only now, and nothing asks `tsc` to emit
 `bridge.ts` at all. It still reads protocol types off the global `OpenFlow` namespace rather
 than importing `protocol/` directly — nothing forces that anymore, it's just how it's
 always been done here, not a constraint left over from `rootDir`.
@@ -148,4 +148,4 @@ device, so the patcher holds an initialization latch outside the script: `lom.js
 a private `boot` from `loadbang`, and the patcher replays `init` only if
 `live.thisdevice` has already completed. `bridge.ts`'s dev loop gets the same
 successful-build-only property from `tools/dev-bridge.ts`'s esbuild watcher —
-`node.script @watch 1` reloads only when it writes a new `bridge/bridge.js`.
+`node.script @watch 1` reloads only when it writes a new `bridge.js`.

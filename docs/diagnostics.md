@@ -4,7 +4,7 @@ The diagnostic surfaces, the phase breakdown, and what can be tested without Liv
 
 ## Diagnostics
 
-`diag <what> [arg]`, sent by [`../tools/diag.ts`](../../tools/diag.ts) and never by the
+`diag <what> [arg]`, sent by [`tools/diag.ts`](../tools/diag.ts) and never by the
 shipped UI — the same standing as `palette`.
 
 ```sh
@@ -151,7 +151,7 @@ it; position 2 splitting across two means the list is one atom too long per spac
 later song is on the wrong detent, which is loud enough to catch immediately.
 
 What Cycling '74 documents about the write itself, and what it doesn't, is in the Push
-section of [`../../tools/build-device.ts`](../../tools/build-device.ts).
+section of [`tools/build-device.ts`](../tools/build-device.ts).
 
 ## Snapshot phases
 
@@ -235,7 +235,7 @@ repository, and none appears anywhere in its history. Every one of those is stil
 asserting and none of them is asserted.
 
 That the claim survived is the argument for rule 11 in
-[`AGENTS.md`](../../AGENTS.md), from the wrong side: a drifted doc is worse than no doc,
+[`AGENTS.md`](../AGENTS.md), from the wrong side: a drifted doc is worse than no doc,
 because it is believed. It was believed here — a change reached for that harness to test
 new bridge logic against, and found nothing to reach for.
 

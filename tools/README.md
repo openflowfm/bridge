@@ -7,21 +7,20 @@ these execute straight from source.
 amxd.ts                      pack / unpack / inspect .amxd containers  (library + CLI)
 build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
-lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
+dev-bridge.ts                the bridge.js watch loop behind `npm run dev`
 install-device.ts            copies the device into the Ableton User Library, as -qa
-coverage-summary.ts          coverage-summary.json as a build-page table and a shields badge
-record-session.ts            records a real session off the bridge, as test corpus
-mutate.ts                    breaks a file one edit at a time — would its spec notice?
-version.ts                   sets one version across every package.json and lock
+lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
+check-palette.ts             asks a running device for Live's palette and diffs it against core's table
+diag.ts                      sends one diagnostic message to a running device
 ```
 
 ```sh
 npm run qa                  # build + install:device — the device, onto this machine
 npm run install:device      # the device into the User Library as SessionBridge-qa
-npm run build:bridge        # writes bridge/bridge.js (bundled) and bridge/lom.js
-npm run build:device        # writes bridge/SessionBridge.{amxd,maxpat}
-npm run dev:lom-scrape      # writes node_modules/.cache/lom-scraped.md
-npm run dev:version -- <version>         # 0.2.0-dev, 0.2.0-rc.1, 0.2.0 — then commit
+npm run build:bridge        # writes bridge.js (bundled) and lom.js
+npm run build:device        # writes SessionBridge.{amxd,maxpat}
+npm run lom-scrape          # writes node_modules/.cache/lom-scraped.md
+npm version <version> --no-git-tag-version   # 0.2.0-dev, 0.2.0-rc.1, 0.2.0 — then commit
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined files
@@ -30,33 +29,20 @@ node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined f
 **The CLI compares `import.meta.url` against `pathToFileURL(process.argv[1])`, not a
 `file://` template.** `import.meta.url` percent-encodes, so under a path containing a
 space the naive comparison is false and every command becomes a silent no-op that still
-exits 0. This repo lives at `.../The Source/...`; the CLI had never once run here.
+exits 0. This repo was developed under a path with a space in it; the CLI had never once run there.
 
 Type stripping means these files are **not type-checked when they run**.
 `npm run typecheck` covers them via `tools/tsconfig.json`. Keep the syntax erasable —
 no enums, no runtime `namespace`, no decorators.
 
-## The desktop apps
-
-Each app is its own repo now — [set](https://github.com/openflowfm/set#readme),
-[mix](https://github.com/openflowfm/mix#readme), [visuals](https://github.com/openflowfm/visuals#readme)
-— with its own copy of the app driver this repo used to hold. The main process they
-share is [`@openflow/desktop`](https://github.com/openflowfm/desktop#readme).
-
-## The visuals rig in a dedicated Chrome
-
-The visuals tooling, including `npm run show` and the show-browser alternative to the app
-and the Chrome flags it depends on, now lives in its own repo — see
-[openflowfm/visuals](https://github.com/openflowfm/visuals#readme).
-
 ## The LOM reference
 
 `lom-reference.ts` scrapes Cycling '74's LOM page into
 `node_modules/.cache/lom-scraped.md`. Run it after a Live upgrade, then diff it against
-[`bridge/LOM.md`](../bridge/LOM.md) and merge what changed. The download is cached in
+[`LOM.md`](../LOM.md) and merge what changed. The download is cached in
 `node_modules/.cache/lom.html`; delete that to refetch.
 
-**It does not write `bridge/LOM.md`, and must not be changed to.** That file was
+**It does not write `LOM.md`, and must not be changed to.** That file was
 generated once and has been hand-maintained since — it carries the observer-write
 prohibition, the session-ring dead end and the mixer paths this app uses, none of which
 are on the page. Regenerating over it deleted 126 lines of that in a single command,
@@ -304,7 +290,7 @@ within range for its object:
 node --disable-warning=ExperimentalWarning -e '
 const fs=require("fs");
 import("./tools/amxd.ts").then(({unpack})=>{
-  const p=unpack(fs.readFileSync("bridge/SessionBridge.amxd")).patcher.patcher;
+  const p=unpack(fs.readFileSync("SessionBridge.amxd")).patcher.patcher;
   const byId=Object.fromEntries(p.boxes.map(b=>[b.box.id,b.box]));
   let bad=0;
   for(const {patchline:l} of p.lines){
@@ -326,7 +312,7 @@ npm run dev:check-palette
 ```
 
 The script invokes the developer-only LOM sweep, compares every returned RGB value with
-`core/src/livePalette.ts`, and prints the current table if it differs. It creates and
+`@openflow/core`'s `livePalette.ts`, and prints the current table if it differs. It creates and
 removes one scratch MIDI track, so this is an explicit release-maintenance check rather
 than app startup behavior.
 

@@ -15,11 +15,6 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Electron ships a ~200 MB Chromium that no CI job here can run — the
-    # typecheck needs its type declarations and nothing else, and those come
-    # with the package rather than the binary.
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v7
 
@@ -27,46 +22,16 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            bridge/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      # `npm ci` runs the root postinstall, which installs `ws` into
-      # bridge/node_modules. That's load-bearing: build:bridge esbuilds
-      # bridge/src/bridge.ts, and `ws` lives only there, not at the root.
       - run: npm ci
 
       - run: npm run typecheck
-
-      # Coverage rather than a plain run: same tests, V8's own counters, and a
-      # table on the build page instead of a number that only ever existed in
-      # somebody's terminal.
-      - id: coverage
-        run: npm run test:coverage
-
-      # A failing test is exactly when the table is worth reading, and the run
-      # stops at the step above without this — but a report that was never
-      # written because the typecheck failed first is not worth a second error
-      # about a missing file, so the condition is "coverage ran", not "always".
-      - if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
-        run: node --disable-warning=ExperimentalWarning tools/coverage-summary.ts
-
-      # report/ is the vitest ui with the coverage report copied in under
-      # coverage/ — one directory that is both the artifact and the site.
-      - if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-report-${{ github.sha }}
-          path: report/
-          if-no-files-found: error
-          retention-days: 14
 
       # The "must build from a clean tree" rule, enforced rather than
       # remembered. A clean checkout is the only place it's honestly tested —
       # a file that's untracked but imported passes locally and fails here.
       - run: npm run build
-
-      - run: npm run build:chart
 
       # lom.ts has no automated coverage: it needs Live open with the device
       # loaded. Attaching the build to every run is the compensating control —
@@ -75,54 +40,8 @@ jobs:
         with:
           name: SessionBridge-${{ github.sha }}
           path: |
-            bridge/SessionBridge.amxd
-            bridge/bridge.js
-            bridge/lom.js
+            SessionBridge.amxd
+            bridge.js
+            lom.js
           if-no-files-found: error
           retention-days: 14
-
-  # The report at a URL, rather than inside a zip somebody has to download and
-  # unpack: the vitest ui at the site root, and the coverage report it carries
-  # at /coverage/, which is where the badge and the README point.
-  #
-  # `needs: check` on purpose: the artifact uploads even when a test fails, and
-  # a report from a failed run is not one to publish.
-  pages:
-    if: github.event_name == 'push'
-    needs: check
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      pages: write
-      id-token: write
-    # Deploys queue rather than race, and a running one is never cancelled.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/download-artifact@v7
-        with:
-          name: test-report-${{ github.sha }}
-          path: site
-
-      # The vitest ui's own coverage tab belongs to `vitest --ui`, which is a
-      # dev server; the static report has no way through to the coverage it
-      # carries. So the site gets one, appended where the app cannot overwrite
-      # it.
-      - run: |
-          cat >> site/index.html <<'HTML'
-          <a href="coverage/" style="position:fixed;right:12px;bottom:12px;z-index:9;padding:6px 12px;
-             border-radius:6px;background:#1e1e20;color:#c8c8c8;border:1px solid #3a3a3d;
-             font:13px system-ui,sans-serif;text-decoration:none">Coverage &rarr;</a>
-          HTML
-
-      - uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
-
-      - id: deploy
-        uses: actions/deploy-pages@v5
