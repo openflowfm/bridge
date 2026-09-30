@@ -28,7 +28,7 @@
   "dependencies": {
     "@openflow/core": "github:openflowfm/core#685db6fd1a8ba77bb8e575c66935a11fb56acce9",
     "@openflow/protocol": "github:openflowfm/protocol#918e52b61afcc9945d433a445557a3043e532af1",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
