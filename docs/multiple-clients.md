@@ -238,7 +238,7 @@ See *Following Live* below.
 
 ### A structural job of ours mutes the burst it causes
 
-`add_scenes` and `move` both create and delete scenes, and **every one of those trips the
+`add_scenes`, `move` and `keep_scenes` all create or delete scenes, and **every one of those trips the
 `live_set scenes` observer**. Unmuted that is one `changed structure` per scene touched,
 each of which sends every connected client on a full walk — of a set that is halfway
 through being rearranged. Reading a set mid-move is worse than reading it late.

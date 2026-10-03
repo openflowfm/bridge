@@ -14,7 +14,8 @@
 //
 // in:  init | hello | snapshot <reqId> | apply <reqId> <dictName> | observe <0|1>
 //      add_scenes <reqId> <dictName>
-//      move <reqId> <dictName> | palette <reqId> (developer diagnostic only)
+//      move <reqId> <dictName> | keep_scenes <reqId> <dictName>
+//      palette <reqId> (developer diagnostic only)
 //      diag <what> [arg] (developer diagnostic only; answers in the Max window)
 //      playback <verb> <i> <j>
 //      select_scene <scene> | select_track <track> | set_fold <track> <0|1>
@@ -28,6 +29,7 @@
 //      apply_done <reqId> <dict> <ms> | add_scenes_done <reqId> <dict> <ms>
 //      move_progress <reqId> <n> <total>
 //      move_done <reqId> <dict> <ms> | move_clips_done <reqId> <dict> <ms>
+//      keep_scenes_done <reqId> <dict> <ms>
 //      palette_done <reqId> <dict> | changed <kind> | delta <dict>
 //      set_info_done <dict>
 //      play_state <isPlaying> <t0 playing> <t0 fired> <t1 playing> … | err <reqId> <msg>
@@ -164,7 +166,8 @@ var mixerDirty = false;
 var lastMixerKey = '';
 var job: ApplyJob | null = null;
 /**
- * A structural job of our own is running — `add_scenes` or `move`.
+ * A structural job of our own is running — `add_scenes`, `move` or
+ * `keep_scenes`.
  *
  * Both create and delete scenes, and each `create_scene` / `delete_scene` trips
  * the `live_set scenes` observer. Left unmuted that is one `changed structure`
@@ -1325,6 +1328,12 @@ applyTask.interval = 2;
 
 interface MoveJob {
   reqId: number;
+  /**
+   * Which request this is running for. `keep_scenes` runs the same three-phase
+   * job — create, copy, delete — and differs only in what it checked before
+   * starting and in the message it answers with.
+   */
+  kind: 'move' | 'keep_scenes';
   plan: OpenFlow.MovePlan;
   /** Position across create → steps → remove, as one flat index. */
   i: number;
@@ -1449,42 +1458,133 @@ function move(reqId: number, dictName: string): void {
     }
     if (!create.length) return fail(reqId, 'move: empty plan');
 
-    // Group the whole move into one entry in Live's undo history if Live will
-    // let us. Undocumented (see bridge/LOM.md) and therefore wrapped: if it
-    // isn't there, the move still runs, it just isn't undoable from Live.
-    let undoStep = false;
-    try {
-      const song = at('live_set');
-      song.call('begin_undo_step');
-      undoStep = true;
-    } catch (e) {
-      post('openflow move: begin_undo_step unavailable — ' + describe(e) + '\n');
-    }
-
-    // A reorder is a build-then-delete pass, so it trips the scenes observer
-    // once per scene created and once per scene deleted. Mute the burst for the
-    // duration; `finishMove` releases it and Node emits the one event that
-    // matters. Set before the first `create_scene`, not after.
-    structuralJob = true;
-    structureSettleTask.cancel();
-
-    moveJob = {
-      reqId: reqId,
-      plan: { create: create, steps: steps, remove: remove },
-      i: 0,
-      created: 0,
-      copied: 0,
-      removed: 0,
-      failed: 0,
-      undoStep: undoStep,
-      t0: Date.now(),
-    };
-    moveTask.repeat();
+    startSceneJob(reqId, 'move', { create: create, steps: steps, remove: remove });
   } catch (e) {
     moveJob = null;
     // The mute is set just above, so a throw between there and `repeat()` would
     // leave it on for the rest of the session — and a stuck mute means no client
     // is ever told the set restructured again. Silent, and permanent.
+    structuralJob = false;
+    structureSettleTask.cancel();
+    fail(reqId, e);
+  }
+}
+
+/**
+ * Open the undo step, mute the structure burst and start the three-phase job.
+ * Shared by `move` and `keep_scenes`, which differ only in what they check
+ * first. Callers catch a throw from here and release the mute — see `move`.
+ */
+function startSceneJob(
+  reqId: number,
+  kind: 'move' | 'keep_scenes',
+  plan: OpenFlow.MovePlan,
+): void {
+  // Group the whole job into one entry in Live's undo history if Live will
+  // let us. Undocumented (see bridge/LOM.md) and therefore wrapped: if it
+  // isn't there, the job still runs, it just isn't undoable from Live.
+  let undoStep = false;
+  try {
+    const song = at('live_set');
+    song.call('begin_undo_step');
+    undoStep = true;
+  } catch (e) {
+    post('openflow ' + kind + ': begin_undo_step unavailable — ' + describe(e) + '\n');
+  }
+
+  // A reorder is a build-then-delete pass, so it trips the scenes observer
+  // once per scene created and once per scene deleted. Mute the burst for the
+  // duration; `finishMove` releases it and Node emits the one event that
+  // matters. Set before the first `create_scene`, not after.
+  structuralJob = true;
+  structureSettleTask.cancel();
+
+  moveJob = {
+    reqId: reqId,
+    kind: kind,
+    plan: plan,
+    i: 0,
+    created: 0,
+    copied: 0,
+    removed: 0,
+    failed: 0,
+    undoStep: undoStep,
+    t0: Date.now(),
+  };
+  moveTask.repeat();
+}
+
+// --- keeping scenes ---------------------------------------------------
+// "New show": a chosen running order put in place and every other scene
+// deleted. The plan is `core/src/sceneMove.ts`'s `planSceneKeep`, already
+// checked against the contract in bridge.ts; it runs as the move job does —
+// create, copy, delete — with the same rule that a single failed copy skips the
+// whole delete pass, so a failure leaves extra scenes and never missing ones.
+//
+// Unlike a move, a keep plan deletes scenes it never copied, so the one check
+// that matters most is made HERE, against Live itself, immediately before the
+// first create: the set still has `sceneCount` scenes, carrying exactly
+// `sceneNames` in that order. bridge.ts compared them with the set it holds,
+// but that copy can lag Live; a rename or reorder since the client's snapshot
+// would shift every index in `remove` onto the wrong songs.
+
+function keep_scenes(reqId: number, dictName: string): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  const busyWith = blockedBy();
+  if (busyWith) return fail(reqId, busyWith);
+  try {
+    const d = new Dict(dictName);
+    const raw = d.stringify();
+    let parsed: { keepPlan?: OpenFlow.KeepPlan };
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        'could not parse ' + dictName + ' as JSON: ' + String(raw).substring(0, 200),
+      );
+    }
+
+    const plan = parsed.keepPlan;
+    if (!plan) throw new Error('keepScenes: no plan in ' + dictName + ' — refusing');
+    const sceneCount = Number(plan.sceneCount);
+    const create = asList<number>(plan.create);
+    const steps = asList<OpenFlow.MoveStep>(plan.steps);
+    const remove = asList<number>(plan.remove);
+    // A one-element string array can arrive from the Dict as a bare string, so
+    // read it through asList like every other list here.
+    const names = asList<string>(plan.sceneNames).map(String);
+
+    if (sceneCount + create.length - remove.length < 1) {
+      throw new Error('keepScenes: the plan would leave no scene — refusing');
+    }
+
+    // Own cursor, not at(): the scene reads below reposition the shared one.
+    const song = new LiveAPI(function () {}, 'live_set');
+    if (!exists(song)) throw new Error('keepScenes: live_set did not resolve — refusing');
+    const live = song.getcount('scenes');
+    if (live !== sceneCount || names.length !== sceneCount) {
+      throw new Error(
+        'keepScenes: the plan is for ' + sceneCount + ' scenes but Live has ' + live +
+          ' — refusing. Take a new snapshot and plan again',
+      );
+    }
+    const scene = new LiveAPI(function () {}, 'live_set');
+    for (let s = 0; s < live; s++) {
+      scene.goto('live_set scenes ' + s);
+      const name = gstr(scene, 'name');
+      if (name !== names[s]) {
+        throw new Error(
+          'keepScenes: scene ' + (s + 1) + ' is named ' + JSON.stringify(name) +
+            ' in Live but ' + JSON.stringify(names[s]) + ' in the plan — refusing. ' +
+            'Take a new snapshot and plan again',
+        );
+      }
+    }
+
+    startSceneJob(reqId, 'keep_scenes', { create: create, steps: steps, remove: remove });
+  } catch (e) {
+    moveJob = null;
+    // As in `move`: a throw after the mute is set must not leave it on.
     structuralJob = false;
     structureSettleTask.cancel();
     fail(reqId, e);
@@ -1541,7 +1641,7 @@ function moveStep(): void {
           } catch (e) {
             j.failed++;
             post(
-              'openflow move: clip ' + tracks[k] + '/' + step.from + ' → ' + step.to +
+              'openflow ' + j.kind + ': clip ' + tracks[k] + '/' + step.from + ' → ' + step.to +
                 ' failed: ' + describe(e) + '\n',
             );
           }
@@ -1551,14 +1651,16 @@ function moveStep(): void {
         // Nothing gets deleted if a single clip didn't make it. The scenes are
         // already duplicated at this point, so stopping here leaves the set
         // messy but complete — every clip still exists somewhere. Deleting
-        // anyway would turn a recoverable mess into lost work.
+        // anyway would turn a recoverable mess into lost work. For keep_scenes
+        // this also spares the dropped scenes and the created blanks: a failed
+        // keep leaves extra scenes, never missing ones.
         if (j.failed) break;
         song.call('delete_scene', j.plan.remove[j.i - nCreate - nSteps]);
         j.removed++;
       }
     } catch (e) {
       j.failed++;
-      post('openflow move: step ' + j.i + ' failed: ' + describe(e) + '\n');
+      post('openflow ' + j.kind + ': step ' + j.i + ' failed: ' + describe(e) + '\n');
     }
   }
 
@@ -1579,7 +1681,7 @@ function finishMove(): void {
     try {
       at('live_set').call('end_undo_step');
     } catch (e) {
-      post('openflow move: end_undo_step failed — ' + describe(e) + '\n');
+      post('openflow ' + j.kind + ': end_undo_step failed — ' + describe(e) + '\n');
     }
   }
 
@@ -1597,12 +1699,15 @@ function finishMove(): void {
   structureSettleTask.cancel();
   structureSettleTask.schedule(100);
   publish(RESULT_DICT, result);
-  outlet(0, 'move_done', j.reqId, RESULT_DICT, ms);
+  outlet(0, j.kind === 'keep_scenes' ? 'keep_scenes_done' : 'move_done', j.reqId, RESULT_DICT, ms);
 
   if (result.failed) {
     post(
-      'openflow move: ' + result.failed + ' operation(s) failed — the originals were NOT ' +
-        'deleted. The set now holds both copies.\n',
+      'openflow ' + j.kind + ': ' + result.failed + ' operation(s) failed — ' +
+        (j.kind === 'keep_scenes'
+          ? 'NOTHING was deleted. The set holds the new order, the created blanks and ' +
+            'every original scene.\n'
+          : 'the originals were NOT deleted. The set now holds both copies.\n'),
     );
   }
 }

@@ -20,6 +20,7 @@ lom.js     ──[s ---openflow-to-node]──> bridge.js
 | `apply <reqId> <dictName>` | execute an op batch — `{ ops, sceneOps }` |
 | `add_scenes <reqId> <dictName>` | insert and configure blank scenes — `{ addition }` |
 | `move <reqId> <dictName>` | reorder scenes — `{ plan }`. See *Reordering scenes* |
+| `keep_scenes <reqId> <dictName>` | put a running order in place and delete every other scene — `{ keepPlan }`. Re-checks every scene name against Live first. See *Reordering scenes* |
 | `palette <reqId>` | developer-only sweep of Live's color palette |
 | `diag <what> [arg]` | developer-only probes — see *Diagnostics* below. Answers go to the Max window, so there's no reply |
 | `playback <verb> <i> <j>` | fire or stop something — see below |
@@ -60,6 +61,7 @@ which, and what it cost to get wrong, is under *multiple clients*.
 | `add_scenes_done <reqId> <dict> <ms>` | |
 | `move_progress <reqId> <done> <total>` | |
 | `move_done <reqId> <dict> <ms>` | |
+| `keep_scenes_done <reqId> <dict> <ms>` | same counts as `move_done`; `failed > 0` means nothing was deleted |
 | `palette_done <reqId> <dict>` | |
 | `changed <kind>` | observer fired |
 | `delta <dict>` | a partial re-read, pushed after a change in Live |
@@ -220,7 +222,7 @@ with no restart on exit, so that is the device gone for the rest of the show —
 Each of them wraps its body and reports through `lomReplyFailed`, which posts to the Max
 window and answers the waiting client with an `error` rather than leaving it on a request
 timeout — plus every joiner riding the same walk. Where a write may have landed anyway
-(`add_scenes_done`, `move_done`, `move_clips_done`), the "the set moved, drop what you
+(`add_scenes_done`, `move_done`, `keep_scenes_done`, `move_clips_done`), the "the set moved, drop what you
 hold" half stays *outside* the catch: a reply that could not be read says nothing about
 whether Live took the write.
 

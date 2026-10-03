@@ -59,3 +59,42 @@ be a `call` on the wrong object. Anywhere two objects are live at once here, bot
 `begin_undo_step` does anything, and whether the time-signature writes land. The failure
 mode to watch for is the one this file has produced repeatedly — the write silently does
 nothing and the next snapshot reports the old value. Try it on a copy of a set first.
+
+## Keeping scenes — "new show"
+
+`keepScenes` puts a chosen running order in place and **deletes every scene not in it**.
+The plan is `planSceneKeep` in `core/src/sceneMove.ts`; the wire contract, including the
+full list of checks, is `keepScenes` in
+[`@openflow/protocol`](https://github.com/openflowfm/protocol#keepscenes). It is a message
+of its own rather than a looser `move`, so `move`'s create-equals-delete refusal above
+stays exactly as strict: a drag can never reach a plan that shrinks the set.
+
+It runs as the **same job as a move** — `lom.ts`'s `keep_scenes` hands the plan to the
+move task, tagged so it answers `keep_scenes_done` instead of `move_done` — so the passes,
+the undo step, the muted observer burst and `notifydeleted`'s cleanup are all the move's.
+`remove` holds the originals of moved scenes *and* every dropped scene; the dropped ones
+are never copied.
+
+What is different is what has to be true before it starts, because a keep plan deletes
+scenes it never copied:
+
+- **`bridge.ts` refuses a malformed plan** before anything is staged — `keepPlanProblem`
+  checks every rule the protocol lists (ascending `create`, strictly descending, in-range
+  `remove` that names no created blank, every step a created blank fed from a removed
+  scene, at least one scene left) and that `sceneCount` and `sceneNames` match the set it
+  holds. With nothing held it skips that comparison rather than refusing, because of the
+  next check.
+- **`lom.ts` re-reads the scene count and every scene's name from Live**, immediately
+  before the first `create_scene`, and refuses on any difference. That is the check that
+  decides: the held set can lag Live, and a same-count rename or reorder since the
+  client's snapshot would shift every index in `remove` onto the wrong songs.
+- **A single failed copy skips the whole delete pass** — the moved originals, the dropped
+  scenes *and* the created blanks all stay. `scenesKept.failed > 0` therefore means extra
+  scenes for the user to tidy in Live, never missing ones.
+
+`keep_scenes_done` answers `scenesKept`, then drops the held set and broadcasts one
+`changed structure`, exactly as `move_done` does.
+
+Unverified against Live, like the move: in particular the name comparison assumes
+`Scene.name` reads back through `gstr` exactly as the snapshot read it, which is the same
+path, but a name with characters Max treats specially has not been tried.
