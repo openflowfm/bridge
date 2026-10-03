@@ -128,7 +128,7 @@ are non-obvious.
 | [LOM gotchas](docs/lom-gotchas.md) | **`lom.ts`, at all.** Start here | `src/lom.ts`, [`LOM.md`](LOM.md) |
 | [message protocol](docs/message-protocol.md) | anything crossing Node ↔ `[v8]` — atoms, Dicts, errors | `src/bridge.ts`, `src/lom.ts`, [`@openflow/protocol`](https://github.com/openflowfm/protocol#readme) |
 | [following Live](docs/following-live.md) | the cursor observers, deltas, or what a re-read publishes — including into the set the bridge holds | `src/lom.ts`, core's `snapshotDelta.ts` |
-| [reordering scenes](docs/reordering-scenes.md) | **the one write that can damage a set** — the four passes and their guards | `src/lom.ts`, core's `sceneMove.ts` |
+| [reordering scenes](docs/reordering-scenes.md) | **the writes that can damage a set** — `move`'s four passes and their guards, and `keepScenes` ("new show"), which deletes every scene not kept | `src/bridge.ts`, `src/lom.ts`, core's `sceneMove.ts` |
 | [multiple clients](docs/multiple-clients.md) | **the set the bridge holds and serves without a walk**, broadcast, or anything assuming one UI | `src/bridge.ts`, core's `setModel.ts` |
 | [device state and palette](docs/device-state.md) | set-owned configuration, the hidden parameter, the color table | `src/bridge.ts`, `src/lom.ts`, core's `livePalette.ts` |
 | [build and load](docs/build-and-load.md) | the compile targets, what ships, loading the device in Live | `tsconfig.node.json`, `tsconfig.v8.json`, `tools/build-bridge.ts` |

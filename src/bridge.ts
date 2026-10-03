@@ -1264,6 +1264,73 @@ Max.addHandler('push_song', (i: number) => {
   }
 });
 
+/**
+ * Why a `keepScenes` plan must be refused, or `null` when it may run.
+ *
+ * Every check `@openflow/protocol` lists under `keepScenes`, made against the
+ * plan as it arrived off the wire — nothing here is arithmetic, only checks that
+ * the plan `planSceneKeep` produced is internally consistent and was built
+ * against the set we hold. A `KeepPlan` deletes scenes it never copies, so a
+ * plan that is wrong in any of these ways deletes songs rather than failing.
+ *
+ * With nothing held there is no copy to compare names against, and the plan is
+ * passed on: `lom.ts` re-reads every scene name from Live itself immediately
+ * before the first create, which is the check that decides.
+ */
+function keepPlanProblem(plan: unknown, current: HeldSet | null): string | null {
+  if (!plan || typeof plan !== 'object') return 'no plan';
+  const p = plan as Partial<OpenFlow.KeepPlan>;
+  const isIndex = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+  const { sceneCount, create, steps, remove, sceneNames } = p;
+
+  if (!isIndex(sceneCount)) return 'sceneCount is not a scene count';
+  if (!Array.isArray(create) || !create.every(isIndex)) return 'create is not a list of indexes';
+  if (!Array.isArray(remove) || !remove.every(isIndex)) return 'remove is not a list of indexes';
+  if (!Array.isArray(steps)) return 'steps is not a list';
+  if (!Array.isArray(sceneNames) || !sceneNames.every((n) => typeof n === 'string')) {
+    return 'sceneNames is not a list of names';
+  }
+  if (sceneNames.length !== sceneCount) {
+    return `sceneNames has ${sceneNames.length} names for ${sceneCount} scenes`;
+  }
+
+  for (let k = 0; k < create.length; k++) {
+    if (k > 0 && create[k] <= create[k - 1]) return 'create is not strictly ascending';
+    // Blank k is inserted into a set that already holds k of them.
+    if (create[k] > sceneCount + k) return `create index ${create[k]} is out of range`;
+  }
+  const blanks = new Set(create);
+  const total = sceneCount + create.length;
+  for (let k = 0; k < remove.length; k++) {
+    if (k > 0 && remove[k] >= remove[k - 1]) return 'remove is not strictly descending';
+    if (remove[k] >= total) return `remove index ${remove[k]} is out of range`;
+    if (blanks.has(remove[k])) return `remove index ${remove[k]} is a created blank`;
+  }
+  const removed = new Set(remove);
+  for (const step of steps) {
+    if (!step || !isIndex(step.from) || !isIndex(step.to)) return 'a step has no from/to';
+    if (!Array.isArray(step.tracks) || !step.tracks.every(isIndex)) {
+      return 'a step has no track list';
+    }
+    if (!blanks.has(step.to)) return `step target ${step.to} is not a created blank`;
+    if (!removed.has(step.from)) return `step source ${step.from} is not removed`;
+  }
+  if (total - remove.length < 1) return 'the plan would leave no scene';
+
+  if (current) {
+    const scenes = current.snapshot.scenes;
+    if (scenes.length !== sceneCount) {
+      return `the plan is for ${sceneCount} scenes but the set has ${scenes.length}`;
+    }
+    for (let s = 0; s < sceneCount; s++) {
+      if (scenes[s].name !== sceneNames[s]) {
+        return `scene ${s + 1} is named "${scenes[s].name}" in the set but "${sceneNames[s]}" in the plan`;
+      }
+    }
+  }
+  return null;
+}
+
 async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
   switch (m.type) {
     case 'snapshot': {
@@ -1404,6 +1471,38 @@ async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
         );
       }
       Max.outlet('move', reqId, 'openflow_ops');
+      break;
+    }
+    // "New show": a running order put in place and every other scene deleted.
+    // Its own message rather than a looser `move`, so `move`'s create === remove
+    // refusal above stays exactly as strict — see `keepScenes` in the protocol.
+    // Staged under its own key (`keepPlan`, not `plan`) so `lom.ts`'s `move`
+    // can never pick up a keep plan, nor the other way round.
+    case 'keepScenes': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const problem = keepPlanProblem(m.plan, held);
+      if (problem) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: `refusing to keep scenes — ${problem}. Take a new snapshot and plan again`,
+        });
+      }
+      const { sceneCount, create, steps, remove, sceneNames } = m.plan;
+      const reqId = track(ws, m);
+      try {
+        await Max.setDict('openflow_ops', {
+          keepPlan: { sceneCount, create, steps, remove, sceneNames },
+        });
+      } catch (e) {
+        pending.delete(reqId);
+        throw new Error(
+          `could not stage a keep of ${sceneCount - remove.length + create.length} scenes ` +
+            `into openflow_ops — ${describe(e)}. The dict must exist before Node can ` +
+            `write it; lom.ts creates it on init.`,
+        );
+      }
+      Max.outlet('keep_scenes', reqId, 'openflow_ops');
       break;
     }
     // Slots, not scenes — see `moveClips` in the protocol. Shares `openflow_ops` with
@@ -2215,6 +2314,32 @@ Max.addHandler('move_done', async (reqId: number, dictName: string, ms: number) 
   // during the move — which had them walking a set that was halfway rearranged.
   // That burst is muted in `lom.ts` now, and this is the one event in its place.
   dropHeld('scenes were reordered, which renumbers the set');
+  broadcast({ type: 'changed', kind: 'structure' });
+  requestInternalSnapshot();
+});
+
+Max.addHandler('keep_scenes_done', async (reqId: number, dictName: string, ms: number) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  try {
+    const r: {
+      created: number; copied: number; removed: number;
+      failed: number; undoStep: boolean;
+    } = await Max.getDict(dictName);
+    Max.post(
+      `keepScenes: ${r.created} scenes created, ${r.copied} clips copied, ` +
+        `${r.removed} deleted, ${r.failed} failed, ${ms}ms` +
+        (r.failed ? ' — NOTHING deleted' : '') +
+        (r.undoStep ? ' (one undo step)' : ' (NOT undoable in Live)'),
+    );
+    send(req?.ws, { type: 'scenesKept', id: req?.clientId, lomMs: ms, ...r });
+  } catch (e) {
+    lomReplyFailed('keep_scenes_done', reqId, req, e);
+  }
+  // Exactly as `move_done`: outside the catch, once, after the terminal result.
+  // Scenes were created and very likely deleted whether or not the counts came
+  // back, so every index any client holds may now name a different song.
+  dropHeld('scenes were kept and the rest deleted, which renumbers the set');
   broadcast({ type: 'changed', kind: 'structure' });
   requestInternalSnapshot();
 });
