@@ -1558,6 +1558,38 @@ function keep_scenes(reqId: number, dictName: string): void {
       throw new Error('keepScenes: the plan would leave no scene — refusing');
     }
 
+    // Defence in depth: bridge.ts's keepPlanProblem already checked the shape,
+    // but this is the last stop before Live, so re-check it here inline.
+    const total = sceneCount + create.length;
+    const blank: { [k: number]: boolean } = {};
+    for (let c = 0; c < create.length; c++) {
+      const v = create[c];
+      if (!(v === Math.floor(v)) || v < 0 || v > sceneCount + c || (c > 0 && v <= create[c - 1])) {
+        throw new Error('keepScenes: create is not strictly ascending and in range — refusing');
+      }
+      blank[v] = true;
+    }
+    const removing: { [k: number]: boolean } = {};
+    for (let r = 0; r < remove.length; r++) {
+      const v = remove[r];
+      if (
+        !(v === Math.floor(v)) || v < 0 || v >= total || blank[v] ||
+        (r > 0 && v >= remove[r - 1])
+      ) {
+        throw new Error(
+          'keepScenes: remove is not strictly descending, in range and free of blanks — refusing',
+        );
+      }
+      removing[v] = true;
+    }
+    for (let s = 0; s < steps.length; s++) {
+      if (!blank[Number(steps[s].to)] || !removing[Number(steps[s].from)]) {
+        throw new Error(
+          'keepScenes: step ' + s + ' must copy from a removed scene into a created blank — refusing',
+        );
+      }
+    }
+
     // Own cursor, not at(): the scene reads below reposition the shared one.
     const song = new LiveAPI(function () {}, 'live_set');
     if (!exists(song)) throw new Error('keepScenes: live_set did not resolve — refusing');
@@ -1632,6 +1664,9 @@ function moveStep(): void {
         song.call('create_scene', j.plan.create[j.i]);
         j.created++;
       } else if (j.i < nCreate + nSteps) {
+        // A failed create shifts every later index, so `step.to` may no longer
+        // name a blank — copying would overwrite a kept scene. Stop here.
+        if (j.created < nCreate) break;
         const step = j.plan.steps[j.i - nCreate];
         const tracks = asList<number>(step.tracks);
         for (let k = 0; k < tracks.length; k++) {
@@ -1654,7 +1689,7 @@ function moveStep(): void {
         // anyway would turn a recoverable mess into lost work. For keep_scenes
         // this also spares the dropped scenes and the created blanks: a failed
         // keep leaves extra scenes, never missing ones.
-        if (j.failed) break;
+        if (j.failed || j.created < nCreate) break;
         song.call('delete_scene', j.plan.remove[j.i - nCreate - nSteps]);
         j.removed++;
       }
@@ -1667,7 +1702,11 @@ function moveStep(): void {
   outlet(0, 'move_progress', j.reqId, j.i, total);
   // `j.failed` short-circuits the delete pass above without advancing `i`, so
   // check for that as well as for reaching the end.
-  if (j.i >= total || (j.failed && j.i >= nCreate + nSteps)) {
+  if (
+    j.i >= total ||
+    (j.created < nCreate && j.i >= nCreate) ||
+    (j.failed && j.i >= nCreate + nSteps)
+  ) {
     moveTask.cancel();
     finishMove();
   }
