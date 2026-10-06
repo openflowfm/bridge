@@ -9,6 +9,8 @@ build-bridge.ts              bundles bridge.js — ws inlined
 build-device.ts              generates the patcher and packs the device
 dev-bridge.ts                the bridge.js watch loop behind `npm run dev`
 install-device.ts            copies the device into the Ableton User Library, as -qa
+build-probe.ts               generates and packs OpenFlowProbe.amxd from probe/
+install-probe.ts             copies the probe device into the Ableton User Library
 lom-reference.ts             rescrapes the LOM page to a scratch file, for diffing
 check-palette.ts             asks a running device for Live's palette and diffs it against core's table
 diag.ts                      sends one diagnostic message to a running device
@@ -19,12 +21,22 @@ npm run qa                  # build + install:device — the device, onto this m
 npm run install:device      # the device into the User Library as SessionBridge-qa
 npm run build:bridge        # writes bridge.js (bundled) and lom.js
 npm run build:device        # writes SessionBridge.{amxd,maxpat}
+npm run build:probe         # writes OpenFlowProbe.amxd
+npm run install:probe       # the probe device into the User Library
 npm run lom-scrape          # writes node_modules/.cache/lom-scraped.md
 npm version <version> --no-git-tag-version   # 0.2.0-dev, 0.2.0-rc.1, 0.2.0 — then commit
 node tools/amxd.ts unpack <in.amxd> <out.maxpat>
 node tools/amxd.ts pack <in.maxpat> <out.amxd> [audio|midi|instrument]
 node tools/amxd.ts inspect <in.amxd>          # list a frozen device's inlined files
 ```
+
+**`OpenFlowProbe.amxd` is a second, separate device**, used by master[flow]: an inert
+audio passthrough that measures the signal at its place in a chain (loudness, peaks,
+1/3-octave bands) and reports to the bridge over global sends. Unlike SessionBridge you
+can load as many as you like. Its patcher, analysis and tests live in `probe/` — see
+[`probe/README.md`](../probe/README.md); `build-probe.ts` and `install-probe.ts` are its
+counterparts of the two device scripts above, and the Max interface it shares with the
+bridge is in [message protocol](../docs/message-protocol.md#probe-devices--bridge).
 
 **The CLI compares `import.meta.url` against `pathToFileURL(process.argv[1])`, not a
 `file://` template.** `import.meta.url` percent-encodes, so under a path containing a

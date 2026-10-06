@@ -146,6 +146,7 @@ are non-obvious.
 | [multiple clients](docs/multiple-clients.md) | **the set the bridge holds and serves without a walk**, broadcast, the roster on the device face, probe passes, or anything assuming one UI | `src/bridge.ts`, core's `setModel.ts` |
 | [device state and palette](docs/device-state.md) | set-owned configuration, the hidden parameter, the color table | `src/bridge.ts`, `src/lom.ts`, core's `livePalette.ts` |
 | [build and load](docs/build-and-load.md) | the compile targets, what ships, loading the device in Live | `tsconfig.node.json`, `tsconfig.v8.json`, `tools/build-bridge.ts` |
+| [the probe](probe/README.md) | `OpenFlowProbe.amxd` — what it measures, its patcher and its tests | `probe/`, `tools/build-probe.ts`, `tools/install-probe.ts` |
 | [diagnostics](docs/diagnostics.md) | the diagnostic surfaces, snapshot phases, or what's testable without Live | `src/bridge.ts`, `tools/diag.ts` |
 
 [`LOM.md`](LOM.md) is the Live Object Model reference itself — every class, property and
@@ -154,5 +155,5 @@ version we run. **Look things up there; don't guess**, and don't assume a proper
 read is one you can write.
 
 [`tools/README.md`](tools/README.md) covers the `.amxd` container format, the device
-generator and the LOM scrape. [`AGENTS.md`](AGENTS.md) is the startup read for anyone —
+generator, the probe's build and install, and the LOM scrape. [`AGENTS.md`](AGENTS.md) is the startup read for anyone —
 person or agent — changing this code.
