@@ -1,0 +1,6 @@
+{
+  "name": "@openflow/bridge-probe",
+  "private": true,
+  "type": "module",
+  "description": "Marks probe/ as ES modules, as tools/package.json does for tools/. The repo root is CommonJS for bridge.js's sake."
+}

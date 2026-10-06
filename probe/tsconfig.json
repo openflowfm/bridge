@@ -1,0 +1,18 @@
+{
+  // The probe's DSP math, its v8 runtime and their tests. Not covered by
+  // tools/tsconfig.json beyond what tools/build-probe.ts imports, so it is
+  // checked on its own: `npx tsc -p probe/tsconfig.json`.
+  //
+  // Node types are fine here even for the v8 runtime: nothing in src/ touches
+  // a Max global. main.ts receives Max's Buffer, Dict, Task and outlet from the
+  // script tail build-probe.ts appends, which is plain JS.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
