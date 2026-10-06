@@ -175,14 +175,36 @@ describe("true peak", () => {
     close(db(truePeak(x)), 0, 0.2, "true peak dB");
   });
 
-  it("reads sines from 100 Hz to 0.8×Nyquist within −0.6/+0.3 dB", () => {
+  // The README's claim, exactly: a steady tone reads within ±0.2 dB up to
+  // 0.8×Nyquist. (Measured: 0 to +0.1 dB.)
+  it("reads steady sines from 100 Hz to 0.8×Nyquist within ±0.2 dB", () => {
     const sr = 48000;
     for (let hz = 100; hz <= 0.8 * (sr / 2); hz *= 1.05) {
       for (const phase of [0, 0.4, 1.3, 2.9]) {
         const d = db(truePeak(sine(hz, sr, 4800, 0.5, phase, 480)) / 0.5);
-        assert.ok(d >= -0.6 && d <= 0.3, `${hz.toFixed(0)} Hz phase ${phase}: ${d.toFixed(3)} dB`);
+        assert.ok(Math.abs(d) <= 0.2, `${hz.toFixed(0)} Hz phase ${phase}: ${d.toFixed(3)} dB`);
       }
     }
+  });
+
+  // A single isolated crest can fall between two 4× points. The README states
+  // the bound: 20·log10(cos(π·f / (4·fs))), −0.43 dB at 0.8×Nyquist. Place the
+  // crest exactly midway between output points to hit it.
+  it("under-reads an isolated crest by no more than the 4× grid allows", () => {
+    const sr = 48000;
+    const hz = 0.8 * (sr / 2);
+    const n = 64;
+    const centre = 32 + 1 / 8; // half a 4× step past a sample: worst case
+    const x = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      // One cycle under a narrow raised-cosine bump: a lone peak, not a tone.
+      const t = i - centre;
+      const w = Math.abs(t) < 6 ? 0.5 + 0.5 * Math.cos((Math.PI * t) / 6) : 0;
+      x[i] = 0.5 * w * Math.cos((2 * Math.PI * hz * t) / sr);
+    }
+    const bound = 20 * Math.log10(Math.cos((Math.PI * hz) / (4 * sr)));
+    const d = db(truePeak(x) / 0.5);
+    assert.ok(d >= bound - 0.15 && d <= 0.2, `${d.toFixed(3)} dB vs bound ${bound.toFixed(3)}`);
   });
 
   it("is never below the sample peak", () => {

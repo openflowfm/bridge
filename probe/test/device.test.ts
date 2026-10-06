@@ -20,9 +20,9 @@ import {
   H_HEAD,
   H_SR,
   HEAD_MOD,
-  SLOTS,
+  CELLS,
   STATS_FRAMES,
-  slotFrame,
+  cellFrame,
   splitHiLo,
   type Block,
 } from '../src/layout.ts';
@@ -144,7 +144,7 @@ function rig(randoms: number[] = []): Rig {
       return fresh.filter(([i]) => outlet === undefined || i === outlet).map(([, a]) => a);
     },
     write(count, n) {
-      stats.data[slotFrame(count % SLOTS) + F_N] = n;
+      stats.data[cellFrame(count % CELLS) + F_N] = n;
       stats.data[H_HEAD] = (count + 1) % HEAD_MOD;
     },
   };
@@ -279,10 +279,10 @@ test('blocks are read once, only after gen~ mirrors the epoch', () => {
 test('the head counter wraps at HEAD_MOD without losing or repeating a block', () => {
   const t = ready();
   listening(t);
-  // Walk the reader up to just short of the wrap, SLOTS at a time.
+  // Walk the reader up to just short of the wrap, CELLS at a time.
   let c = 0;
   while (c < HEAD_MOD - 3) {
-    const step = Math.min(SLOTS, HEAD_MOD - 3 - c);
+    const step = Math.min(CELLS, HEAD_MOD - 3 - c);
     for (let i = 0; i < step; i++) t.write(c++, 1);
     t.probe.poll();
   }
@@ -295,15 +295,15 @@ test('the head counter wraps at HEAD_MOD without losing or repeating a block', (
   assert.deepEqual(t.posts, []);
 });
 
-test('an overrun skips the lost blocks and reads the newest SLOTS', () => {
+test('an overrun skips the lost blocks and reads the newest CELLS', () => {
   const t = ready();
   listening(t);
-  for (let c = 0; c < SLOTS + 5; c++) t.write(c, c);
+  for (let c = 0; c < CELLS + 5; c++) t.write(c, c);
   t.probe.poll();
   const got = blocksRead(t);
-  assert.equal(got.length, SLOTS);
+  assert.equal(got.length, CELLS);
   assert.equal(got[0], 5);
-  assert.equal(got[SLOTS - 1], SLOTS + 4);
+  assert.equal(got[CELLS - 1], CELLS + 4);
   assert.match(t.posts.join('\n'), /lost 5 blocks/);
 });
 
@@ -372,6 +372,35 @@ test('listen 0 stops gen~ and the final report comes two polls later, then nothi
   for (let i = 0; i < REPORT_EVERY * 2; i++) t.probe.poll();
   assert.deepEqual(t.take(0), []);
   assert.deepEqual(t.out.at(-1)?.[1], ['set', 'Idle']);
+});
+
+test('listen 1 while stopping finishes the old pass with its final report, then starts', () => {
+  const t = ready();
+  listening(t, 2);
+  t.write(0, 1);
+  t.probe.poll();
+  t.take();
+  t.probe.listen('pkey', 2, 0);
+  t.write(1, 7); // the flushed tail landed before the new listen
+  t.probe.listen('pkey', 3, 1);
+  const msgs = t.take();
+  const finalAt = msgs.findIndex((m) => m[0] === 'report');
+  const epochAt = msgs.findIndex((m) => m[0] === 'epoch');
+  assert.ok(finalAt >= 0 && finalAt < epochAt, JSON.stringify(msgs));
+  assert.deepEqual(msgs[finalAt].slice(0, 4), ['report', 'pkey', 2, 1]);
+  assert.equal((t.dicts.get(msgs[finalAt][4] as string) as ProbeReport).seconds, 2);
+  assert.deepEqual(blocksRead(t), [1, 7]);
+  // No second final for pass 2 once the countdown would have run out.
+  for (let i = 0; i < 3; i++) t.probe.poll();
+  assert.ok(!t.take(0).some((m) => m[0] === 'report' && m[2] === 2 && m[3] === 1));
+});
+
+test('report dicts carry the liveId, so a duplicate sharing the key never collides', () => {
+  const t = ready();
+  listening(t, 1);
+  for (let i = 0; i < REPORT_EVERY; i++) t.probe.poll();
+  const [report] = t.take(0);
+  assert.match(report[4] as string, /^openflow-probe-pkey-7-\d+$/);
 });
 
 test('a final report with no sample rate seen is an empty, NaN-free report', () => {

@@ -47,7 +47,7 @@ import {
   HEAD_MOD,
   HEADER,
   SECTIONS,
-  SLOTS,
+  CELLS,
   STRIDE,
   TP_FACTOR,
   TP_TAPS,
@@ -79,9 +79,9 @@ const add = (field: number, expr: string) =>
 /** Write the block being built into the ring, advance the head, start a new one. */
 const commit = `
 poke(acc, blk, ${F_N});
-slot_base = ${HEADER} + (head % ${SLOTS}) * ${STRIDE};
+cell_base = ${HEADER} + (head % ${CELLS}) * ${STRIDE};
 for (i = 0; i < ${STRIDE}; i = i + 1) {
-	poke(stats, peek(acc, i), slot_base + i, 0);
+	poke(stats, peek(acc, i), cell_base + i, 0);
 	poke(acc, 0, i);
 }
 head = (head + 1) % ${HEAD_MOD};

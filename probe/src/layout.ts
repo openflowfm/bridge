@@ -22,7 +22,7 @@ export const H_COEF_SR = 3; // the sample rate the loaded coefficients were made
 export const H_BLOCK_LEN = 4; // samples in a full block at that rate
 export const HEADER = 8;
 
-/** Fields of one block, relative to its slot. */
+/** Fields of one block, relative to its cell. */
 export const F_N = 0; // samples in this block (a full block, or the flushed tail)
 export const F_KL = 1; // Σ K-weighted left²
 export const F_KR = 2; // Σ K-weighted right²
@@ -45,11 +45,11 @@ export const BAND_HZ: readonly number[] = [
 ];
 
 /** Blocks the ring holds: 12.8 s of slack before a stalled reader loses any. */
-export const SLOTS = 128;
+export const CELLS = 128;
 /** The head counter wraps here, well inside float32's exact integers. */
 export const HEAD_MOD = 65536;
 
-export const STATS_FRAMES = HEADER + SLOTS * STRIDE;
+export const STATS_FRAMES = HEADER + CELLS * STRIDE;
 
 /** Block length in seconds — BS.1770's 400 ms gating block is four of these. */
 export const BLOCK_SECONDS = 0.1;
@@ -58,8 +58,8 @@ export function blockLength(sampleRate: number): number {
   return Math.round(sampleRate * BLOCK_SECONDS);
 }
 
-export function slotFrame(slot: number): number {
-  return HEADER + slot * STRIDE;
+export function cellFrame(cell: number): number {
+  return HEADER + cell * STRIDE;
 }
 
 /** One block as v8 reads it back. */

@@ -20,7 +20,7 @@ Everything is cumulative over one *listening pass*, from the bridge's `listen �
 | `lufsIntegrated` | ITU-R BS.1770-4: K-weighting, 400 ms blocks every 100 ms, the −70 LUFS absolute and −10 LU relative gates. Exact: every gating block is kept. `null` until a block passes the absolute gate |
 | `lufsShortTermMax` | the loudest 3 s window, updated every 100 ms. `null` for the first 3 s |
 | `loudnessRange` | EBU Tech 3342: P95 − P10 of short-term loudness after the −70 / −20 LU gates, from a 0.1 LU histogram. `null` until 30 short-term values pass both gates |
-| `truePeakDb` | 4× polyphase interpolation (a 47-tap Kaiser-windowed sinc, padded to 48, designed in `truepeak.ts`), and never below the sample peak |
+| `truePeakDb` | 4× polyphase interpolation (a 47-tap Kaiser-windowed sinc, padded to 48, designed in `truepeak.ts`), and never below the sample peak. A steady tone reads within ±0.2 dB up to 0.8×Nyquist. A single isolated crest can fall between two 4× points and under-read by up to 20·log10(cos(π·f / 4fs)). That is −0.43 dB at 0.8×Nyquist and under 0.1 dB below fs/6. The loss comes from the 4× rate, not the filter: BS.1770 accepts the same under-read |
 | `samplePeakDb`, `rmsDb`, `overSamples`, `dcOffset`, `correlation` | straight from per-block sums. `rmsDb` is plain 10·log10 of the mean square, so a full-scale sine reads −3.01 |
 | `bands` | 31 ISO third-octave bands, 20 Hz to 20 kHz, on (L+R)/2. Each is a 6th-order Butterworth bandpass. Each band has `meanDb` (power mean), plus `floorDb` and `peakDb`, the ~10th and ~95th percentiles of its 100 ms level, from 0.5 dB histograms |
 
@@ -86,7 +86,11 @@ ignores the ones that aren't its own.
   current pass. The final report follows about 200 ms later, once gen~ has flushed the
   last partial block.
 - **Reports** go about once a second. Each is a uniquely named dict
-  (`openflow-probe-<key>-<n>`). The last eight stay alive, for the bridge to read late.
+  (`openflow-probe-<key>-<liveId>-<n>`). The liveId keeps a duplicate that still shares
+  its original's key from writing the same dict. The last eight stay alive, for the
+  bridge to read late.
+- **`listen 1` while a pass is stopping** first sends that pass's final report, with
+  whatever reached the ring, and only then starts the new pass.
 
 ## Tests
 

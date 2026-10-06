@@ -11,10 +11,10 @@ import {
   H_SR,
   HEAD_MOD,
   HEADER,
-  SLOTS,
+  CELLS,
   STRIDE,
   decodeBlock,
-  slotFrame,
+  cellFrame,
   splitHiLo,
   type Block,
 } from './layout.ts';
@@ -173,7 +173,9 @@ export function createProbe(host: Host, deps: Deps): Probe {
     // zero-length pass instead of silence, and the accumulator's empty report
     // is NaN-free by contract.
     const report = (acc ?? deps.newAccumulator(lastSr)).report();
-    const name = `openflow-probe-${key}-${++dictSeq}`;
+    // The liveId as well as the key: a duplicated probe shares its original's
+    // key until the bridge rekeys it, and two probes must never write one dict.
+    const name = `openflow-probe-${key}-${liveId ?? 0}-${++dictSeq}`;
     const dict = host.newDict(name);
     dict.parse(JSON.stringify(report));
     dicts.push(dict);
@@ -198,16 +200,16 @@ export function createProbe(host: Host, deps: Deps): Probe {
   function readBlocks(buf: MaxBufferLike, head: number): void {
     let count = lastHead;
     let fresh = (head - lastHead + HEAD_MOD) % HEAD_MOD;
-    if (fresh > SLOTS) {
-      // gen~ lapped us: the oldest slots were overwritten. Read the newest SLOTS.
-      host.post(`openflow-probe: lost ${fresh - SLOTS} blocks`);
-      count = (head - SLOTS + HEAD_MOD) % HEAD_MOD;
-      fresh = SLOTS;
+    if (fresh > CELLS) {
+      // gen~ lapped us: the oldest cells were overwritten. Read the newest CELLS.
+      host.post(`openflow-probe: lost ${fresh - CELLS} blocks`);
+      count = (head - CELLS + HEAD_MOD) % HEAD_MOD;
+      fresh = CELLS;
     }
     for (let i = 0; i < fresh; i++) {
-      // HEAD_MOD is a multiple of SLOTS, so the slot survives the counter's wrap.
-      const slot = count % SLOTS;
-      (acc as AccumulatorLike).add(decodeBlock(frames(buf.peek(1, slotFrame(slot), STRIDE))));
+      // HEAD_MOD is a multiple of CELLS, so the cell survives the counter's wrap.
+      const cell = count % CELLS;
+      (acc as AccumulatorLike).add(decodeBlock(frames(buf.peek(1, cellFrame(cell), STRIDE))));
       count = (count + 1) % HEAD_MOD;
     }
     lastHead = head;
@@ -251,6 +253,14 @@ export function createProbe(host: Host, deps: Deps): Probe {
   }
 
   function start(nextPass: number): void {
+    if (mode === 'stopping') {
+      // The stopping pass was promised a final report, so it gets one now,
+      // with whatever has reached the ring, rather than being silently
+      // replaced. gen~'s flush of its last partial block may not have arrived
+      // yet: at most 100 ms of a pass that has already ended.
+      read();
+      send(true);
+    }
     epoch++;
     pass = nextPass;
     mode = 'listening';
