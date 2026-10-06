@@ -204,7 +204,12 @@ number, counting up from 1 for the life of the bridge process.
 - Starting tells each probe `listen <key> <pass> 1`, answers the requester with
   `probeListening`, and broadcasts `probePass { on: true }`. A key the bridge doesn't list
   in `probes` is an `error`, and nothing changes.
-- **Ending a pass** — a stop by number, an overlapping restart, or every probe in it gone —
+- **A pass belongs to the client that started it.** If that socket closes without
+  stopping it, the bridge stops it for them, exactly as a stop by number would. Nobody
+  else asked for those numbers, and a probe left listening for nobody would hold its
+  window until the next restart. The protocol README doesn't say this yet.
+- **Ending a pass** — a stop by number, its owner disconnecting, an overlapping restart,
+  or every probe in it gone —
   tells each probe still present `listen <key> <pass> 0`, then waits up to 2 seconds for
   their final reports. Each is broadcast as `probeReport { final: true }` as it arrives,
   and `probePass { on: false, keys }` goes out after the last one (or the wait), with

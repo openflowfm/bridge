@@ -632,6 +632,7 @@ wss.on('connection', (ws: WebSocket) => {
     // Before the log line: a client that closed the tab never sent `off`, and
     // its watches would otherwise be held open forever by a socket that is gone.
     releaseWatches(ws);
+    ownerLeft(ws);
     identities.delete(ws);
     Max.post(`client disconnected (${wss.clients.size} left)`);
     showConnections();
@@ -1512,8 +1513,14 @@ function probeHello(key: string, liveId: number): void {
   pushProbeWatch();
 }
 
-function probeBye(key: string): void {
-  if (!probeRegistry.delete(key)) return;
+/**
+ * A probe unloading. Both halves must match: a copy deleted before its rekey
+ * says goodbye with the key it shares, and must not take the original with it.
+ */
+function probeBye(key: string, liveId: number): void {
+  const known = probeRegistry.get(key);
+  if (!known || known.liveId !== liveId) return;
+  probeRegistry.delete(key);
   probeLeft(key, false);
   pushProbeWatch();
   broadcastProbes();
@@ -1527,6 +1534,8 @@ function probeBye(key: string): void {
  * `FINAL_WAIT_MS` runs out.
  */
 interface ProbePass {
+  /** The client that started it. Its socket closing stops the pass. */
+  owner: WebSocket;
   keys: Set<string>;
   awaiting: Set<string> | null;
   finals: string[];
@@ -1553,11 +1562,29 @@ function startProbePass(ws: WebSocket, keys: unknown, id: number | undefined): v
     if (!p.awaiting && unique.some((k) => p.keys.has(k))) endProbePass(pass);
   }
   const pass = nextProbePass++;
-  probePasses.set(pass, { keys: new Set(unique), awaiting: null, finals: [], timer: null });
+  probePasses.set(pass, {
+    owner: ws,
+    keys: new Set(unique),
+    awaiting: null,
+    finals: [],
+    timer: null,
+  });
   for (const key of unique) probeIn('listen', key, pass, 1);
   Max.post(`probe pass ${pass}: listening on ${unique.join(', ')}`);
   send(ws, { type: 'probeListening', id, pass, probes: unique });
   broadcast({ type: 'probePass', pass, on: true, keys: unique });
+}
+
+/**
+ * A client went away mid-pass without stopping it. Nobody else asked for those
+ * numbers, and a probe left listening for nobody would hold its window against
+ * the next client — so the pass ends exactly as a stop would: finals, then
+ * `probePass { on: false }`.
+ */
+function ownerLeft(ws: WebSocket): void {
+  for (const [pass, p] of probePasses) {
+    if (p.owner === ws && !p.awaiting) endProbePass(pass);
+  }
 }
 
 /** A stop names its pass, so one that already ended — or never ran — is a no-op. */
@@ -1726,7 +1753,7 @@ Max.addHandler('probe', (verb: unknown, ...args: unknown[]) => {
       probeHello(key, Number(args[1]));
       break;
     case 'bye':
-      probeBye(key);
+      probeBye(key, Number(args[1]));
       break;
     case 'report':
       probeReport(key, Number(args[1]), Number(args[2]) === 1, String(args[3] ?? '')).catch((e) =>

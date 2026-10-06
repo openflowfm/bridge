@@ -3185,12 +3185,22 @@ function insert_device(reqId: number, encoded: unknown): void {
     // Unverified: `insert_device` is in Live 12.4's docstring table ("At end
     // if -1") but not in LOM.md, and a multi-word name ("EQ Eight") is passed
     // as one JS string on the strength of what `setName` measured for `set`.
-    // The count check below is what catches either being wrong.
+    // The id diff below is what catches either being wrong.
+    const before = gids(at(runPath), 'devices');
     at(runPath).call('insert_device', name, pos);
-    if (at(runPath).getcount('devices') !== count + 1) {
+    const after = gids(at(runPath), 'devices');
+    // The new device is the id that wasn't there before, wherever Live put it —
+    // not whatever now sits at `at`, which is a guess about Live's placement.
+    let index = -1;
+    for (let k = 0; k < after.length; k++) {
+      if (before.indexOf(after[k]) < 0) {
+        index = k;
+        break;
+      }
+    }
+    if (after.length !== before.length + 1 || index < 0) {
       return fail(reqId, 'Live did not insert ' + name + ' — built-in devices only');
     }
-    const index = hasPos ? pos : count;
     const className = gstr(at(runPath + ' devices ' + index), 'class_name');
     deviceDone(reqId, { t: run.t, path: run.path, i: index }, className);
   } catch (e) {
@@ -3272,17 +3282,36 @@ function move_device(reqId: number, encoded: unknown): void {
     // Unverified: passing both objects as `'id', n` pairs, and the shape of the
     // returned int (taken as the last atom). The read-back below does not trust
     // the return value, so a wrong guess costs a scan rather than a wrong reply.
+    // A destination inside a rack that sits later in the source's own run is
+    // addressed through that rack's index, and lifting the source out shifts
+    // the rack down by one. Moving a rack into one of its own chains is not a
+    // move at all.
+    const toPath = to.path.slice();
+    const depth = target.path.length;
+    if (
+      to.t === target.t && toPath.length > depth &&
+      samePath(toPath.slice(0, depth), target.path)
+    ) {
+      if (toPath[depth] === target.i) return fail(reqId, 'a rack cannot move into itself');
+      if (toPath[depth] > target.i) toPath[depth] -= 1;
+    }
+
     const ret = at('live_set').call('move_device', 'id', deviceId, 'id', destId, pos);
     const atoms = Array.isArray(ret) ? ret : [ret];
     const landedAt = Number(atoms.length ? atoms[atoms.length - 1] : NaN);
 
+    // Re-resolved after the move: the path read before it may name a neighbour now.
+    const landedRun = resolveRunPath(to.t, toPath);
+    if (landedRun === null || Number(at(landedRun).id) !== destId) {
+      return fail(reqId, 'moved, but the destination run no longer resolves where expected');
+    }
     let index = -1;
     if (isWholeIndex(landedAt)) {
-      const landed = at(destPath + ' devices ' + landedAt);
+      const landed = at(landedRun + ' devices ' + landedAt);
       if (exists(landed) && Number(landed.id) === deviceId) index = landedAt;
     }
     if (index < 0) {
-      const ids = gids(at(destPath), 'devices');
+      const ids = gids(at(landedRun), 'devices');
       index = ids.indexOf(deviceId);
       if (index >= 0) {
         post(
@@ -3292,7 +3321,7 @@ function move_device(reqId: number, encoded: unknown): void {
       }
     }
     if (index < 0) return fail(reqId, 'Live refused the move');
-    deviceDone(reqId, { t: to.t, path: to.path, i: index }, className);
+    deviceDone(reqId, { t: to.t, path: toPath, i: index }, className);
   } catch (e) {
     fail(reqId, e);
   }

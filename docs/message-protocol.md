@@ -323,7 +323,7 @@ message every probe answers.
 | probe → bridge (`openflow-probe-out`) | |
 |---|---|
 | `hello <key> <liveId>` | I exist. Sent when the probe loads, in answer to `who`, and after adopting a key from `rekey`. `liveId` is the probe's own LOM id, from `[live.path this_device]` |
-| `bye <key>` | I'm going — the probe is being removed or unloaded |
+| `bye <key> <liveId>` | I'm going — the probe is being removed or unloaded. The bridge drops a registration only when both match, so a copy deleted before its `rekey` landed can't take the original's key with it |
 | `report <key> <pass> <final> <dictName>` | a cumulative report for `pass`; `final` is 0 while listening, 1 for the one report after a stop. The Dict holds one `ProbeReport` (the protocol type) as JSON |
 
 | bridge → probes (`openflow-probe-in`) | |
