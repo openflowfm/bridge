@@ -454,42 +454,145 @@ function broadcast(event: OpenFlow.Event): void {
  */
 const identities = new Map<WebSocket, OpenFlow.ClientKind>();
 
-/** The rows the device face draws, in the order it draws them. */
-const CLIENT_ROSTER = ['set', 'visual', 'chart'] as const;
+/** Rows the face has room for. Matches the patcher's layout. */
+const ROSTER_ROWS = 4;
+const CLIENT_KEY_MAX = 32;
+/** What fits across the display beside a dot. */
+const ROSTER_LABEL_MAX = 28;
+
+/** What a known key is called when its client sent no `name`. */
+const KNOWN_NAMES = new Map<string, string>([
+  ['set', 'set[flow]'],
+  ['visual', 'visual[flow]'],
+  ['chart', 'chart[flow]'],
+  ['mastering', 'master[flow]'],
+]);
+
+/** Each known app's own colour; any other key gets the neutral grey. */
+const KNOWN_DOTS = new Map<string, string>([
+  ['set', '#10D7C7'],
+  ['visual', '#D849FF'],
+  ['chart', '#FFA529'],
+  ['mastering', '#5480E4'],
+]);
+const OTHER_DOT = '#BFBFBF';
+const DEPARTED_DOT = [0.31, 0.31, 0.31, 1];
+/** The LCD's own background, so an empty row draws no dot at all. */
+const EMPTY_DOT = [0.157, 0.157, 0.157, 1];
+
+/**
+ * Which key owns each row, in first-seen order, for the life of this process.
+ *
+ * Rows are never compacted: an app that disconnects dims where it was, so the
+ * others don't wander round the face as it comes and goes.
+ */
+const rosterRows: string[] = [];
+/** The latest label each key identified with, rowed or not. */
+const rosterLabels = new Map<string, string>();
+
+/**
+ * Face messages last sent, by selector and row, so a socket coming or going
+ * re-sends only the rows it changed. `force` ignores it, for a patcher that
+ * may have missed everything before the server was up.
+ */
+const faceSent = new Map<string, string>();
+
+function face(selector: string, args: Array<number | string>, force: boolean): void {
+  const slot = selector === 'clients' ? selector : `${selector} ${args[0]}`;
+  const json = JSON.stringify(args);
+  if (!force && faceSent.get(slot) === json) return;
+  faceSent.set(slot, json);
+  Max.outlet(selector, ...args);
+}
+
+function hexDot(hex: string): number[] {
+  const n = parseInt(hex.slice(1), 16);
+  const c = (shift: number) => Math.round(((n >> shift) & 0xff) / 255 * 1000) / 1000;
+  return [c(16), c(8), c(0), 1];
+}
+
+/**
+ * Name plus version, made safe for one Max atom and short enough to fit.
+ *
+ * Control characters and Max's own syntax go, the way they do for Push's
+ * labels: this reaches a `comment` through a patch cord, where a stray comma
+ * or `$` is a message rather than a character.
+ */
+function rosterLabel(key: string, name: unknown, version: unknown): string {
+  const given = typeof name === 'string' ? name.trim() : '';
+  const base = given || KNOWN_NAMES.get(key) || key;
+  const v = typeof version === 'string' ? version.trim() : '';
+  const clean = (v ? `${base} ${v}` : base)
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[,;"$\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.slice(0, ROSTER_LABEL_MAX).trim() || '(unnamed)';
+}
+
+/**
+ * Give `key` a row if it has none: a free one, else the first whose app has
+ * gone. With every row lit it gets none, and is counted in `extra` instead.
+ */
+function claimRow(key: string, present: (key: string) => boolean): void {
+  if (rosterRows.includes(key)) return;
+  if (rosterRows.length < ROSTER_ROWS) {
+    rosterRows.push(key);
+    return;
+  }
+  const departed = rosterRows.findIndex((k) => !present(k));
+  if (departed >= 0) rosterRows[departed] = key;
+}
 
 /**
  * Drive the device's face — the Live-side state, and who is attached.
  *
- * **Five integers, no strings.** `ready`, then one flag per known app in
- * `CLIENT_ROSTER` order, then however many sockets those flags don't account
- * for. The patcher owns every word a user reads and every color a dot is drawn
- * in; this side owns only the arithmetic. That split is what keeps a name with
- * punctuation in it — `set[flow]` — out of a Max message entirely.
+ * `clients <ready> <extra>` is the headline: the LOM handshake, and how many
+ * open sockets no lit row accounts for. Then per row, `roster_dot` with the
+ * dot's RGBA and `roster_name` with a tone (1 present, 0 departed, 2 empty)
+ * and, unless empty, the label. The colours and labels are decided here
+ * because the apps are open-ended now — a key nobody has seen before still
+ * gets a row under the name it sent — and the patcher only draws.
  *
- * The flags are booleans rather than counts because a row is a lamp: two
- * set[flow] windows on one set is a real situation, but it is *the extra one*
- * that is worth seeing, and `extra` is where it shows up.
- *
- * `extra` is therefore everything else on the socket — a second window of an
- * app already lit, `tools/diag.ts`, a browser someone pointed at the port, a
- * client that never sent `identify`. All of it is honest to count and none of
- * it is worth a row.
+ * A row is a lamp, not a count: two set[flow] windows light one row, and the
+ * second shows up in `extra`, along with `tools/diag.ts`, a browser pointed at
+ * the port, a client that never identified, and any key past the fourth row.
  */
-function showConnections(): void {
+function showConnections(force = false): void {
   // readyState rather than wss.clients.size: a socket mid-close still counts as
   // a client to `ws` for a moment, and a face that lights a row with nothing
   // attached is worse than one that lags by a tick.
   const open: WebSocket[] = [];
   for (const ws of wss.clients) if (ws.readyState === 1) open.push(ws);
+  const presentKeys = new Set<string>();
+  for (const ws of open) {
+    const key = identities.get(ws);
+    if (key !== undefined) presentKeys.add(key);
+  }
+  const present = (key: string) => presentKeys.has(key);
+  // A key that found every row lit when it arrived takes one as soon as an
+  // app leaves, rather than sitting in `extra` beside a dark row.
+  for (const key of presentKeys) claimRow(key, present);
 
-  const lit = CLIENT_ROSTER.map((kind) => open.some((ws) => identities.get(ws) === kind));
-  const named = lit.filter(Boolean).length;
-  Max.outlet(
-    'clients',
-    lomReady ? 1 : 0,
-    ...lit.map((on) => (on ? 1 : 0)),
-    Math.max(0, open.length - named),
-  );
+  let lit = 0;
+  for (let row = 0; row < ROSTER_ROWS; row++) {
+    const key = rosterRows[row];
+    if (key === undefined) {
+      face('roster_dot', [row, ...EMPTY_DOT], force);
+      face('roster_name', [row, 2], force);
+      continue;
+    }
+    const label = rosterLabels.get(key) ?? key;
+    if (present(key)) {
+      lit++;
+      face('roster_dot', [row, ...hexDot(KNOWN_DOTS.get(key) ?? OTHER_DOT)], force);
+      face('roster_name', [row, 1, label], force);
+    } else {
+      face('roster_dot', [row, ...DEPARTED_DOT], force);
+      face('roster_name', [row, 0, label], force);
+    }
+  }
+  face('clients', [lomReady ? 1 : 0, Math.max(0, open.length - lit)], force);
 }
 
 wss.on('connection', (ws: WebSocket) => {
@@ -498,6 +601,7 @@ wss.on('connection', (ws: WebSocket) => {
   showConnections();
   send(ws, { type: 'status', lomReady });
   if (deviceState) send(ws, { type: 'deviceState', state: deviceState });
+  send(ws, { type: 'probes', probes: probeList() });
 
   // `ws` throws on a socket whose 'error' nobody listens for, so an unclean
   // disconnect — a phone off the LAN, a force-killed browser — would take the
@@ -1264,6 +1368,418 @@ Max.addHandler('push_song', (i: number) => {
   }
 });
 
+// --- device addresses ---------------------------------------------------
+
+/** Longest device name `insertDevice` passes on; Live's own are far shorter. */
+const DEVICE_NAME_MAX = 64;
+/** Most values one `paramText` may ask Live to render. */
+const PARAM_TEXT_MAX = 64;
+
+function isIndex(v: unknown): v is number {
+  return Number.isInteger(v) && (v as number) >= 0;
+}
+
+/**
+ * A run's address, checked for shape only, or why it isn't one.
+ *
+ * Shape, not existence: a device's address is its position and positions
+ * move, so only `lom.ts` can say whether one resolves.
+ */
+function deviceRun(source: unknown, missing: string): OpenFlow.DeviceRun | string {
+  if (!source || typeof source !== 'object') return missing;
+  const s = source as { t?: unknown; path?: unknown };
+  const t = Number(s.t);
+  if (!Number.isInteger(t) || t < 0) return 'invalid device track';
+  if (!Array.isArray(s.path) || s.path.length % 2 !== 0) return 'invalid device path';
+  const path: number[] = [];
+  for (const step of s.path) {
+    const value = Number(step);
+    if (!Number.isInteger(value) || value < 0) return 'invalid device path';
+    path.push(value);
+  }
+  return { t, path };
+}
+
+function deviceTarget(source: unknown): OpenFlow.DeviceTarget | string {
+  const run = deviceRun(source, 'device target is missing');
+  if (typeof run === 'string') return run;
+  const i = Number((source as { i?: unknown }).i);
+  if (!Number.isInteger(i) || i < 0) return 'invalid device index';
+  return { ...run, i };
+}
+
+function deviceAddress(target: OpenFlow.DeviceTarget): string {
+  return `track ${target.t}${target.path.length ? ` [${target.path.join(' ')}]` : ''} #${target.i}`;
+}
+
+// --- probes -----------------------------------------------------------
+//
+// A probe is a small device of ours the user drops into a chain to hear the
+// signal there. It talks to this process over global sends rather than
+// through `lom.ts`, because what it carries is audio analysis, not the set.
+// What *is* the set's — where each probe sits — comes from `lom.ts`, which
+// resolves the Live ids the probes announce and watches the runs they sit in.
+//
+// That watch is the device's own (rule 4): armed because probes exist, never
+// because a client asked, and re-sent whenever the answer could have moved.
+
+/** How long an ending pass waits for its probes' final reports. */
+const FINAL_WAIT_MS = 2000;
+
+interface ProbeRegistration {
+  liveId: number;
+  /** Null until `lom.ts` resolves it, or while it sits where no address can name it. */
+  target: OpenFlow.DeviceTarget | null;
+  name: string;
+  /** What `lom.ts` last said about this liveId; `pending` before it has said anything. */
+  resolved: 'pending' | 'found' | 'null';
+}
+
+/** Every probe that has said hello, by its own key. */
+const probeRegistry = new Map<string, ProbeRegistration>();
+/** The `probes` list last broadcast, so an unchanged one is never re-sent. */
+let probesSent = '[]';
+
+/** Only probes with an address: a client can do nothing with one that has none. */
+function probeList(): OpenFlow.ProbeEntry[] {
+  const list: OpenFlow.ProbeEntry[] = [];
+  for (const [key, p] of probeRegistry) {
+    if (p.target) list.push({ key, target: p.target, name: p.name });
+  }
+  return list;
+}
+
+function broadcastProbes(): void {
+  const list = probeList();
+  const json = JSON.stringify(list);
+  if (json === probesSent) return;
+  probesSent = json;
+  broadcast({ type: 'probes', probes: list });
+}
+
+/**
+ * Tell `lom.ts` which probes to resolve and watch — the whole list, every time.
+ *
+ * Re-sent on hello and bye, on LOM ready, and on every real structural change,
+ * because a Live id that resolved before a track was inserted resolves to a
+ * different address after it. Before the LOM is ready there is nothing to tell;
+ * `ready` sends it.
+ */
+function pushProbeWatch(): void {
+  if (!lomReady) return;
+  const list = [...probeRegistry].map(([key, p]) => ({ key, liveId: p.liveId }));
+  Max.outlet('watch_probes', encodeMaxAtom(list));
+}
+
+/**
+ * A key for a copied probe. Always holds a letter, because Max turns a symbol
+ * of digits into an int and the key would then not compare equal to itself.
+ */
+function freshProbeKey(): string {
+  for (;;) {
+    const key = Math.random().toString(36).slice(2, 10);
+    if (key.length >= 6 && /[a-z]/.test(key) && !probeRegistry.has(key)) return key;
+  }
+}
+
+function probeIn(...args: Array<string | number>): void {
+  Max.outlet('probe_in', ...args);
+}
+
+/**
+ * A probe announcing itself, on load or after a rekey.
+ *
+ * Copying a probe copies its stored key, so two devices can say hello with the
+ * same one. The one already registered keeps it and the later one is rekeyed —
+ * unless the registered one last resolved to nothing, which means its device
+ * is gone and this hello is the key's rightful owner.
+ */
+function probeHello(key: string, liveId: number): void {
+  if (!key || !Number.isInteger(liveId) || liveId <= 0) {
+    Max.post(`probe: malformed hello (${key} ${liveId})`);
+    return;
+  }
+  const known = probeRegistry.get(key);
+  if (known && known.liveId !== liveId && known.resolved !== 'null') {
+    const fresh = freshProbeKey();
+    Max.post(`probe: key ${key} belongs to id ${known.liveId} — rekeying id ${liveId} as ${fresh}`);
+    probeIn('rekey', liveId, fresh);
+    return;
+  }
+  if (!known || known.liveId !== liveId) {
+    probeRegistry.set(key, { liveId, target: null, name: '', resolved: 'pending' });
+  }
+  pushProbeWatch();
+}
+
+function probeBye(key: string): void {
+  if (!probeRegistry.delete(key)) return;
+  probeLeft(key, false);
+  pushProbeWatch();
+  broadcastProbes();
+}
+
+/**
+ * One pass: probes listening together under one number.
+ *
+ * `awaiting` is null while the pass runs; ending it fills it with the probes
+ * told to stop, and the pass is over when each has sent its final report or
+ * `FINAL_WAIT_MS` runs out.
+ */
+interface ProbePass {
+  keys: Set<string>;
+  awaiting: Set<string> | null;
+  finals: string[];
+  timer: NodeJS.Timeout | null;
+}
+
+const probePasses = new Map<number, ProbePass>();
+let nextProbePass = 1;
+
+function startProbePass(ws: WebSocket, keys: unknown, id: number | undefined): void {
+  if (!Array.isArray(keys) || keys.length === 0 || !keys.every((k) => typeof k === 'string')) {
+    send(ws, { type: 'error', id, message: 'probeListen needs a list of probe keys' });
+    return;
+  }
+  const unique = [...new Set(keys as string[])];
+  const unknown = unique.find((k) => !probeRegistry.get(k)?.target);
+  if (unknown !== undefined) {
+    send(ws, { type: 'error', id, message: `no probe with key ${unknown}` });
+    return;
+  }
+  // One window per probe, so a pass sharing any probe with this one ends
+  // whole: half a pass would be numbers nobody asked for.
+  for (const [pass, p] of probePasses) {
+    if (!p.awaiting && unique.some((k) => p.keys.has(k))) endProbePass(pass);
+  }
+  const pass = nextProbePass++;
+  probePasses.set(pass, { keys: new Set(unique), awaiting: null, finals: [], timer: null });
+  for (const key of unique) probeIn('listen', key, pass, 1);
+  Max.post(`probe pass ${pass}: listening on ${unique.join(', ')}`);
+  send(ws, { type: 'probeListening', id, pass, probes: unique });
+  broadcast({ type: 'probePass', pass, on: true, keys: unique });
+}
+
+/** A stop names its pass, so one that already ended — or never ran — is a no-op. */
+function stopProbePass(pass: unknown): void {
+  if (typeof pass !== 'number' || probePasses.get(pass)?.awaiting !== null) return;
+  endProbePass(pass);
+}
+
+function endProbePass(pass: number): void {
+  const p = probePasses.get(pass);
+  if (!p || p.awaiting) return;
+  p.awaiting = new Set(p.keys);
+  for (const key of p.keys) probeIn('listen', key, pass, 0);
+  if (p.awaiting.size === 0) {
+    finishProbePass(pass);
+    return;
+  }
+  p.timer = setTimeout(() => finishProbePass(pass), FINAL_WAIT_MS);
+  p.timer.unref?.();
+}
+
+/** After the finals, never before: a client takes `on: false` as "the numbers are in". */
+function finishProbePass(pass: number): void {
+  const p = probePasses.get(pass);
+  if (!p) return;
+  if (p.timer) clearTimeout(p.timer);
+  probePasses.delete(pass);
+  if (p.awaiting && p.awaiting.size > 0) {
+    Max.post(
+      `probe pass ${pass}: no final report from ${[...p.awaiting].join(', ')} ` +
+        `within ${FINAL_WAIT_MS}ms`,
+    );
+  }
+  broadcast({ type: 'probePass', pass, on: false, keys: p.finals });
+}
+
+/**
+ * A probe left its pass: deleted, or moved somewhere no address can name.
+ *
+ * One still in the set is told to stop, since nothing will read what it hears.
+ * A pass with nobody left in it ends.
+ */
+function probeLeft(key: string, present: boolean): void {
+  for (const [pass, p] of probePasses) {
+    if (!p.keys.delete(key)) continue;
+    if (p.awaiting) {
+      if (p.awaiting.delete(key) && p.awaiting.size === 0) finishProbePass(pass);
+      continue;
+    }
+    if (present) probeIn('listen', key, pass, 0);
+    if (p.keys.size === 0) endProbePass(pass);
+  }
+}
+
+/**
+ * The pass this report belongs in, or null to drop it.
+ *
+ * Asked twice — before reading the dict and again after — because the pass
+ * can end while the read is in flight, and a report landing after its
+ * `probePass { on: false }` contradicts what that event promised.
+ */
+function passForReport(key: string, pass: number, final: boolean): ProbePass | null {
+  const p = probePasses.get(pass);
+  if (!p || !p.keys.has(key) || !probeRegistry.get(key)?.target) return null;
+  // A running pass takes only running reports; an ending one only the finals
+  // it is still waiting on.
+  if (final ? !p.awaiting?.has(key) : p.awaiting !== null) return null;
+  return p;
+}
+
+/** A final that will never arrive readable stops being waited for. */
+function finalMissed(key: string, pass: number): void {
+  const p = probePasses.get(pass);
+  if (p?.awaiting?.delete(key) && p.awaiting.size === 0) finishProbePass(pass);
+}
+
+async function probeReport(key: string, pass: number, final: boolean, dictName: string) {
+  if (!passForReport(key, pass, final)) return;
+  let raw: unknown;
+  try {
+    raw = await Max.getDict(dictName);
+  } catch (e) {
+    Max.post(`probe report from ${key} dropped — could not read ${dictName}: ${describe(e)}`);
+    if (final) finalMissed(key, pass);
+    return;
+  }
+  const p = passForReport(key, pass, final);
+  const target = probeRegistry.get(key)?.target;
+  if (!p || !target) return;
+  const report = probeReportOf(raw);
+  if (typeof report === 'string') {
+    Max.post(`probe report from ${key} dropped — ${report}`);
+    if (final) finalMissed(key, pass);
+    return;
+  }
+  broadcast({ type: 'probeReport', pass, key, target, final, report });
+  if (final && p.awaiting) {
+    p.finals.push(key);
+    p.awaiting.delete(key);
+    if (p.awaiting.size === 0) finishProbePass(pass);
+  }
+}
+
+const PROBE_NUMBER_FIELDS = [
+  'seconds', 'sampleRate', 'truePeakDb', 'samplePeakDb', 'rmsDb',
+  'overSamples', 'dcOffset', 'correlation',
+] as const;
+const PROBE_LOUDNESS_FIELDS = ['lufsIntegrated', 'lufsShortTermMax', 'loudnessRange'] as const;
+const PROBE_BANDS = 31;
+
+/**
+ * A `ProbeReport` out of whatever the Dict held, or why not.
+ *
+ * Either the report itself, or one JSON string holding it — the probe may
+ * store it either way, and a Max dict can't hold a JSON null in a number's
+ * place, so a loudness that isn't known yet may arrive missing or as the
+ * symbol `null`. Rebuilt field by field so nothing unchecked reaches a client.
+ */
+function probeReportOf(raw: unknown): OpenFlow.ProbeReport | string {
+  let value = raw;
+  try {
+    if (typeof value === 'string') {
+      value = JSON.parse(value);
+    } else if (value && typeof value === 'object' && !('bands' in value)) {
+      const inner = Object.values(value);
+      if (inner.length === 1 && typeof inner[0] === 'string') value = JSON.parse(inner[0]);
+    }
+  } catch {
+    return 'its JSON does not parse';
+  }
+  if (!value || typeof value !== 'object') return 'it is not an object';
+  const r = value as Record<string, unknown>;
+  const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+  const numbers = {} as Record<(typeof PROBE_NUMBER_FIELDS)[number], number>;
+  for (const field of PROBE_NUMBER_FIELDS) {
+    const n = r[field];
+    if (!finite(n)) return `${field} is not a number`;
+    numbers[field] = n;
+  }
+  const loudness = {} as Record<(typeof PROBE_LOUDNESS_FIELDS)[number], number | null>;
+  for (const field of PROBE_LOUDNESS_FIELDS) {
+    const n = r[field];
+    if (n === undefined || n === null || n === 'null') loudness[field] = null;
+    else if (finite(n)) loudness[field] = n;
+    else return `${field} is neither a number nor null`;
+  }
+  if (!Array.isArray(r.bands) || r.bands.length !== PROBE_BANDS) {
+    return `bands is not ${PROBE_BANDS} bands`;
+  }
+  const bands: OpenFlow.ProbeBand[] = [];
+  for (const rawBand of r.bands) {
+    const b = rawBand as Partial<OpenFlow.ProbeBand> | null;
+    if (!b || !finite(b.hz) || !finite(b.meanDb) || !finite(b.floorDb) || !finite(b.peakDb)) {
+      return 'a band is malformed';
+    }
+    bands.push({ hz: b.hz, meanDb: b.meanDb, floorDb: b.floorDb, peakDb: b.peakDb });
+  }
+  return { ...numbers, ...loudness, bands };
+}
+
+// Global sends from the probes, prefixed `probe` by the patcher on the way in.
+Max.addHandler('probe', (verb: unknown, ...args: unknown[]) => {
+  const key = String(args[0] ?? '');
+  switch (String(verb)) {
+    case 'hello':
+      probeHello(key, Number(args[1]));
+      break;
+    case 'bye':
+      probeBye(key);
+      break;
+    case 'report':
+      probeReport(key, Number(args[1]), Number(args[2]) === 1, String(args[3] ?? '')).catch((e) =>
+        Max.post(`probe report from ${key} failed — ${describe(e)}`),
+      );
+      break;
+    default:
+      Max.post(`probe: unknown message ${String(verb)}`);
+  }
+});
+
+/**
+ * Where each watched probe sits now, from `lom.ts`.
+ *
+ * Rejected whole on a malformed entry, like `chain_state`: a list silently
+ * shortened is a probe that vanished for no reason. An answer about a liveId a
+ * key no longer has is a reply to a watch since replaced, and is skipped.
+ */
+Max.addHandler('probe_targets', (...atoms: unknown[]) => {
+  const value = decodeMaxAtom(atoms.map(String).join(''));
+  if (!Array.isArray(value)) {
+    Max.post('probe_targets: malformed payload from lom');
+    return;
+  }
+  const answers: Array<{ key: string; liveId: number; target: OpenFlow.DeviceTarget | null; name: string }> = [];
+  for (const raw of value) {
+    const e = raw as { key?: unknown; liveId?: unknown; target?: unknown; name?: unknown } | null;
+    if (!e || typeof e.key !== 'string' || !Number.isInteger(e.liveId) || typeof e.name !== 'string') {
+      Max.post('probe_targets: malformed entry from lom');
+      return;
+    }
+    let target: OpenFlow.DeviceTarget | null = null;
+    if (e.target !== null) {
+      const checked = deviceTarget(e.target);
+      if (typeof checked === 'string') {
+        Max.post(`probe_targets: ${checked} from lom`);
+        return;
+      }
+      target = checked;
+    }
+    answers.push({ key: e.key, liveId: e.liveId as number, target, name: e.name });
+  }
+  for (const a of answers) {
+    const p = probeRegistry.get(a.key);
+    if (!p || p.liveId !== a.liveId) continue;
+    p.target = a.target;
+    p.name = a.name;
+    p.resolved = a.target ? 'found' : 'null';
+    if (!a.target) probeLeft(a.key, true);
+  }
+  broadcastProbes();
+});
+
 /**
  * Why a `keepScenes` plan must be refused, or `null` when it may run.
  *
@@ -1809,30 +2325,8 @@ async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
      */
     case 'setDevice': {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
-      const source = m.target;
-      if (!source || typeof source !== 'object') {
-        return send(ws, { type: 'error', id: m.id, message: 'device target is missing' });
-      }
-      const t = Number(source.t);
-      const i = Number(source.i);
-      if (!Number.isInteger(t) || t < 0) {
-        return send(ws, { type: 'error', id: m.id, message: 'invalid device track' });
-      }
-      if (!Number.isInteger(i) || i < 0) {
-        return send(ws, { type: 'error', id: m.id, message: 'invalid device index' });
-      }
-      if (!Array.isArray(source.path) || source.path.length % 2 !== 0) {
-        return send(ws, { type: 'error', id: m.id, message: 'invalid device path' });
-      }
-      const path: number[] = [];
-      for (const step of source.path) {
-        const value = Number(step);
-        if (!Number.isInteger(value) || value < 0) {
-          return send(ws, { type: 'error', id: m.id, message: 'invalid device path' });
-        }
-        path.push(value);
-      }
-      const target: OpenFlow.DeviceTarget = { t, path, i };
+      const target = deviceTarget(m.target);
+      if (typeof target === 'string') return send(ws, { type: 'error', id: m.id, message: target });
 
       const patchSource = m.patch;
       if (!patchSource || typeof patchSource !== 'object') {
@@ -1867,6 +2361,101 @@ async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
         return send(ws, { type: 'error', id: m.id, message: 'device patch is empty' });
       }
       Max.outlet('set_device', encodeMaxAtom({ target, patch }));
+      break;
+    }
+    // The chain edits are shape-checked here and nothing more, as `setDevice`
+    // is: whether an index is in range, and whether the device there is the one
+    // the client means, only `lom.ts` can tell. Unlike `setDevice` each is
+    // answered, because the caller's next move needs where Live put things.
+    case 'insertDevice': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const run = deviceRun(m.run, 'device run is missing');
+      if (typeof run === 'string') return send(ws, { type: 'error', id: m.id, message: run });
+      const name = typeof m.name === 'string' ? m.name.trim() : '';
+      if (!name || name.length > DEVICE_NAME_MAX) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: `insertDevice needs a device name of 1–${DEVICE_NAME_MAX} characters`,
+        });
+      }
+      const payload: { run: OpenFlow.DeviceRun; name: string; at?: number } = { run, name };
+      if (m.at !== undefined) {
+        if (!isIndex(m.at)) {
+          return send(ws, { type: 'error', id: m.id, message: 'invalid device index' });
+        }
+        payload.at = m.at;
+      }
+      Max.outlet('insert_device', track(ws, m), encodeMaxAtom(payload));
+      break;
+    }
+    case 'deleteDevice': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const target = deviceTarget(m.target);
+      if (typeof target === 'string') return send(ws, { type: 'error', id: m.id, message: target });
+      if (typeof m.className !== 'string' || m.className.trim() === '') {
+        return send(ws, { type: 'error', id: m.id, message: 'deleteDevice needs a className' });
+      }
+      Max.outlet(
+        'delete_device',
+        track(ws, m),
+        encodeMaxAtom({ target, className: m.className }),
+      );
+      break;
+    }
+    case 'moveDevice': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const target = deviceTarget(m.target);
+      if (typeof target === 'string') return send(ws, { type: 'error', id: m.id, message: target });
+      if (typeof m.className !== 'string' || m.className.trim() === '') {
+        return send(ws, { type: 'error', id: m.id, message: 'moveDevice needs a className' });
+      }
+      const to = deviceRun(m.to, 'destination run is missing');
+      if (typeof to === 'string') return send(ws, { type: 'error', id: m.id, message: to });
+      if (!isIndex(m.at)) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid destination index' });
+      }
+      Max.outlet(
+        'move_device',
+        track(ws, m),
+        encodeMaxAtom({ target, className: m.className, to, at: m.at }),
+      );
+      break;
+    }
+    case 'paramText': {
+      if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
+      const target = deviceTarget(m.target);
+      if (typeof target === 'string') return send(ws, { type: 'error', id: m.id, message: target });
+      const p = Number(m.p);
+      if (!Number.isInteger(p) || p < 0) {
+        return send(ws, { type: 'error', id: m.id, message: 'invalid parameter index' });
+      }
+      const values = m.values;
+      // Bounded because each value is a `str_for_value` call inside one Max
+      // message on Live's main thread.
+      if (
+        !Array.isArray(values) || values.length === 0 || values.length > PARAM_TEXT_MAX ||
+        !values.every((v) => typeof v === 'number' && Number.isFinite(v))
+      ) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: `paramText takes 1–${PARAM_TEXT_MAX} numeric values`,
+        });
+      }
+      Max.outlet('param_text', track(ws, m), encodeMaxAtom({ target, p, values }));
+      break;
+    }
+    case 'probeListen': {
+      if (m.on === true) startProbePass(ws, m.keys, m.id);
+      else if (m.on === false) stopProbePass(m.pass);
+      else {
+        send(ws, {
+          type: 'error',
+          id: (m as { id?: number }).id,
+          message: 'probeListen needs on: true or false',
+        });
+      }
       break;
     }
     // Also fire-and-forget, and for the same reason as playback: the client
@@ -1921,15 +2510,23 @@ async function handle(ws: WebSocket, m: OpenFlow.Request): Promise<void> {
       if (!lomReady) return send(ws, { type: 'error', id: m.id, message: 'LOM not ready' });
       setWatch(ws, 'scenes', m.on);
       break;
-    case 'identify':
-      // Validated against the roster rather than trusted, because an unknown
-      // name has a defined meaning here — it counts, it just doesn't light a
-      // row — and storing it would make the roster's arithmetic depend on a
-      // string nothing else ever reads.
-      if ((CLIENT_ROSTER as readonly string[]).includes(m.client)) identities.set(ws, m.client);
-      else Max.post(`client identified as ${String(m.client)} — counted, not named`);
+    case 'identify': {
+      // Any key is welcome — a new app needs no bridge release to get a row —
+      // but it is a row key for the life of the process, so it is bounded.
+      const key = typeof m.client === 'string' ? m.client.trim() : '';
+      if (!key || key.length > CLIENT_KEY_MAX) {
+        return send(ws, {
+          type: 'error',
+          id: m.id,
+          message: `identify needs a client key of 1–${CLIENT_KEY_MAX} characters`,
+        });
+      }
+      identities.set(ws, key);
+      // The latest identify wins, so an app that updates in place relabels.
+      rosterLabels.set(key, rosterLabel(key, m.name, m.version));
       showConnections();
       break;
+    }
     case 'ping':
       send(ws, { type: 'pong', id: m.id });
       break;
@@ -2009,6 +2606,8 @@ Max.addHandler('ready', () => {
   // A reloaded device has empty observer lists but our record of who wants what
   // survived, so put back whatever clients were already holding.
   rearmWatches();
+  // The probes said hello whether or not anyone was there to resolve them.
+  pushProbeWatch();
   // Only needed when the pattr is empty and an old bsv.json may need importing.
   Max.outlet('set_info');
   // Read the set once, here. Every later client is answered from this.
@@ -2370,6 +2969,68 @@ Max.addHandler('palette_done', async (reqId: number, dictName: string) => {
   }
 });
 
+/**
+ * One reply for all three chain edits, answered as whichever was asked.
+ *
+ * Nothing held is dropped: the held set has no devices in it, and anyone
+ * watching the run hears the edit as `chainState`.
+ */
+Max.addHandler('device_done', (reqId: number, ...atoms: unknown[]) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const value = decodeMaxAtom(atoms.map(String).join('')) as
+    { target?: unknown; className?: unknown } | null;
+  const target = deviceTarget(value?.target);
+  const className = value?.className;
+  if (typeof target === 'string' || typeof className !== 'string') {
+    lomReplyFailed('device_done', reqId, req, new Error('malformed payload from lom'));
+    return;
+  }
+  if (!req) {
+    Max.post(`device_done: no request ${reqId} is waiting — a stray or duplicate reply`);
+    return;
+  }
+  const id = req.clientId;
+  switch (req.type) {
+    case 'insertDevice':
+      Max.post(`insertDevice: ${className} at ${deviceAddress(target)}`);
+      send(req.ws, { type: 'deviceInserted', id, target, className });
+      break;
+    case 'deleteDevice':
+      Max.post(`deleteDevice: ${className} from ${deviceAddress(target)}`);
+      send(req.ws, { type: 'deviceDeleted', id, target });
+      break;
+    case 'moveDevice':
+      Max.post(`moveDevice: ${className} landed at ${deviceAddress(target)}`);
+      send(req.ws, { type: 'deviceMoved', id, target });
+      break;
+    default:
+      lomReplyFailed('device_done', reqId, req, new Error(`answers a ${req.type}, not a chain edit`));
+  }
+});
+
+Max.addHandler('param_text_done', (reqId: number, ...atoms: unknown[]) => {
+  const req = pending.get(reqId);
+  pending.delete(reqId);
+  const value = decodeMaxAtom(atoms.map(String).join('')) as
+    { target?: unknown; p?: unknown; texts?: unknown } | null;
+  const target = deviceTarget(value?.target);
+  const p = value?.p;
+  const texts = value?.texts;
+  if (
+    typeof target === 'string' || !isIndex(p) ||
+    !Array.isArray(texts) || !texts.every((t) => typeof t === 'string')
+  ) {
+    lomReplyFailed('param_text_done', reqId, req, new Error('malformed payload from lom'));
+    return;
+  }
+  if (req?.type !== 'paramText') {
+    lomReplyFailed('param_text_done', reqId, req, new Error('no paramText is waiting on it'));
+    return;
+  }
+  send(req.ws, { type: 'paramText', id: req.clientId, target, p, texts });
+});
+
 Max.addHandler('changed', (kind: string) => {
   if (kind === 'structure') {
     // Arming `observe` installs two LiveAPI observers and each calls back once
@@ -2384,6 +3045,8 @@ Max.addHandler('changed', (kind: string) => {
     // means something different and nothing we hold can be patched into the set
     // that now exists. Every client re-walks on this; so do we.
     dropHeld('Live reported a structural change');
+    // A probe's Live id survives the change; the address it resolves to may not.
+    pushProbeWatch();
     // And then go and look, rather than leaving the next client to pay for it.
     // The set is the bridge's job to know; a tab that opens after a track was
     // added should still be a payload. The walk coalesces with any client
@@ -2898,12 +3561,22 @@ wss.on('error', onServerError);
 
 server.listen(PORT, HOST, () => {
   Max.post(`Session Bridge listening on http://${HOST}:${PORT}`);
-  showConnections(); // drives the device's face; routed off before lom
+  // Everything, not just what changed: the patcher may have missed whatever
+  // was sent before now. Routed off before lom.
+  showConnections(true);
   Max.outlet('device_state_get'); // restored pattr -> device_state handler above
   Max.outlet('hello'); // whichever side is late drives the handshake
+  // Probes loaded before this process said hello to nobody; ask again.
+  probeIn('who');
 });
 
 function shutdown(): void {
+  // Stop every listening probe too, or it keeps analysing for a bridge that is gone.
+  for (const [pass, p] of probePasses) {
+    if (p.timer) clearTimeout(p.timer);
+    if (!p.awaiting) for (const key of p.keys) probeIn('listen', key, pass, 0);
+  }
+  probePasses.clear();
   try {
     for (const ws of wss.clients) ws.terminate();
     server.close();

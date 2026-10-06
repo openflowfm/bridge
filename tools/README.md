@@ -162,17 +162,21 @@ parameter long names, `openflow-state` and `Song`, are identities too and never 
 [live.thisdevice] ─> [initialized latch] ─> [init( ─> [s ---openflow-to-lom]
 [node.script] out0 ──────────────────────-> [s ---openflow-to-lom]
 
-[r ---openflow-to-lom] ─> [route clients device_state_get device_state_set]
-                       ├─ clients ─────> [unpack 0 0 0 0 0]
+[r ---openflow-to-lom] ─> [route clients device_state_get device_state_set push_songs
+                                push_bank roster_dot roster_name probe_in]
+                       ├─ clients ─────> [unpack 0 0]
                        │        ready ──> [sel 0 1] ─> set "Waiting for Live" / "Connected
                        │                                to Live"        ─> status text
-                       │        set ────> [sel 0 1] ─> bgfillcolor …    ─> set[flow] dot
-                       │        visual ─> [sel 0 1] ─> bgfillcolor …    ─> visual[flow] dot
-                       │        chart ──> [sel 0 1] ─> bgfillcolor …    ─> chart[flow] dot
                        │        extra ──> [sel 0] ──┬─ set " "
                        │                            └─ [sprintf set plus %ld more( ─> line
+                       ├─ roster_dot ──> [route 0 1 2 3] ─> [prepend bgfillcolor] ─> row dot
+                       ├─ roster_name ─> [route 0 1 2 3] ─> [route 0 1 2]  tone per row
+                       │        0 / 1 ──> textcolor dim / title, then [prepend set] ─> label
+                       │        2 ──────> set " "                                 (empty)
+                       ├─ probe_in ────> [s openflow-probe-in]           to every probe
                        ├─ state get/set > [pattr openflow-state]
                        └─ rest ────────> [deferlow] ─> [v8 lom.js]
+[r openflow-probe-out] ─> [prepend probe] ─> [s ---openflow-to-node]   from every probe
 [pattr openflow-state] ─> [prepend device_state] ─> [s ---openflow-to-node]
 [v8 lom.js] ─> [route boot] ─┬─ rest ──────────────> [s ---openflow-to-node]
                              └─ boot + initialized ─> [init(
@@ -199,16 +203,14 @@ Notes that matter if you edit this:
   Before the first completion the signal is ignored, preserving the LiveAPI safety gate.
 - **The route peels off the face as well as device state.** State travels directly
   between Node and the parameter-enabled pattr; it is not part of the Live Object Model.
-- **The face is five integers on the wire, spelled here.** Node sends `clients <ready>
-  <set> <visual> <chart> <extra>` and the patch turns it into words and colours. Keeping
-  every string a user reads in the file that draws them is half the reason; the other
-  half is that a bare integer has no quoting to get wrong, where `set[flow]` is a symbol
-  with brackets in it that would have to survive Node for Max, the outlet, a `route` and
-  an `unpack` unchanged. **Adding an app means adding a row here and a name to
-  `OpenFlow.ClientKind`** — nothing else reads the wire message.
-- **`unpack`, not five messages.** The five are one state, and sent separately a roster
-  mid-update would draw a moment of a set that was never true. `unpack` fires right to
-  left off one list, so the whole face moves at once.
+- **The roster is four generic rows, named by Node.** The face shows whoever sent
+  `identify`, so the patch can no longer spell the names itself: `bridge.ts` sends
+  `clients <ready> <extra>`, then `roster_dot <row> <r> <g> <b> <a>` and `roster_name
+  <row> <tone> [<label>]` per row, and the patch only draws. Each label crosses as one
+  symbol atom, sanitised in `bridge.ts`. Adding an app needs no change here. See
+  [message protocol](../docs/message-protocol.md).
+- **The probe sends are global** — no `---` prefix — because they cross devices. Every
+  probe hears every `probe_in` message and filters by key or liveId.
 - **A dot is a `panel` with `shape: 1`, saved as `bgcolor` and recoloured by
   `bgfillcolor` messages.** That's the same split the display panel makes: `bgcolor` is
   the cached literal a patch loads with, `bgfillcolor` is what a panel fills from and

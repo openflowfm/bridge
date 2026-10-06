@@ -49,30 +49,31 @@ scripts is **unverified** — check it with `node tools/amxd.ts inspect` on a fr
 | `Waiting for Live` | Node is listening, LOM handshake hasn't completed |
 | `Connected to Live` | serving — the resting state, whether or not anyone is attached |
 
-Under it, one row per app in the suite, always drawn, its dot lit in that app's own mark
-hue while it is on the socket:
+Under it, up to four rows: one per app that has sent `identify`, in the order each first
+did, its dot lit in that app's own mark hue while it is on the socket:
 
 ```
- ●  set[flow]        #10D7C7
- ○  visual[flow]     #D849FF
- ●  chart[flow]      #FFA529
+ ●  set[flow] 0.4.0      #10D7C7
+ ○  visual[flow]         #D849FF   (closed: dim name, grey dot)
+ ●  master[flow] 0.1.0   #5480E4
  plus 1 more
 ```
 
-`plus n more` appears only when something the rows don't account for is connected — a
-second set[flow] window, `tools/diag.ts`, a browser someone pointed at the port, or a
-client that never sent `identify`.
+`plus n more` appears only when open sockets aren't accounted for by a lit row — an app
+past the fourth row, a second window, `tools/diag.ts`, a browser someone pointed at the
+port, or a client that never sent `identify`.
 
-**The roster is fixed rows rather than a list of who is here**, and a lamp per row rather
-than a count. A list would compact upward and put the same app on a different line
-depending on what else was running, which is the one thing a glance at a rack can't cope
-with; rows that never move make the answer a colour rather than a line to read. A second
-window of an app already lit is a real situation, but it is *the extra one* that is worth
-seeing, so it shows up in `plus n more`.
+**A row stays where it was first drawn.** An app that closes dims in place rather than
+being removed, so the rows below never compact upward and the same app is on the same
+line for as long as the device runs; a glance at a rack can't cope with a list that
+shifts. The rows are no longer fixed per app because `identify` lets any app name itself,
+so a new app needs no device release to appear. A fifth app takes the first dimmed row; if
+none has dimmed it is counted in `plus n more`. The rules, and what crosses to the
+patcher, are under [multiple clients](multiple-clients.md#the-roster-on-the-devices-face)
+and [message protocol](message-protocol.md#the-device-face).
 
-An app lights its row by sending `identify` when its socket opens. **Nothing is served
-differently for having sent it** — a client that never does is a client the roster is
-poorer about and the device is otherwise identical toward.
+**Nothing is served differently for having sent `identify`** — a client that never does
+is a client the roster is poorer about and the device is otherwise identical toward.
 
 Stuck on either of the first two? **Options ▸ Max ▸ Open Max Window** — that's where
 every error and every timing line lands.

@@ -122,13 +122,21 @@ a socket whose `'error'` nobody listens for, so one unclean disconnect used to t
 whole device down — and take it down invisibly, since the device's face keeps displaying
 the last roster it was handed.
 
-**Two watches belong to the device, and five to whoever is looking.**
+**Three watches belong to the device; the rest belong to whoever is looking.**
 
 `observe` (the set restructured) and `watch_selection` (the Session cursor, which is how a
 clip edited in Live reaches the held copy) are how the bridge keeps the set it holds
 current. They are armed once when the LOM reports ready and never released, because
 **a client connecting or disconnecting must not change what the device knows**. Clients
 cannot subscribe to them at all; the messages no longer exist in the protocol.
+
+`watch_probes` is the third, and it is the device's for the same reason: where each probe
+sits is part of what the device knows, and every client is told it in `probes`. **It is
+armed by probes existing, never by a client.** The bridge re-sends the whole list of
+probes it has heard `hello` from whenever that list changes, when the LOM reports ready,
+and on every `changed structure`, and `lom.ts` answers with `probe_targets`. A client
+starting a pass changes nothing about it — the probe is already watched, whether or not
+anyone is listening to it.
 
 They used to be client subscriptions, and that was the mistake underneath a long run of
 symptoms. Arming `observe` re-installs the `live_set tracks` and `live_set scenes`
@@ -157,6 +165,63 @@ because either alone fails badly: a count alone would silently eat the next real
 structural change if Live ever stopped echoing, and a window alone would eat every
 structural edit made in the first ten seconds. It also *accumulates* rather than resets,
 since two arms can be outstanding before either echo is delivered.
+
+## The roster on the device's face
+
+**The face shows whoever identified.** A client sends `identify { client, name?, version? }`
+once, and the bridge gives that `client` key a row: one per key, in the order each key was
+first seen, kept for as long as the bridge process runs. A key with no open socket left
+**dims in place** — its dot goes grey and its name drops to the dim tone — rather than
+letting the rows below move up, so an app stays where the user last saw it. A key that
+comes back lights its old row.
+
+- The label is `name`, or the display name the bridge knows for the key (`set` →
+  set[flow], `visual` → visual[flow], `chart` → chart[flow], `mastering` → master[flow]),
+  or the key itself; plus ` <version>` when one was sent. Trimmed to 28 characters with
+  control characters stripped, because it crosses to the patcher as one atom — see
+  *message protocol*. The key is any non-empty string up to 32 characters, so a new app
+  needs no bridge release to appear.
+- Known keys draw in their app's colour; any other key is grey (#BFBFBF), as is a
+  departed row's dot.
+- **Four rows.** When all four are taken and a new key arrives, it takes the first
+  departed row in place. If none has departed, it isn't drawn and is counted in the
+  "plus n more" line instead, together with any open socket that never identified.
+
+`identify` is not a handshake, and nothing else depends on it: a client that never sends it
+is served exactly the same, and shows up only in that count. An identity the device needed
+would be the first crack in rule 4.
+
+## Probe passes are shared
+
+A probe is one listening window, so two clients asking it for numbers get the same
+numbers — it is broadcast like the other watches, not opened per client. What a client
+owns is a **pass**: `probeListen { on: true, keys }` starts one, and the bridge gives it a
+number, counting up from 1 for the life of the bridge process.
+
+- **Several passes can run at once on different probes.** A new pass that shares any probe
+  with a running one **ends that whole pass**, not just the overlap, then starts. Half a
+  pass is not something either client asked for.
+- Starting tells each probe `listen <key> <pass> 1`, answers the requester with
+  `probeListening`, and broadcasts `probePass { on: true }`. A key the bridge doesn't list
+  in `probes` is an `error`, and nothing changes.
+- **Ending a pass** — a stop by number, an overlapping restart, or every probe in it gone —
+  tells each probe still present `listen <key> <pass> 0`, then waits up to 2 seconds for
+  their final reports. Each is broadcast as `probeReport { final: true }` as it arrives,
+  and `probePass { on: false, keys }` goes out after the last one (or the wait), with
+  `keys` the probes that did send a final. So a client knows its pass is over, with the
+  numbers in hand, when it sees that event with its own `pass`.
+- `probeListen { on: false, pass }` for a pass that isn't running is ignored without a
+  reply: a stale stop must not end somebody else's pass.
+- **Reports are dropped rather than guessed at**: an unknown pass, a key not in that pass,
+  a non-final report from a pass that is ending, or a probe whose position doesn't
+  currently resolve. Every report goes out with the probe's *current* `target`, so a probe
+  dragged mid-pass keeps reporting under its new position.
+- A probe that leaves (`bye`, or `probe_targets` saying it no longer resolves) is removed
+  from its pass, and a pass left with no probes ends.
+
+Because reports are broadcast, every client sees every pass. A client keeps the `pass` it
+was given and drops the rest — reading another client's first second of audio as its own
+result is the failure this numbering exists to prevent.
 
 ## Nobody walks but the bridge
 

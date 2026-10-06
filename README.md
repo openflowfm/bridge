@@ -3,16 +3,25 @@
 The Max for Live device of **open[flow]**: it holds the current state of a Live set and
 serves it to every client — [set[flow]](https://github.com/openflowfm/set),
 [visual[flow]](https://github.com/openflowfm/visuals),
-[chart[flow]](https://github.com/openflowfm/chart) — over WebSocket on port 17800. It is
+[chart[flow]](https://github.com/openflowfm/chart),
+[master[flow]](https://github.com/openflowfm/master) — over WebSocket on port 17800. It is
 the one job that has to happen inside Max; every interface is an app of its own.
 
 ```
 set[flow]    ──WS/JSON──┐
                         ├──> node.script (bridge.js) ──Max msgs──> v8 (lom.js) ──> Live
 visual[flow] ──WS/JSON──┤         :17800, WS only        the only LOM code
-   └─ its own server ───┘
-chart[flow]  ──WS/JSON──┘   (read-only, and the only one that binds the LAN)
+   └─ its own server ───┤               ▲
+chart[flow]  ──WS/JSON──┤               │ global Max sends
+master[flow] ──WS/JSON──┘      OpenFlowProbe.amxd × n
 ```
+
+chart[flow] is read-only, and the only one that binds the LAN.
+
+master[flow] also uses a second, much smaller device: **`OpenFlowProbe.amxd`**, built from
+`probe/`. A probe sits in a chain and measures the signal there; it talks only to the
+bridge, over global Max sends, and the bridge serves its numbers to clients — see
+[message protocol](docs/message-protocol.md#probe-devices--bridge).
 
 The device is the WebSocket server and nothing else. It ships as an `.amxd` plus two JS
 files — no app bundle, no code signing, no updater. The logic it runs on is
@@ -68,8 +77,10 @@ Everything is on the [latest release](../../releases/latest).
 2. Drag `SessionBridge.amxd` onto any track. It's an inert audio passthrough, so the Master
    track is fine.
 3. Wait for the device to read **Connected to Live**.
-4. Launch an app. It finds the device by itself, and the app's dot on the device face
-   lights when it attaches.
+4. Launch an app. It finds the device by itself and appears on the device face: every
+   app that identifies itself gets a row, in the order it first connected, and its dot
+   lights while it's attached. A closed app's row dims rather than disappearing; past
+   four apps, the rest show as "plus n more".
 
 Only one copy of the device can run at a time — two would fight over the port. The
 server binds `127.0.0.1` only, and nothing is downloaded at runtime.
@@ -93,6 +104,8 @@ npm run dev            # the three watchers — bridge.js, its types, and lom.js
 | `npm run build` | a bundled `bridge.js`, `lom.js`, and the device |
 | `npm run build:device` | the `.amxd` only — deliberately not watched |
 | `npm run install:device` | the device into the Ableton User Library, as `SessionBridge-qa` |
+| `npm run build:probe` | `OpenFlowProbe.amxd`, the probe device, from `probe/` |
+| `npm run install:probe` | the probe device into the Ableton User Library |
 | `npm run qa` | build and install at once, ready to try; marks the build as QA on the device face |
 | `npm run dev` | the watchers. Point Live at the `-qa` copy and reload the device to pick up a change |
 | `npm run typecheck` | both halves and `tools/` |
@@ -126,10 +139,10 @@ are non-obvious.
 | doc | read it before touching | source |
 |---|---|---|
 | [LOM gotchas](docs/lom-gotchas.md) | **`lom.ts`, at all.** Start here | `src/lom.ts`, [`LOM.md`](LOM.md) |
-| [message protocol](docs/message-protocol.md) | anything crossing Node ↔ `[v8]` — atoms, Dicts, errors | `src/bridge.ts`, `src/lom.ts`, [`@openflow/protocol`](https://github.com/openflowfm/protocol#readme) |
+| [message protocol](docs/message-protocol.md) | anything crossing Node ↔ `[v8]` — atoms, Dicts, errors — or reaching the device face or a probe device | `src/bridge.ts`, `src/lom.ts`, `tools/build-device.ts`, `probe/`, [`@openflow/protocol`](https://github.com/openflowfm/protocol#readme) |
 | [following Live](docs/following-live.md) | the cursor observers, deltas, or what a re-read publishes — including into the set the bridge holds | `src/lom.ts`, core's `snapshotDelta.ts` |
 | [reordering scenes](docs/reordering-scenes.md) | **the writes that can damage a set** — `move`'s four passes and their guards, and `keepScenes` ("new show"), which deletes every scene not kept | `src/bridge.ts`, `src/lom.ts`, core's `sceneMove.ts` |
-| [multiple clients](docs/multiple-clients.md) | **the set the bridge holds and serves without a walk**, broadcast, or anything assuming one UI | `src/bridge.ts`, core's `setModel.ts` |
+| [multiple clients](docs/multiple-clients.md) | **the set the bridge holds and serves without a walk**, broadcast, the roster on the device face, probe passes, or anything assuming one UI | `src/bridge.ts`, core's `setModel.ts` |
 | [device state and palette](docs/device-state.md) | set-owned configuration, the hidden parameter, the color table | `src/bridge.ts`, `src/lom.ts`, core's `livePalette.ts` |
 | [build and load](docs/build-and-load.md) | the compile targets, what ships, loading the device in Live | `tsconfig.node.json`, `tsconfig.v8.json`, `tools/build-bridge.ts` |
 | [diagnostics](docs/diagnostics.md) | the diagnostic surfaces, snapshot phases, or what's testable without Live | `src/bridge.ts`, `tools/diag.ts` |

@@ -51,6 +51,37 @@ behaves the way its name suggests.
   the slot scan costs ~758ms of a ~946ms walk. `diag ids` retains the explicit probe for
   rechecking a future Max build. Setting `.id` may be the real route, but `max.d.ts`
   declares it readonly and that is **unverified**.
+- **A probe's id is resolved by constructing on it, with a walk behind that.** The probe
+  device sends its own LOM id (`liveId`, from `[live.path this_device]`), and `watch_probes`
+  has to turn it into a run and a position. The fast path is a fresh
+  `new LiveAPI(null, 'id ' + liveId)` — construction, not `goto`, which the entry above
+  rules out — whose `path` (`live_set tracks T devices I chains C devices J …`) is parsed
+  into a `DeviceTarget`, accepted only if the id read back equals `liveId`. When that
+  doesn't resolve, the fallback walks every track's devices and rack chains to depth 4
+  comparing ids: slower, but built only from reads that already work. **Unverified** —
+  which path a real set takes, and the shape `path` comes back in, are both unmeasured. A
+  probe on Master or a return track resolves but can't be named by a `DeviceTarget`, so it
+  is reported with `target: null` and a line in the Max window saying why.
+- **`insert_device` exists from Live 12.4, and takes built-in device names only.** It is on
+  `Track` and `Chain`, undocumented by Cycling '74 (see [`LOM.md`](../LOM.md)), and `-1`
+  means the end of the chain. A name it doesn't know — a plug-in, a preset, a typo — may
+  neither throw nor insert anything, so `insert_device` counts the run's `devices` before
+  and after and treats "didn't grow by one" as the failure, then reads the new device's
+  `class_name` back rather than trusting the name it asked for. **Unverified** in Live.
+- **Device writes are guarded by `class_name`, and their indexes are refused, never
+  clamped.** A client addresses a device by run and position from the last state it saw,
+  and the chain may have changed since — another client, or the user in Live. So
+  `delete_device` and `move_device` carry the class they expect and refuse when the device
+  at that position is something else; deleting whatever happens to sit at index 2 now is
+  the failure this exists to prevent. The same reasoning refuses an `at` beyond the run
+  (for a move within one run, beyond its last index): clamping would put a device
+  somewhere nobody asked for, and say it succeeded. **Unverified** in Live.
+- **`Song.move_device` picks the nearest legal position and tells you which.** It returns
+  the index it actually used; an instrument can't sit after an audio effect, for one, so
+  the asked-for index isn't necessarily where the device lands. `move_device` therefore
+  reads the device id back at the returned index of the destination run (scanning the
+  run if that doesn't match) and replies with where it really is; not finding it in the
+  destination at all is "Live refused the move". **Unverified** in Live.
 - **A property Live documents as nullable can be read but not written.** `Scene.color_index`
   and `Track.color_index` are both "Can be None for no color", and writing either answers
   `v8liveapi: set: unsupported property type`. `Clip.color_index` has no such note and
