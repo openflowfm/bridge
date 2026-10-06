@@ -51,11 +51,16 @@ match what you're changing**. Reading the docs end to end is the wrong default.
     `./x.js`). `bridge.ts` is bundled by esbuild, which is what lets it import across the
     package boundary; `ws` is inlined so the shipped device is two files and no
     `node_modules/`.
-11. **Every commit made by an agent must include a GitHub-compatible Codex co-author
-    trailer.** Leave a blank line between the message and the trailer:
+11. **Every commit made by an agent must include a GitHub-compatible co-author
+    trailer naming the agent that actually made it.** Leave a blank line between the
+    message and the trailer. Never name an agent that didn't write the commit. For example:
 
     ```text
     Co-authored-by: Codex <noreply@openai.com>
+    ```
+
+    ```text
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
     ```
 
 ## Before you claim something works
