@@ -108,14 +108,15 @@ npm run dev            # the three watchers — bridge.js, its types, and lom.js
 | `npm run install:probe` | the probe device into the Ableton User Library |
 | `npm run qa` | build and install at once, ready to try; marks the build as QA on the device face |
 | `npm run dev` | the watchers. Point Live at the `-qa` copy and reload the device to pick up a change |
-| `npm run typecheck` | both halves and `tools/` |
+| `npm run typecheck` | both halves, `tools/` and `probe/` (skipped while `probe/` is absent) |
+| `npm test` | the probe's analysis tests in `probe/test` (skipped while absent) |
 | `npm run diag -- <what>` | one diagnostic message to a running device — [diagnostics](docs/diagnostics.md) |
 | `npm run check-palette` | Live's palette against `@openflow/core`'s table |
 | `npm run lom-scrape` | rescrape the LOM docs to a scratch file, for diffing against `LOM.md` |
 | `npm version <v> --no-git-tag-version` | the version on the device face; the release guard refuses a tag that disagrees |
 
-There are no unit tests here. `bridge.ts` reaches its logic through `@openflow/core`,
-which is where the tests are; `lom.ts` needs Live open with the device loaded and has no
+The only unit tests here are the probe's (`npm test`). `bridge.ts` reaches its logic
+through `@openflow/core`, which is where its tests are; `lom.ts` needs Live open with the device loaded and has no
 automated coverage at all. CI attaches every build so a change can be tried in Live
 without building the branch by hand.
 

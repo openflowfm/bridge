@@ -22,7 +22,8 @@
     "install:probe": "node --disable-warning=ExperimentalWarning tools/install-probe.ts",
     "qa": "export OPENFLOW_QA=1 && npm run build && npm run install:device",
     "dev": "concurrently -k -n bridge,types,lom -c cyan,blue,magenta \"node --disable-warning=ExperimentalWarning tools/dev-bridge.ts\" \"tsc -p tsconfig.node.json --noEmit --watch --preserveWatchOutput\" \"tsc -p tsconfig.v8.json --watch --preserveWatchOutput\"",
-    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.v8.json --noEmit && tsc -p tools/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.v8.json --noEmit && tsc -p tools/tsconfig.json && (test ! -f probe/tsconfig.json || tsc -p probe/tsconfig.json)",
+    "test": "test ! -d probe/test || node --test probe/test/",
     "diag": "node --disable-warning=ExperimentalWarning tools/diag.ts",
     "check-palette": "node --disable-warning=ExperimentalWarning tools/check-palette.ts",
     "lom-scrape": "node --disable-warning=ExperimentalWarning tools/lom-reference.ts"

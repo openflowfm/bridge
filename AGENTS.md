@@ -68,8 +68,10 @@ match what you're changing**. Reading the docs end to end is the wrong default.
 ## Before you claim something works
 
 ```sh
-npm run typecheck     # both halves and tools/
+npm run typecheck     # both halves, tools/ and probe/
+npm test              # the probe's analysis tests (probe/test)
 npm run build         # bridge.js, lom.js, the .amxd — from a clean tree, as CI does
+npm run build:probe   # OpenFlowProbe.amxd, when probe/ changed
 npm run qa            # the same, installed as SessionBridge-qa — then reload it in Live
 ```
 
