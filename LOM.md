@@ -64,11 +64,12 @@ to attribute a name to a class by block arithmetic — the blocks don't line up 
 page's class split, and a bulk diff misattributes `Song.View` members and enum
 constants wholesale. Read the docstrings on either side of the name instead.
 
-## Where 12.4.3 has more than the docs
+## Where 12.4.x has more than the docs
 
-Members that exist in Live 12.4.3's own table and appear **nowhere on the Cycling '74
+Members that exist in Live 12.4's own table and appear **nowhere on the Cycling '74
 page** — not as a member, not even in prose. They are real and callable, and
-undocumented, so nothing here can be looked up elsewhere.
+undocumented, so nothing here can be looked up elsewhere. Each was read out of 12.4.3's
+binary unless the row names a later build.
 
 | member | class | what it does |
 |---|---|---|
@@ -81,6 +82,7 @@ undocumented, so nothing here can be looked up elsewhere.
 | `is_take_lane_clip` | `Clip` | true for a take-lane clip (always also an Arrangement clip) |
 | `create_midi_clip` | `Track` | inserts an empty MIDI clip **into the Arrangement** at a time. Not the Session-grid call — `ClipSlot.create_clip` is that one. |
 | `take_lanes` / `create_take_lane` | `Track` | Arrangement take lanes. Listed for completeness; nothing here reaches them. |
+| `insert_device` | `Track`, `Chain` | puts one of Live's **built-in** devices into the chain at an index, `-1` for the end. Read from 12.4.6's binary; how it behaves is under *LOM gotchas*. |
 
 **Two error strings that are really constraints.** Neither appears on the Cycling '74
 page, and both sit in 12.4.3's LiveAPI error block beside `'$1' is not a listenable
@@ -511,6 +513,7 @@ Canonical path: `live_set tracks N`
 | `delete_device` | Parameter: index Delete the device at the given index. |
 | `duplicate_clip_slot` | Parameter: index Works like 'Duplicate' in a clip's context menu. |
 | `duplicate_clip_to_arrangement` | Parameters: clip destination_time [double] Duplicate the given clip to the Arrangement, placing it at the given destination_time in beats. |
+| `insert_device` | Parameters: device name index Add a device at a given index in the chain. At end if -1. **Live 12.4.6's binary only** — not on Cycling '74's page; see *Where 12.4.x has more than the docs*. |
 | `jump_in_running_session_clip` | Parameter: beats beats [double] is the amount to jump relatively to the current clip position. Modify playback position in running Session clip, if any. |
 | `stop_all_clips` | Stops all playing and fired clips in this track. |
 
@@ -664,6 +667,7 @@ Canonical path: `live_set tracks N devices M chains L`
 | function | notes |
 |---|---|
 | `delete_device` | Parameter: index [int]. |
+| `insert_device` | Parameters: device name index Add a device at a given index in the chain. At end if -1. **Live 12.4.6's binary only** — not on Cycling '74's page; see *Where 12.4.x has more than the docs*. |
 
 ## MixerDevice
 

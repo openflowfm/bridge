@@ -1,6 +1,6 @@
 # Message protocol between the halves
 
-Node ↔ v8 messaging: atoms for realtime pushes, Dicts for large payloads, and the failure modes of each.
+Node ↔ v8 messaging: atoms for realtime pushes, Dicts for large payloads, and the failure modes of each — plus the device face, and the probe devices' messages to and from the bridge.
 
 ## Message protocol between the halves
 
@@ -37,6 +37,11 @@ lom.js     ──[s ---openflow-to-node]──> bridge.js
 | `watch_chains <encodedUnion>` | **the one watch with a target.** Not `0\|1`: the whole union of device runs anyone is looking at, rebuilt to match. An empty list is how it stops |
 | `observe <0\|1>` | install / remove the `live_set tracks` and `scenes` observers. **Device-owned** |
 | `watch_selection <0\|1>` | install / remove the Session-cursor observers — see *Following Live*. **Device-owned** |
+| `watch_probes <encodedList>` | `[{ key, liveId }]`, every probe the bridge has heard `hello` from — the whole list each time, `[]` to clear. Resolves each id to a position and watches the runs it sits in. **Device-owned**, and armed by probes existing rather than at ready — see below |
+| `insert_device <reqId> <encoded>` | `{ run, name, at? }` — put a built-in device into a run, at the end without `at`. Answers `device_done` |
+| `delete_device <reqId> <encoded>` | `{ target, className }` — delete one device, refused unless its `class_name` still matches. Answers `device_done` |
+| `move_device <reqId> <encoded>` | `{ target, className, to, at }` — move one device within or between runs, same guard. Answers `device_done` with where it landed |
+| `param_text <reqId> <encoded>` | `{ target, p, values }` — Live's text for 1–64 values of one control (`str_for_value`), writing nothing. The bridge has already refused non-finite values; `lom.ts` refuses ones outside the control's range |
 | `ping` | |
 
 `watch_chains` is the exception to the shape of every other line here, and the reason is
@@ -45,12 +50,22 @@ be armed by a boolean, and cannot be refcounted per kind either — two clients 
 different racks both want it on and neither may release the other's. So the bridge unions
 what every client declared and this side is told the answer. It never sees a client.
 
-**The two marked device-owned are sent once, when the LOM reports ready, and never
+**`observe` and `watch_selection` are sent once, when the LOM reports ready, and never
 turned off.** They are how `bridge.ts` keeps the set it holds current, so they run for
 as long as the device is loaded whether or not a browser is open — no client can
-subscribe to them, and there are no wire messages for them. The other four are armed
-and released against connected clients, because they are viewport concerns. Which is
-which, and what it cost to get wrong, is under *multiple clients*.
+subscribe to them, and there are no wire messages for them. `watch_probes` is the third
+device-owned watch, with a different trigger: it is re-sent whenever the list of probes
+changes (a `hello`, a `bye`), when the LOM reports ready, and on every `changed
+structure`, because that is how a probe's position is re-resolved. No client arms it;
+`probeListen` only starts a pass on probes already watched. The rest are armed and
+released against connected clients, because they are viewport concerns. Which is which,
+and what it cost to get wrong, is under *multiple clients*.
+
+The four device-chain requests carry one `encodeMaxAtom` JSON atom each, like
+`set_device`: a run's `path` and a device's name are punctuation, and one atom is the
+shape that survives. Each answers `device_done` or `err` with its `reqId`. Why indexes
+are refused rather than clamped, and why delete and move check `class_name` first, is
+in *LOM gotchas*.
 
 | → node | |
 |---|---|
@@ -74,6 +89,9 @@ which, and what it cost to get wrong, is under *multiple clients*.
 | `chain_values <encodedChanges>` | controls that moved since the last frame, batched per tick and addressed `(t, path, i, p)` |
 | `song_position <bar> <beat> <sixteenth>` | Live's Arrangement position |
 | `transport_state <encodedState>` | complete tempo, metronome, launch-quantization, Arrangement Record and scale state |
+| `device_done <reqId> <encoded>` | `{ target, className }` for all three device-chain requests. Insert: where Live put the new device, read back. Delete: where the deleted one was, and its class. Move: where it landed — the index `Song.move_device` returned, checked by reading the device id back there, which may not be the `at` asked for |
+| `param_text_done <reqId> <encoded>` | `{ target, p, texts }` — one string per value asked, same order |
+| `probe_targets <encoded>` | `[{ key, liveId, target, name }]`, one per watched probe. `target` is `null` when the id didn't resolve or the probe sits somewhere a `DeviceTarget` can't name (Master, a return track); the reason goes to the Max window. Sent after every `watch_probes`, then again — debounced ~60ms, and only if it differs from the last — when a watched run's `devices` or a probe's `name` changes |
 | `err <reqId> <msg>` | |
 
 Two wire messages (`launch` and `stop`) collapse onto the single `playback` message with
@@ -88,14 +106,28 @@ exact jump rather than repeated `Application.View.scroll_view` calls, so it has 
 dependency on the current row, viewport size or a control surface's unpublished session
 ring.
 
-`clients <ready> <set> <visual> <chart> <extra>` also travels node → lom's direction but
-is routed off by `[route clients]` before reaching `v8`; it only drives the device's face.
-`ready` is the LOM handshake, then one flag per app row in the order the device draws
-them, then however many connected sockets those flags don't account for. **Five integers
-and not one symbol** — the patcher owns every word a user reads and every colour a dot is
-drawn in, so no string ever has to survive the crossing. `set[flow]` in particular is a
-symbol with brackets in it that would have to come through Node for Max, the outlet, a
-`route` and an `unpack` unchanged, and there is no reason to find out whether it does.
+### The device face
+
+Three messages travel node → lom's direction but are routed off by the patcher before
+reaching `v8`; they only drive the device's face. The roster they draw is described under
+*multiple clients*.
+
+| → face | |
+|---|---|
+| `clients <ready> <extra>` | the LOM handshake (0/1, the headline), and how many open sockets no lit row accounts for |
+| `roster_dot <row> <r> <g> <b> <a>` | row 0–3: that row's dot colour, as its `bgfillcolor` |
+| `roster_name <row> <tone> [<label>]` | tone 1 = present, 0 = departed (dimmed), 2 = empty — clear the text, and no label atom follows |
+
+**The face used to be five integers and no strings at all** — one flag per fixed app row,
+with the patcher owning every word and colour — precisely so that `set[flow]`, a symbol
+with brackets in it, never had to survive Node for Max, the outlet, a `route` and an
+`unpack`. That stopped working once `identify` let any app name itself: the bridge now
+knows labels the patcher can't. So the label crosses as **one atom per row**, which is the
+smallest version of the risk — one symbol, spaces included, so `master[flow] 1.2.0` is
+not split by its version — and the bridge makes it as safe as it can first: trimmed to
+28 characters, control characters stripped. The colour crosses as four numbers rather than
+a name for the same reason the old design avoided strings. The tone is a number so the
+patcher, not the bridge, still owns which literal colour "present" and "departed" are.
 
 ### Realtime numeric pushes use atoms, not Dicts
 
@@ -265,3 +297,55 @@ Both halves bound what they will do: `bridge.ts` refuses an ask outside 1–`CLI
 clips before it reaches Max, and `lom.ts` stops reading a clip after `NOTE_COUNT_MAX` notes.
 The ask travels as loose atoms, so without the first bound a malformed request would have
 Live open hundreds of clips inside one Max message.
+
+## Probe devices ↔ bridge
+
+A probe is a separate Max for Live device (`OpenFlowProbe.amxd`, built from `probe/`) that
+measures the signal at its place in a chain. There can be any number of them, on any
+tracks, and they talk to the bridge over two **global** sends:
+
+```
+probe   ──[s openflow-probe-out]──> [r openflow-probe-out] → [prepend probe] → [s ---openflow-to-node] → bridge.js
+bridge.js ── probe_in <verb> … ──> [route probe_in] → [s openflow-probe-in] ──> every probe
+```
+
+**No `---` prefix, on purpose.** `---` makes a send name local to one device, which is what
+keeps the bridge's own halves from hearing another device. Probes are other devices, so
+these two names must cross device boundaries. Node sees probe messages as `probe <verb> …`
+on its usual inlet and emits `probe_in <verb> …` on its usual outlet; the bridge patcher
+routes `probe_in` off before `v8` (the `route` strips the selector) into the global send.
+
+**Every probe hears every message, and filters.** There is one `openflow-probe-in` and
+no addressing in Max itself, so each message carries the `key` (or, for `rekey`, the
+`liveId`) it is for, and a probe ignores anything that isn't its own. `who` is the one
+message every probe answers.
+
+| probe → bridge (`openflow-probe-out`) | |
+|---|---|
+| `hello <key> <liveId>` | I exist. Sent when the probe loads, in answer to `who`, and after adopting a key from `rekey`. `liveId` is the probe's own LOM id, from `[live.path this_device]` |
+| `bye <key> <liveId>` | I'm going — the probe is being removed or unloaded. The bridge drops a registration only when both match, so a copy deleted before its `rekey` landed can't take the original's key with it |
+| `report <key> <pass> <final> <dictName>` | a cumulative report for `pass`; `final` is 0 while listening, 1 for the one report after a stop. The Dict holds one `ProbeReport` (the protocol type) as JSON |
+
+| bridge → probes (`openflow-probe-in`) | |
+|---|---|
+| `who` | everyone say `hello`. Sent when the bridge's server starts listening, so probes loaded before the bridge are found |
+| `listen <key> <pass> 1` | reset your window and start listening as `pass`; report about once a second, `final 0` |
+| `listen <key> <pass> 0` | stop, and send one last report for `pass` with `final 1` |
+| `rekey <liveId> <newKey>` | the probe whose own id is `liveId` takes `newKey`, keeps it, and sends a fresh `hello` |
+
+**Duplicate keys are expected, not an error.** A probe makes a random key when it is first
+created and stores it in the set, so it survives a reload and a drag. Copying the device
+copies the stored key too, and two probes then `hello` with the same one. The bridge
+keeps the first and sends `rekey` addressed by the *later* hello's `liveId` — the only
+thing that tells the two apart — and the copy re-introduces itself under its new key.
+
+**The report Dict is the probe's own**, named in each `report`. Dict names are global and
+several probes report every second, so one shared name would race exactly the way the
+realtime pushes above would; a name per probe (from its key, say) keeps every report
+intact until the bridge has read it. What the bridge does with a report — which pass it
+belongs to, which are dropped, when a pass ends — is under *multiple clients*.
+
+**`liveId` is the probe's one LOM call**, and the one exception to rule 1: the probe learns
+its own id so `lom.ts` can find where it sits (`watch_probes` → `probe_targets`). The probe
+never reads or writes anything else in the LOM; where it is, and when that changes, is
+`lom.ts`'s job.

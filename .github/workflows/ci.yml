@@ -28,6 +28,9 @@ jobs:
 
       - run: npm run typecheck
 
+      # The probe's analysis (probe/test). The only automated tests in this repo.
+      - run: npm test
+
       # The "must build from a clean tree" rule, enforced rather than
       # remembered. A clean checkout is the only place it's honestly tested —
       # a file that's untracked but imported passes locally and fails here.

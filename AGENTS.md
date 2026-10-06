@@ -18,7 +18,9 @@ match what you're changing**. Reading the docs end to end is the wrong default.
 ## Rules
 
 1. **`src/lom.ts` is the only file in the whole suite that touches the Live Object
-   Model.** Everything else talks to it through the protocol.
+   Model.** Everything else talks to it through the protocol. The one exception is the
+   probe device's patcher, whose `[live.path this_device]` learns its own LOM id
+   (`liveId`) to send in `hello`; it makes no other LOM call, and `lom.ts` resolves that id.
 2. **`lom.ts` cannot `import` anything** — it compiles as a script, not a module, so
    Max's `[v8]` finds its handlers as top-level globals. Protocol types come from the
    global `OpenFlow` namespace. Adding an import breaks the device silently.
@@ -66,8 +68,10 @@ match what you're changing**. Reading the docs end to end is the wrong default.
 ## Before you claim something works
 
 ```sh
-npm run typecheck     # both halves and tools/
+npm run typecheck     # both halves, tools/ and probe/
+npm test              # the probe's analysis tests (probe/test)
 npm run build         # bridge.js, lom.js, the .amxd — from a clean tree, as CI does
+npm run build:probe   # OpenFlowProbe.amxd, when probe/ changed
 npm run qa            # the same, installed as SessionBridge-qa — then reload it in Live
 ```
 

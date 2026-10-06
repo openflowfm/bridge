@@ -21,7 +21,8 @@
 //      select_scene <scene> | select_track <track> | set_fold <track> <0|1>
 //      set_transport <encodedPatch> | set_mixer <encodedTargetAndPatch>
 //      set_device <encodedTargetAndPatch>
-//      watch_chains <encodedWatchList>
+//      insert_device | delete_device | move_device | param_text <reqId> <encoded>
+//      watch_chains <encodedWatchList> | watch_probes <encodedProbeList>
 //      watch_play <0|1> | watch_meters <0|1> | watch_sends <0|1> | watch_transport <0|1>
 //      watch_status <0|1> | watch_selection <0|1> | watch_scenes <0|1> | ping | set_info
 // out: ready | snapshot_progress <reqId> <n> <total>
@@ -41,6 +42,8 @@
 //        <inSeconds> <sigNum> <sigDen> … (nine atoms per *playing* track)
 //      mixer_state <encodedState>
 //      chain_state <encodedState> | chain_values <encodedChanges>
+//      device_done <reqId> <encoded> | param_text_done <reqId> <encoded>
+//      probe_targets <encodedList>
 //      pong
 
 var autowatch = 1;
@@ -3081,6 +3084,644 @@ function set_device(encoded: unknown): void {
   }
 }
 
+// --- chain edits ------------------------------------------------------
+// Insert, delete and move a device. Unlike the writes above these *do* reply
+// (`device_done`): a position is the only address a client has, and the one
+// Live actually used can differ from the one asked for, so the answer is read
+// back rather than echoed.
+//
+// **Every guard runs before anything is written.** A position goes stale with
+// every edit made in Live, so a stale index fails loudly here — a class-name
+// mismatch, an out-of-range position — rather than landing on a neighbour.
+// Positions are refused, never clamped, for the same reason.
+//
+// They refuse while a walk or a write is running, as `apply` does: a chain
+// edit renumbers devices, and the snapshot and move jobs hold positions.
+
+function isWholeIndex(n: unknown): n is number {
+  return typeof n === 'number' && isFinite(n) && Math.floor(n) === n && n >= 0;
+}
+
+function isDeviceRun(r: unknown): r is OpenFlow.DeviceRun {
+  if (!r || typeof r !== 'object') return false;
+  const run = r as OpenFlow.DeviceRun;
+  if (!isWholeIndex(run.t) || !Array.isArray(run.path) || run.path.length % 2 !== 0) {
+    return false;
+  }
+  for (let i = 0; i < run.path.length; i++) if (!isWholeIndex(run.path[i])) return false;
+  return true;
+}
+
+function isDeviceTarget(r: unknown): r is OpenFlow.DeviceTarget {
+  return isDeviceRun(r) && isWholeIndex((r as OpenFlow.DeviceTarget).i);
+}
+
+function samePath(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** How an error names a position, so the Max window and the client agree. */
+function describeTarget(target: OpenFlow.DeviceTarget): string {
+  const steps = target.path.length ? ' [' + target.path.join('.') + ']' : '';
+  return 'track ' + target.t + steps + ' device ' + target.i;
+}
+
+function chainEditRefusal(): string | null {
+  if (!deviceReady) return 'device not ready';
+  return blockedBy();
+}
+
+/**
+ * The class-name guard shared by delete and move. Returns the device's path,
+ * or a reason it isn't the device the client thinks it is.
+ */
+function guardedDevicePath(
+  target: OpenFlow.DeviceTarget,
+  className: string,
+): { path: string } | { refused: string } {
+  const path = deviceTargetPath(target);
+  if (path === null) return { refused: 'device at ' + describeTarget(target) + ' did not resolve' };
+  const actual = gstr(at(path), 'class_name');
+  if (actual !== className) {
+    return {
+      refused: 'device at ' + describeTarget(target) + ' is ' + actual + ', not ' + className,
+    };
+  }
+  return { path: path };
+}
+
+function deviceDone(reqId: number, target: OpenFlow.DeviceTarget, className: string): void {
+  // A watched run hears this from Live anyway, but the membership echo queues
+  // behind whatever Live is doing — nudge it so the chain redraws with the reply.
+  onChainChange();
+  outlet(0, 'device_done', reqId, encodeMaxAtom({ target: target, className: className }));
+}
+
+function insert_device(reqId: number, encoded: unknown): void {
+  const refused = chainEditRefusal();
+  if (refused) return fail(reqId, refused);
+  const v = decodeMaxAtom(encoded) as { run?: unknown; name?: unknown; at?: unknown } | null;
+  if (!v || typeof v !== 'object' || !isDeviceRun(v.run)) {
+    return fail(reqId, 'invalid device run');
+  }
+  const run = v.run;
+  if (typeof v.name !== 'string' || v.name === '') return fail(reqId, 'device name is missing');
+  const name = v.name;
+  const hasPos = v.at !== undefined && v.at !== null;
+  if (hasPos && (typeof v.at !== 'number' || !isFinite(v.at) || Math.floor(v.at) !== v.at)) {
+    return fail(reqId, 'invalid insert position');
+  }
+  const pos = hasPos ? (v.at as number) : -1;
+
+  try {
+    const runPath = resolveRunPath(run.t, run.path);
+    if (runPath === null) return fail(reqId, 'device run did not resolve');
+    const count = at(runPath).getcount('devices');
+    if (hasPos && (pos < 0 || pos > count)) {
+      return fail(reqId, 'insert position ' + pos + ' is outside 0..' + count);
+    }
+    // Unverified: `insert_device` is in Live 12.4's docstring table ("At end
+    // if -1") but not in LOM.md, and a multi-word name ("EQ Eight") is passed
+    // as one JS string on the strength of what `setName` measured for `set`.
+    // The id diff below is what catches either being wrong.
+    const before = gids(at(runPath), 'devices');
+    at(runPath).call('insert_device', name, pos);
+    const after = gids(at(runPath), 'devices');
+    // The new device is the id that wasn't there before, wherever Live put it —
+    // not whatever now sits at `at`, which is a guess about Live's placement.
+    let index = -1;
+    for (let k = 0; k < after.length; k++) {
+      if (before.indexOf(after[k]) < 0) {
+        index = k;
+        break;
+      }
+    }
+    if (after.length !== before.length + 1 || index < 0) {
+      return fail(reqId, 'Live did not insert ' + name + ' — built-in devices only');
+    }
+    const className = gstr(at(runPath + ' devices ' + index), 'class_name');
+    deviceDone(reqId, { t: run.t, path: run.path, i: index }, className);
+  } catch (e) {
+    fail(reqId, e);
+  }
+}
+
+function delete_device(reqId: number, encoded: unknown): void {
+  const refused = chainEditRefusal();
+  if (refused) return fail(reqId, refused);
+  const v = decodeMaxAtom(encoded) as { target?: unknown; className?: unknown } | null;
+  if (!v || typeof v !== 'object' || !isDeviceTarget(v.target)) {
+    return fail(reqId, 'invalid device target');
+  }
+  const target = v.target;
+  if (typeof v.className !== 'string' || v.className === '') {
+    return fail(reqId, 'device class name is missing');
+  }
+  const className = v.className;
+
+  try {
+    const guard = guardedDevicePath(target, className);
+    if ('refused' in guard) return fail(reqId, guard.refused);
+    // deviceTargetPath just resolved every hop, so the run does too.
+    const runPath = runPathOf(target.t, target.path);
+    const count = at(runPath).getcount('devices');
+    at(runPath).call('delete_device', target.i);
+    if (at(runPath).getcount('devices') !== count - 1) {
+      return fail(reqId, 'Live did not delete ' + className + ' at ' + describeTarget(target));
+    }
+    deviceDone(reqId, target, className);
+  } catch (e) {
+    fail(reqId, e);
+  }
+}
+
+/**
+ * `Song.move_device` answers with the position it actually used — "the
+ * nearest possible position" when the asked-for one won't do — so that is
+ * the reply, checked by reading the device id back at that index.
+ */
+function move_device(reqId: number, encoded: unknown): void {
+  const refused = chainEditRefusal();
+  if (refused) return fail(reqId, refused);
+  const v = decodeMaxAtom(encoded) as {
+    target?: unknown;
+    className?: unknown;
+    to?: unknown;
+    at?: unknown;
+  } | null;
+  if (!v || typeof v !== 'object' || !isDeviceTarget(v.target)) {
+    return fail(reqId, 'invalid device target');
+  }
+  const target = v.target;
+  if (typeof v.className !== 'string' || v.className === '') {
+    return fail(reqId, 'device class name is missing');
+  }
+  const className = v.className;
+  if (!isDeviceRun(v.to)) return fail(reqId, 'invalid destination run');
+  const to = v.to;
+  if (!isWholeIndex(v.at)) return fail(reqId, 'invalid move position');
+  const pos = v.at;
+
+  try {
+    const guard = guardedDevicePath(target, className);
+    if ('refused' in guard) return fail(reqId, guard.refused);
+    // Read before the next at() re-points the cursor.
+    const deviceId = Number(at(guard.path).id);
+
+    const destPath = resolveRunPath(to.t, to.path);
+    if (destPath === null) return fail(reqId, 'destination run did not resolve');
+    const dest = at(destPath);
+    const destId = Number(dest.id);
+    const count = dest.getcount('devices');
+    // Within one run the device is already counted, so the last slot is count - 1.
+    const limit = to.t === target.t && samePath(to.path, target.path) ? count - 1 : count;
+    if (pos > limit) return fail(reqId, 'move position ' + pos + ' is outside 0..' + limit);
+
+    // Unverified: passing both objects as `'id', n` pairs, and the shape of the
+    // returned int (taken as the last atom). The read-back below does not trust
+    // the return value, so a wrong guess costs a scan rather than a wrong reply.
+    // A destination inside a rack that sits later in the source's own run is
+    // addressed through that rack's index, and lifting the source out shifts
+    // the rack down by one. Moving a rack into one of its own chains is not a
+    // move at all.
+    const toPath = to.path.slice();
+    const depth = target.path.length;
+    if (
+      to.t === target.t && toPath.length > depth &&
+      samePath(toPath.slice(0, depth), target.path)
+    ) {
+      if (toPath[depth] === target.i) return fail(reqId, 'a rack cannot move into itself');
+      if (toPath[depth] > target.i) toPath[depth] -= 1;
+    }
+
+    const ret = at('live_set').call('move_device', 'id', deviceId, 'id', destId, pos);
+    const atoms = Array.isArray(ret) ? ret : [ret];
+    const landedAt = Number(atoms.length ? atoms[atoms.length - 1] : NaN);
+
+    // Re-resolved after the move: the path read before it may name a neighbour now.
+    const landedRun = resolveRunPath(to.t, toPath);
+    if (landedRun === null || Number(at(landedRun).id) !== destId) {
+      return fail(reqId, 'moved, but the destination run no longer resolves where expected');
+    }
+    let index = -1;
+    if (isWholeIndex(landedAt)) {
+      const landed = at(landedRun + ' devices ' + landedAt);
+      if (exists(landed) && Number(landed.id) === deviceId) index = landedAt;
+    }
+    if (index < 0) {
+      const ids = gids(at(landedRun), 'devices');
+      index = ids.indexOf(deviceId);
+      if (index >= 0) {
+        post(
+          'openflow move_device: Live answered ' + JSON.stringify(ret) +
+            ', found the device at ' + index + ' by scanning\n',
+        );
+      }
+    }
+    if (index < 0) return fail(reqId, 'Live refused the move');
+    deviceDone(reqId, { t: to.t, path: toPath, i: index }, className);
+  } catch (e) {
+    fail(reqId, e);
+  }
+}
+
+// --- parameter text ---------------------------------------------------
+// Live's own text for values a client is considering, without writing any of
+// them — so a client can search for the raw value that reads as "350 Hz"
+// without touching the set. Read-only, so a running walk doesn't refuse it.
+
+/** Mirrors the bridge's validation; anything past it is a bad request. */
+const PARAM_TEXT_MAX = 64;
+
+function param_text(reqId: number, encoded: unknown): void {
+  if (!deviceReady) return fail(reqId, 'device not ready');
+  const v = decodeMaxAtom(encoded) as { target?: unknown; p?: unknown; values?: unknown } | null;
+  if (!v || typeof v !== 'object' || !isDeviceTarget(v.target)) {
+    return fail(reqId, 'invalid device target');
+  }
+  const target = v.target;
+  if (!isWholeIndex(v.p)) return fail(reqId, 'invalid parameter index');
+  const p = v.p;
+  const values = v.values;
+  if (!Array.isArray(values) || values.length < 1 || values.length > PARAM_TEXT_MAX) {
+    return fail(reqId, 'param_text takes 1..' + PARAM_TEXT_MAX + ' values');
+  }
+  for (let i = 0; i < values.length; i++) {
+    if (typeof values[i] !== 'number' || !isFinite(values[i])) {
+      return fail(reqId, 'param_text values must be finite numbers');
+    }
+  }
+
+  try {
+    const devicePath = deviceTargetPath(target);
+    if (devicePath === null) return fail(reqId, 'device at ' + describeTarget(target) + ' did not resolve');
+    const parameter = at(devicePath + ' parameters ' + p);
+    if (!exists(parameter)) return fail(reqId, 'device parameter did not resolve');
+    const min = gnum(parameter, 'min');
+    const max = gnum(parameter, 'max');
+    const texts: string[] = [];
+    for (let i = 0; i < values.length; i++) {
+      if (values[i] < min || values[i] > max) {
+        return fail(reqId, 'value ' + values[i] + ' is outside ' + min + '..' + max);
+      }
+    }
+    // `parameterDisplay` touches only this object, never the shared cursor.
+    for (let i = 0; i < values.length; i++) texts.push(parameterDisplay(parameter, values[i]));
+    outlet(0, 'param_text_done', reqId, encodeMaxAtom({ target: target, p: p, texts: texts }));
+  } catch (e) {
+    fail(reqId, e);
+  }
+}
+
+// --- probe watch ------------------------------------------------------
+//
+// Where each probe device sits, by position, kept current.
+//
+// **A device-owned watch**, like `observe` and `watch_selection` (rule 4): the
+// bridge arms it whenever probes exist and no client ever arms or releases it.
+// A probe knows its own LOM id (`live.thisdevice`) but not its position, and a
+// position is the only address the protocol has, so this side turns the one
+// into the other. `probe_targets` is its only output.
+//
+// Resolution is by id, two ways. The fast path constructs a `LiveAPI` on
+// `id N` and parses its path — but `goto('id N')` is measured as *not*
+// resolving (see docs/lom-gotchas.md), and whether the constructor does better
+// is **unverified**. So the fallback walks every track's devices, and rack
+// chains to `PROBE_WALK_DEPTH`, comparing ids. Which one answered is posted to
+// the Max window once per probe, so it can be read off in Live.
+//
+// Observers go on `devices` of every run along each probe's path, and on its
+// `name`. Like the chain watch the callbacks infer nothing: any of them
+// re-resolves everything through `probeTask`, and the payload is deduped.
+// Re-resolving after a structural change is the bridge's job — it re-sends
+// `watch_probes` on `changed structure`, a probe's hello or bye, and LOM ready.
+
+/** Rack nesting the fallback walk follows. Deeper probes don't resolve. */
+const PROBE_WALK_DEPTH = 4;
+
+/** Runaway stop; a handful of probes needs a few dozen. */
+const PROBE_OBSERVER_MAX = 200;
+
+var probeWatches: Array<{ key: string; liveId: number }> = [];
+var probeWatching = false;
+var probeObservers: LiveAPI[] = [];
+/** See `chainAttaching`: attaching fires the callback that would schedule this. */
+var probeAttaching = false;
+var lastProbeKey = '';
+/** What the observers point at; see `chainShapeKey` for why this guard exists. */
+var lastProbeShape = '';
+/** How each liveId last resolved, so the Max window hears it once. */
+var probeHowPosted: { [liveId: string]: string } = {};
+
+interface ProbeHit {
+  target: OpenFlow.DeviceTarget | null;
+  name: string;
+  /** Why `target` is null, for the Max window. */
+  why: string;
+  /** 'id' | 'walk' | '' — which path resolved it. */
+  how: string;
+}
+
+/**
+ * `live_set tracks T devices I [chains C devices J]...` as a DeviceTarget.
+ * `null` for anything else; `master`/`return` for the places a DeviceTarget
+ * cannot name, so the reason can be told apart from "didn't parse".
+ */
+function parseDevicePath(
+  path: string,
+): OpenFlow.DeviceTarget | 'master' | 'return' | null {
+  const tok = path.replace(/"/g, '').trim().split(/\s+/);
+  if (tok[0] !== 'live_set') return null;
+  if (tok[1] === 'master_track') return 'master';
+  if (tok[1] === 'return_tracks') return 'return';
+  if (tok[1] !== 'tracks' || tok[3] !== 'devices') return null;
+  const t = Number(tok[2]);
+  let i = Number(tok[4]);
+  if (!isWholeIndex(t) || !isWholeIndex(i)) return null;
+  const steps: number[] = [];
+  let k = 5;
+  while (k < tok.length) {
+    if (tok[k] !== 'chains' || tok[k + 2] !== 'devices') return null;
+    const c = Number(tok[k + 1]);
+    const j = Number(tok[k + 3]);
+    if (!isWholeIndex(c) || !isWholeIndex(j)) return null;
+    steps.push(i, c);
+    i = j;
+    k += 4;
+  }
+  return { t: t, path: steps, i: i };
+}
+
+/**
+ * The fast path. Unverified on two counts: that the constructor resolves an
+ * `id N` where `goto` doesn't, and that `unquotedpath` (or `path`, quoted)
+ * reads back the canonical path. The id read back must match, and the parsed
+ * position is re-read by path, so a wrong guess falls through to the walk.
+ */
+function resolveProbeById(liveId: number): ProbeHit | null {
+  let a: LiveAPI;
+  try {
+    a = new LiveAPI(null, 'id ' + liveId);
+  } catch (e) {
+    return null;
+  }
+  if (!exists(a) || Number(a.id) !== liveId) return null;
+  const raw = (a as unknown as { unquotedpath?: unknown }).unquotedpath;
+  const path = typeof raw === 'string' && raw !== '' ? raw : String(a.path || '');
+  const name = gstr(a, 'name');
+  const parsed = parseDevicePath(path);
+  if (parsed === 'master') return { target: null, name: name, why: 'it is on Master', how: 'id' };
+  if (parsed === 'return') {
+    return { target: null, name: name, why: 'it is on a return track', how: 'id' };
+  }
+  if (parsed === null) return null;
+  const check = at(runPathOf(parsed.t, parsed.path) + ' devices ' + parsed.i);
+  if (!exists(check) || Number(check.id) !== liveId) return null;
+  return { target: parsed, name: name, why: '', how: 'id' };
+}
+
+/** Depth-first through one run and its racks' chains, for any wanted id. */
+function walkRun(
+  runPath: string,
+  steps: number[],
+  depth: number,
+  want: { [liveId: string]: boolean },
+  found: { [liveId: string]: { path: number[]; i: number; runPath: string } },
+  left: { n: number },
+): void {
+  const ids = gids(at(runPath), 'devices');
+  for (let i = 0; i < ids.length && left.n > 0; i++) {
+    const id = String(ids[i]);
+    if (want[id] && !found[id]) {
+      found[id] = { path: steps, i: i, runPath: runPath };
+      left.n--;
+    }
+  }
+  if (depth >= PROBE_WALK_DEPTH) return;
+  for (let i = 0; i < ids.length && left.n > 0; i++) {
+    const devicePath = runPath + ' devices ' + i;
+    if (!gbool(at(devicePath), 'can_have_chains')) continue;
+    let chains = 0;
+    try {
+      chains = at(devicePath).getcount('chains');
+    } catch (e) {
+      continue;
+    }
+    for (let c = 0; c < chains && left.n > 0; c++) {
+      walkRun(devicePath + ' chains ' + c, steps.concat([i, c]), depth + 1, want, found, left);
+    }
+  }
+}
+
+/**
+ * The fallback: one walk for every probe the fast path missed. Master and the
+ * returns are walked too, only so a probe there is reported as such rather
+ * than as missing.
+ */
+function resolveProbesByWalk(liveIds: number[]): { [liveId: string]: ProbeHit } {
+  const want: { [liveId: string]: boolean } = {};
+  for (let i = 0; i < liveIds.length; i++) want[String(liveIds[i])] = true;
+  const left = { n: liveIds.length };
+  const out: { [liveId: string]: ProbeHit } = {};
+
+  const tracks = at('live_set').getcount('tracks');
+  for (let t = 0; t < tracks && left.n > 0; t++) {
+    const found: { [liveId: string]: { path: number[]; i: number; runPath: string } } = {};
+    walkRun('live_set tracks ' + t, [], 0, want, found, left);
+    for (const id in found) {
+      const hit = found[id];
+      out[id] = {
+        target: { t: t, path: hit.path, i: hit.i },
+        name: gstr(at(hit.runPath + ' devices ' + hit.i), 'name'),
+        why: '',
+        how: 'walk',
+      };
+    }
+  }
+
+  const elsewhere: Array<{ path: string; why: string }> = [
+    { path: 'live_set master_track', why: 'it is on Master' },
+  ];
+  if (left.n > 0) {
+    const returns = at('live_set').getcount('return_tracks');
+    for (let r = 0; r < returns; r++) {
+      elsewhere.push({ path: 'live_set return_tracks ' + r, why: 'it is on a return track' });
+    }
+  }
+  for (let k = 0; k < elsewhere.length && left.n > 0; k++) {
+    const found: { [liveId: string]: { path: number[]; i: number; runPath: string } } = {};
+    walkRun(elsewhere[k].path, [], 0, want, found, left);
+    for (const id in found) {
+      const hit = found[id];
+      out[id] = {
+        target: null,
+        name: gstr(at(hit.runPath + ' devices ' + hit.i), 'name'),
+        why: elsewhere[k].why,
+        how: 'walk',
+      };
+    }
+  }
+  return out;
+}
+
+function resolveProbes(): ProbeHit[] {
+  const hits: Array<ProbeHit | null> = [];
+  const missed: number[] = [];
+  for (let i = 0; i < probeWatches.length; i++) {
+    let hit: ProbeHit | null = null;
+    try {
+      hit = resolveProbeById(probeWatches[i].liveId);
+    } catch (e) {
+      hit = null;
+    }
+    hits.push(hit);
+    if (!hit) missed.push(probeWatches[i].liveId);
+  }
+  const walked = missed.length ? resolveProbesByWalk(missed) : {};
+  const out: ProbeHit[] = [];
+  for (let i = 0; i < probeWatches.length; i++) {
+    const liveId = probeWatches[i].liveId;
+    const hit = hits[i] || walked[String(liveId)] || {
+      target: null,
+      name: '',
+      why: 'id ' + liveId + ' did not resolve',
+      how: '',
+    };
+    out.push(hit);
+    const how = hit.target ? 'resolved by ' + hit.how : 'unresolved — ' + hit.why;
+    if (probeHowPosted[String(liveId)] !== how) {
+      probeHowPosted[String(liveId)] = how;
+      post('openflow probe ' + probeWatches[i].key + ' (id ' + liveId + '): ' + how + '\n');
+    }
+  }
+  return out;
+}
+
+function sendProbeTargets(hits: ProbeHit[]): void {
+  const entries: unknown[] = [];
+  for (let i = 0; i < probeWatches.length; i++) {
+    entries.push({
+      key: probeWatches[i].key,
+      liveId: probeWatches[i].liveId,
+      target: hits[i].target,
+      name: hits[i].name,
+    });
+  }
+  const key = JSON.stringify(entries);
+  if (key === lastProbeKey) return;
+  lastProbeKey = key;
+  outlet(0, 'probe_targets', encodeMaxAtom(entries));
+}
+
+function onProbeChange(): void {
+  if (!probeWatching || probeAttaching) return;
+  probeTask.cancel();
+  probeTask.schedule(CHAIN_DEBOUNCE_MS);
+}
+
+/** Every run along each resolved probe's path, and the probe itself. */
+function probeObserverPaths(hits: ProbeHit[]): Array<[string, string]> {
+  const seen: { [k: string]: boolean } = {};
+  const out: Array<[string, string]> = [];
+  function add(path: string, property: string): void {
+    const k = path + '|' + property;
+    if (seen[k]) return;
+    seen[k] = true;
+    out.push([path, property]);
+  }
+  for (let i = 0; i < hits.length; i++) {
+    const target = hits[i].target;
+    if (!target) continue;
+    for (let k = 0; k <= target.path.length; k += 2) {
+      add(runPathOf(target.t, target.path.slice(0, k)), 'devices');
+    }
+    add(runPathOf(target.t, target.path) + ' devices ' + target.i, 'name');
+  }
+  return out;
+}
+
+function rebuildProbeObservers(hits: ProbeHit[]): void {
+  const paths = probeObserverPaths(hits);
+  const shape = JSON.stringify(paths);
+  if (shape === lastProbeShape && probeObservers.length > 0) return;
+  lastProbeShape = shape;
+  probeAttaching = true;
+  try {
+    clearProbeObservers();
+    for (let i = 0; i < paths.length && probeObservers.length < PROBE_OBSERVER_MAX; i++) {
+      // Pooled before `property` is assigned, as `watch_selection` does, so an
+      // attach that throws still leaves the observer somewhere to detach from.
+      const a = new LiveAPI(onProbeChange, paths[i][0]);
+      if (!exists(a)) continue;
+      probeObservers.push(a);
+      a.property = paths[i][1];
+    }
+  } finally {
+    probeAttaching = false;
+  }
+}
+
+function clearProbeObservers(): void {
+  const was = probeAttaching;
+  probeAttaching = true;
+  for (let i = 0; i < probeObservers.length; i++) {
+    try {
+      probeObservers[i].property = '';
+    } catch (e) {
+      /* object may already be gone */
+    }
+  }
+  probeObservers = [];
+  probeAttaching = was;
+  auditObservers('probes cleared');
+}
+
+function refreshProbes(): void {
+  if (!probeWatching) return;
+  try {
+    const hits = resolveProbes();
+    rebuildProbeObservers(hits);
+    sendProbeTargets(hits);
+  } catch (e) {
+    fail(-1, e);
+  }
+}
+
+var probeTask = new Task(refreshProbes);
+
+/** The whole list each time; `[]` stops it. */
+function watch_probes(encoded: unknown): void {
+  if (!deviceReady) {
+    // The bridge re-sends on LOM ready, so dropping this loses nothing.
+    post('openflow watch_probes: device not ready, ignored\n');
+    return;
+  }
+  const decoded = decodeMaxAtom(encoded);
+  const list: Array<{ key: string; liveId: number }> = [];
+  if (Array.isArray(decoded)) {
+    for (let i = 0; i < decoded.length; i++) {
+      const e = decoded[i] as { key?: unknown; liveId?: unknown } | null;
+      if (e && typeof e.key === 'string' && isWholeIndex(e.liveId) && e.liveId > 0) {
+        list.push({ key: e.key, liveId: e.liveId });
+      }
+    }
+  }
+  probeWatches = list;
+  probeWatching = list.length > 0;
+  probeTask.cancel();
+  // Sent once per `watch_probes` whatever it says, so the bridge always hears.
+  lastProbeKey = '';
+  lastProbeShape = '';
+  if (!probeWatching) {
+    clearProbeObservers();
+    outlet(0, 'probe_targets', encodeMaxAtom([]));
+    return;
+  }
+  refreshProbes();
+}
+
 // --- folding ----------------------------------------------------------
 // Hide or reveal a group track's members, in Live itself.
 //
@@ -5331,6 +5972,7 @@ function observerCensus(): PoolCensus[] {
     },
     { name: 'transport', count: transportObservers.length, wanted: null, peak: 0 },
     { name: 'chains', count: chainObservers.length, wanted: chainWatching, peak: 0 },
+    { name: 'probes', count: probeObservers.length, wanted: probeWatching, peak: 0 },
     { name: 'selection', count: selObservers.length, wanted: null, peak: 0 },
     { name: 'diag', count: diagObservers.length, wanted: null, peak: 0 },
     { name: 'diagAttached', count: diagAttached.length, wanted: null, peak: 0 },
@@ -5725,6 +6367,9 @@ function notifydeleted(): void {
   paramTask.cancel();
   paramPending = false;
   paramDirty = {};
+  clearProbeObservers();
+  probeWatching = false;
+  probeTask.cancel();
   clearDiagObservers();
   diagDetach();
   diagScrollTask.cancel();

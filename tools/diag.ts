@@ -23,7 +23,8 @@
 //   npm run dev:diag -- labelspaces    write two-word labels, spaced and non-breaking
 //   npm run dev:diag -- bank           redefine the live.banks page, after a write
 
-import type { Request } from '@openflow/protocol/index.ts';
+// The global namespace rather than `@openflow/protocol/index.ts`; see check-palette.ts.
+type Request = OpenFlow.Request;
 
 const WHAT = new Set([
   'ids',
