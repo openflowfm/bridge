@@ -6,11 +6,7 @@
 // Nothing in the built UI calls this path.
 
 import { LIVE_PALETTE } from '@openflow/core/livePalette.ts';
-// The global namespace rather than `@openflow/protocol/index.ts`: the package now
-// resolves that to a compiled `dist/`, which a git dependency doesn't build.
-type Event = OpenFlow.Event;
-type EventOf<K extends OpenFlow.EventType> = OpenFlow.EventOf<K>;
-type Request = OpenFlow.Request;
+import type { Event, EventOf, Request } from '@openflow/protocol/index.ts';
 
 const url = process.env.OPENFLOW_WS || 'ws://127.0.0.1:17800/ws';
 const ws = new WebSocket(url);
