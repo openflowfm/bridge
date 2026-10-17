@@ -31,11 +31,11 @@
   "dependencies": {
     "@openflow/core": "github:openflowfm/core#685db6fd1a8ba77bb8e575c66935a11fb56acce9",
     "@openflow/protocol": "github:openflowfm/protocol#952a16df6fc2e9b94ab2a417e9bd5837853d9707",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
-    "@types/ws": "^8.18.1",
+    "@types/ws": "^8.18.2",
     "concurrently": "^10.0.5",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
