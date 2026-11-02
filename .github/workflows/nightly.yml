@@ -51,7 +51,7 @@ jobs:
   # depth-1 checkout already carries the one commit it asks about. 25 hours
   # rather than 24 so that a schedule GitHub ran late does not skip a day.
   moved:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       build: ${{ steps.check.outputs.build }}
     steps:
@@ -77,7 +77,7 @@ jobs:
   device:
     needs: moved
     if: needs.moved.outputs.build == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       # The commit, on the device face. Without it every nightly for months
       # reads `open[flow] 0.1.0-dev` and there is no way to tell from inside
@@ -118,7 +118,7 @@ jobs:
 
   publish:
     needs: device
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 

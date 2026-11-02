@@ -24,7 +24,7 @@ jobs:
   # Its own job rather than a step, so it fails in fifteen seconds. `npm version
   # <tag> --no-git-tag-version` is the thing that keeps you from ever seeing it.
   guard:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -47,7 +47,7 @@ jobs:
   # nothing ever ran.
   device:
     needs: guard
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -80,7 +80,7 @@ jobs:
 
   publish:
     needs: device
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
